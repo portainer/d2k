@@ -46,13 +46,13 @@ jobs:
 
       - name: "[execution] build and push linux/${{ matrix.goarch }}"
         run: |
-          docker build \
+          docker buildx build \
+            --push \
             --build-arg GOOS=linux \
             --build-arg GOARCH=${{ matrix.goarch }} \
             --build-arg VERSION=${{ github.sha }} \
             -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.value }}-linux-${{ matrix.goarch }} \
             .
-          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.value }}-linux-${{ matrix.goarch }}
 
   manifest:
     runs-on: ubuntu-latest
