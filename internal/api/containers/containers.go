@@ -108,6 +108,7 @@ type item struct {
 			State:   c.State,
 			Created: c.Created,
 			Labels:  c.Labels,
+			IPAddress: c.IPAddress,
 			Ports: func() []portBinding {
     		var out []portBinding
     		for _, p := range c.Ports {
