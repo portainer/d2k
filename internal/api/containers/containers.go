@@ -21,6 +21,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/pkg/httputils"
 )
@@ -48,6 +49,8 @@ func (h *Handler) DispatchAction(w http.ResponseWriter, r *http.Request) {
 		h.Restart(w, r)
 	case strings.HasSuffix(path, "/wait"):
 		h.Wait(w, r)
+	case strings.HasSuffix(path, "/attach"):
+		h.Attach(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -130,8 +133,7 @@ type createBody struct {
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
-		httputils.WriteError(w, http.StatusBadRequest, "name query parameter is required")
-		return
+		name = strings.ReplaceAll(namesgenerator.GetRandomName(0), "_", "-")
 	}
 
 	var body createBody
@@ -285,4 +287,15 @@ func containerName(path, suffix string) string {
 	s := strings.TrimPrefix(path, "/containers/")
 	s = strings.TrimSuffix(s, suffix)
 	return s
+}
+
+// Attach handles POST /containers/{id}/attach.
+// d2k does not support interactive attachment — containers run as Kubernetes
+// Deployments with no direct stdin/stdout stream. We return 101 Switching
+// Protocols with an immediate close to satisfy the Docker CLI handshake,
+// which causes it to detach cleanly rather than hanging.
+func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
+	w.Header().Set("Connection", "close")
+	w.WriteHeader(http.StatusSwitchingProtocols)
 }
