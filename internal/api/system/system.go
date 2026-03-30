@@ -68,5 +68,10 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 			"d2k.portainer.io/translator=true",
 			"d2k.portainer.io/namespace=" + h.namespace,
 		},
+		"Plugins": map[string]any{
+    	"Volume":  []string{},
+   		"Network": []string{"bridge", "host", "null"},
+    	"Log":     []string{},
+},
 	})
 }
