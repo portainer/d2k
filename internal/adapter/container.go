@@ -184,8 +184,8 @@ func (a *KubernetesDockerAdapter) buildDeployment(opts RunOptions, kind portmapp
 	}
 	annotations := map[string]string{
 		types.AnnotationPortMappings: portAnnotation,
+		types.AnnotationImageRef:     opts.Image,
 	}
-	labels[types.LabelImageRef] = opts.Image
 
 	serviceTypeLabel := types.ServiceTypeNone
 	switch kind {
@@ -361,7 +361,7 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 	return ContainerSummary{
 		ID:      string(d.UID),
 		Names:   []string{"/" + d.Name},
-		Image:   d.Labels[types.LabelImageRef],
+		Image:   d.Annotations[types.AnnotationImageRef],
 		Status:  status,
 		State:   state,
 		Created: d.CreationTimestamp.Unix(),
@@ -406,13 +406,13 @@ func deploymentToContainerJSON(d appsv1.Deployment) dockertypes.ContainerJSON {
 		ContainerJSONBase: &dockertypes.ContainerJSONBase{
 			ID:         string(d.UID),
 			Name:       "/" + d.Name,
-			Image:      d.Labels[types.LabelImageRef],
+			Image:      d.Annotations[types.AnnotationImageRef],
 			Created:    d.CreationTimestamp.Time.Format(time.RFC3339),
 			State:      state,
 			HostConfig: hostConfig,
 		},
 		Config: &container.Config{
-			Image: d.Labels[types.LabelImageRef],
+			Image: d.Annotations[types.AnnotationImageRef],
 		},
 		NetworkSettings: &dockertypes.NetworkSettings{},
 	}
