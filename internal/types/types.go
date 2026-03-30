@@ -29,7 +29,7 @@ const (
 	AnnotationPortMappings = LabelPrefix + "/port-mappings"
 
 	// LabelImageRef stores the original image reference as supplied by the Docker client.
-	LabelImageRef = LabelPrefix + "/image-ref"
+	AnnotationImageRef = LabelPrefix + "/image-ref"
 
 	// ServiceTypeLB is the value for LabelServiceType when a LoadBalancer Service was created.
 	ServiceTypeLB = "loadbalancer"
