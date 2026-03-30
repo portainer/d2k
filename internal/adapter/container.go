@@ -11,6 +11,7 @@ import (
 
 	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/go-connections/nat"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -465,7 +466,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
     		DefaultNetworkSettings: dockertypes.DefaultNetworkSettings{
         		IPAddress: lbIP,
     		},
-			Networks: map[string]*dockertypes.EndpointSettings{
+			Networks: map[string]*network.EndpointSettings{
     		"bridge": {
         		IPAddress: lbIP,
     		},
