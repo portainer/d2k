@@ -6,10 +6,8 @@ ARG GOARCH
 
 WORKDIR /build
 
-COPY go.mod go.sum ./
-RUN go mod download
-
 COPY . .
+RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=${GOOS} GOARCH=${GOARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o d2k ./cmd/d2k.go
 
 FROM scratch
