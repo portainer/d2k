@@ -166,8 +166,18 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 		return nil, fmt.Errorf("unable to get deployment %q: %w", resolved, err)
 	}
 
-	json := deploymentToContainerJSON(*d)
-	return &json, nil
+	// Look up the Service to get the LoadBalancer external IP, if one exists.
+	lbIP := ""
+	svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
+		lbIP = svc.Status.LoadBalancer.Ingress[0].IP
+		if lbIP == "" {
+			lbIP = svc.Status.LoadBalancer.Ingress[0].Hostname
+		}
+	}
+
+	result := deploymentToContainerJSON(*d, lbIP)
+	return &result, nil
 }
 
 // --- builders ---
@@ -403,7 +413,7 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 	}
 }
 
-func deploymentToContainerJSON(d appsv1.Deployment) dockertypes.ContainerJSON {
+func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.ContainerJSON {
 	running := d.Status.ReadyReplicas > 0
 
 	state := &dockertypes.ContainerState{
@@ -448,7 +458,14 @@ func deploymentToContainerJSON(d appsv1.Deployment) dockertypes.ContainerJSON {
 		Config: &container.Config{
 			Image: d.Annotations[types.AnnotationImageRef],
 		},
-		NetworkSettings: &dockertypes.NetworkSettings{},
+		NetworkSettings: &dockertypes.NetworkSettings{
+    		NetworkSettingsBase: dockertypes.NetworkSettingsBase{
+        		Ports: nat.PortMap(portMap),
+    		},
+    		DefaultNetworkSettings: dockertypes.DefaultNetworkSettings{
+        		IPAddress: lbIP,
+    		},
+		},
 	}
 }
 
