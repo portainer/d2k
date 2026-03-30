@@ -87,7 +87,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	}
 
 	// Create the Service if needed.
-	if kind != portmapper.NoService {
+	if kind != portmapper.NoService && len(mappings) > 0 {
 		svc, svcErr := a.buildService(opts.Name, kind, mappings)
 		if svcErr != nil {
 			return "", nil, fmt.Errorf("unable to build service: %w", svcErr)
