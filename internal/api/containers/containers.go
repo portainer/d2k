@@ -133,7 +133,7 @@ type createBody struct {
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
-		name = namesgenerator.GetRandomName(0)
+		name = strings.ReplaceAll(namesgenerator.GetRandomName(0), "_", "-")
 	}
 
 	var body createBody
