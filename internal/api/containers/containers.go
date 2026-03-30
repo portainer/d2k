@@ -86,16 +86,17 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		PublicPort  uint16 `json:"PublicPort"`
 		Type        string `json:"Type"`
 	}
-	type item struct {
-		ID      string            `json:"Id"`
-		Names   []string          `json:"Names"`
-		Image   string            `json:"Image"`
-		Status  string            `json:"Status"`
-		State   string            `json:"State"`
-		Created int64             `json:"Created"`
-		Ports   []portBinding     `json:"Ports"`
-		Labels  map[string]string `json:"Labels"`
-	}
+type item struct {
+    ID        string            `json:"Id"`
+    Names     []string          `json:"Names"`
+    Image     string            `json:"Image"`
+    Status    string            `json:"Status"`
+    State     string            `json:"State"`
+    Created   int64             `json:"Created"`
+    Ports     []portBinding     `json:"Ports"`
+    Labels    map[string]string `json:"Labels"`
+    IPAddress string            `json:"IPAddress"`  // ← add this
+}
 
 	result := make([]item, 0, len(ctrs))
 	for _, c := range ctrs {
