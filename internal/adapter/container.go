@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"strconv"
 	"time"
 
 	dockertypes "github.com/docker/docker/api/types"
@@ -358,6 +359,28 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 		}
 	}
 
+	// Reconstruct ports from the annotation for the container list response.
+	var ports []dockertypes.Port
+	rawPorts := d.Annotations[types.AnnotationPortMappings]
+	if rawPorts != "" {
+		var bindings []string
+		if err := json.Unmarshal([]byte(rawPorts), &bindings); err == nil {
+			for _, raw := range bindings {
+				parts := strings.SplitN(raw, ":", 2)
+				if len(parts) == 2 {
+					containerPort, _ := strconv.ParseUint(parts[1], 10, 16)
+					hostPort, _ := strconv.ParseUint(parts[0], 10, 16)
+					ports = append(ports, dockertypes.Port{
+						IP:          "0.0.0.0",
+						PrivatePort: uint16(containerPort),
+						PublicPort:  uint16(hostPort),
+						Type:        "tcp",
+					})
+				}
+			}
+		}
+	}
+
 	return ContainerSummary{
 		ID:      string(d.UID),
 		Names:   []string{"/" + d.Name},
@@ -366,6 +389,7 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 		State:   state,
 		Created: d.CreationTimestamp.Unix(),
 		Labels:  d.Labels,
+		Ports:   ports,
 	}
 }
 
