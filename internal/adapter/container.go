@@ -469,6 +469,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 			Networks: map[string]*network.EndpointSettings{
     		"bridge": {
         		IPAddress: lbIP,
+				NetworkID: "bridge",
     		},
 		},
 		},
