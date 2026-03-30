@@ -47,9 +47,11 @@ func (h *Handler) DispatchAction(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/restart"):
 		h.Restart(w, r)
 	case strings.HasSuffix(path, "/wait"):
-		h.Wait(w, r)
+    	h.Wait(w, r)
+	case strings.HasSuffix(path, "/attach"):
+    	h.Attach(w, r)
 	default:
-		http.NotFound(w, r)
+    http.NotFound(w, r)
 	}
 }
 
@@ -285,4 +287,26 @@ func containerName(path, suffix string) string {
 	s := strings.TrimPrefix(path, "/containers/")
 	s = strings.TrimSuffix(s, suffix)
 	return s
+}
+// Attach handles POST /containers/{id}/attach.
+// d2k does not support interactive attachment — containers run as Kubernetes
+// Deployments with no direct stdin/stdout stream. We return 101 Switching
+// Protocols with an immediate close to satisfy the Docker CLI handshake,
+// which causes it to detach cleanly rather than hanging.
+func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
+	w.Header().Set("Connection", "close")
+	w.WriteHeader(http.StatusSwitchingProtocols)
+}
+
+// generateContainerName produces a random name for containers created without --name,
+// matching the two-word Docker naming convention (e.g. "happy_lovelace").
+func generateContainerName() string {
+	adjectives := []string{"happy", "brave", "clever", "eager", "fancy", "gentle", "jolly", "kind", "lively", "merry"}
+	names := []string{"lovelace", "turing", "hopper", "knuth", "dijkstra", "tesla", "curie", "darwin", "euler", "gauss"}
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	adj := adjectives[int(b[0])%len(adjectives)]
+	name := names[int(b[1])%len(names)]
+	return fmt.Sprintf("%s_%s", adj, name)
 }
