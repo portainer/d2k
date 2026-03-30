@@ -119,7 +119,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
     }
     return out
 }(),
-		})
+		}),
 	}
 	httputils.WriteJSON(w, http.StatusOK, result)
 }
