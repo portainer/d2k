@@ -107,7 +107,18 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			State:   c.State,
 			Created: c.Created,
 			Labels:  c.Labels,
-			Ports:   []portBinding{},
+			Ports: func() []portBinding {
+    		var out []portBinding
+    		for _, p := range c.Ports {
+        	out = append(out, portBinding{
+            	IP:          p.IP,
+            	PrivatePort: p.PrivatePort,
+            	PublicPort:  p.PublicPort,
+            	Type:        p.Type,
+        })
+    }
+    return out
+}(),,
 		})
 	}
 	httputils.WriteJSON(w, http.StatusOK, result)
