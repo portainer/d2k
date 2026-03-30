@@ -47,6 +47,7 @@ jobs:
         run: |
           docker buildx build \
             --push \
+            --platform linux/${{ matrix.goarch }} \
             --build-arg GOOS=linux \
             --build-arg GOARCH=${{ matrix.goarch }} \
             --build-arg VERSION=${{ github.sha }} \
