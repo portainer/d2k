@@ -329,18 +329,28 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 	if err != nil {
 		return err
 	}
-	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
-	if err != nil {
-		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+
+	// Retry on conflict — Kubernetes uses optimistic concurrency and will reject
+	// an Update if the resource has been modified since our Get. The Deployment
+	// controller modifies status fields frequently, so conflicts are common here.
+	for attempt := 0; attempt < 5; attempt++ {
+		d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+		if err != nil {
+			return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+		}
+
+		d.Spec.Replicas = &replicas
+		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, d, metav1.UpdateOptions{})
+		if err == nil {
+			return nil
+		}
+		if !errors.IsConflict(err) {
+			return fmt.Errorf("unable to scale deployment %q to %d: %w", name, replicas, err)
+		}
+		// Conflict — resource was modified between Get and Update, retry.
 	}
 
-	d.Spec.Replicas = &replicas
-	_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, d, metav1.UpdateOptions{})
-	if err != nil {
-		return fmt.Errorf("unable to scale deployment %q to %d: %w", name, replicas, err)
-	}
-
-	return nil
+	return fmt.Errorf("unable to scale deployment %q to %d: too many conflicts", name, replicas)
 }
 
 // --- converters ---
