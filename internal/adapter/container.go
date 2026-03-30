@@ -48,14 +48,15 @@ type RunOptions struct {
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
 type ContainerSummary struct {
-	ID      string
-	Names   []string
-	Image   string
-	Status  string
-	State   string
-	Created int64
-	Ports   []dockertypes.Port
-	Labels  map[string]string
+    ID        string
+    Names     []string
+    Image     string
+    Status    string
+    State     string
+    Created   int64
+    Ports     []dockertypes.Port
+    Labels    map[string]string
+    IPAddress string  // ← add this
 }
 
 // CreateContainer implements docker run: creates a Deployment and, where
@@ -108,21 +109,32 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 // When all is false, only Deployments with at least one ready replica are returned (running containers).
 // When all is true, all d2k-managed Deployments are returned.
 func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) ([]ContainerSummary, error) {
-	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
-	if err != nil {
-		return nil, fmt.Errorf("unable to list deployments: %w", err)
-	}
+    deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
+    if err != nil {
+        return nil, fmt.Errorf("unable to list deployments: %w", err)
+    }
 
-	var summaries []ContainerSummary
+    var summaries []ContainerSummary
 
-	for _, d := range deployments.Items {
-		if !all && d.Status.ReadyReplicas == 0 {
-			continue
-		}
-		summaries = append(summaries, deploymentToSummary(d))
-	}
+    for _, d := range deployments.Items {
+        if !all && d.Status.ReadyReplicas == 0 {
+            continue
+        }
+        summary := deploymentToSummary(d)
 
-	return summaries, nil
+        // Look up the Service to get the LoadBalancer IP.
+        svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, d.Name, metav1GetOptions())
+        if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
+            summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].IP
+            if summary.IPAddress == "" {
+                summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].Hostname
+            }
+        }
+
+        summaries = append(summaries, summary)
+    }
+
+    return summaries, nil
 }
 
 // StopContainer implements docker stop: scales the Deployment to 0 replicas.
