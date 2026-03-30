@@ -21,6 +21,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/pkg/httputils"
 )
@@ -47,11 +48,11 @@ func (h *Handler) DispatchAction(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/restart"):
 		h.Restart(w, r)
 	case strings.HasSuffix(path, "/wait"):
-    	h.Wait(w, r)
+		h.Wait(w, r)
 	case strings.HasSuffix(path, "/attach"):
-    	h.Attach(w, r)
+		h.Attach(w, r)
 	default:
-    http.NotFound(w, r)
+		http.NotFound(w, r)
 	}
 }
 
@@ -132,8 +133,7 @@ type createBody struct {
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
-		httputils.WriteError(w, http.StatusBadRequest, "name query parameter is required")
-		return
+		name = namesgenerator.GetRandomName(0)
 	}
 
 	var body createBody
@@ -288,6 +288,7 @@ func containerName(path, suffix string) string {
 	s = strings.TrimSuffix(s, suffix)
 	return s
 }
+
 // Attach handles POST /containers/{id}/attach.
 // d2k does not support interactive attachment — containers run as Kubernetes
 // Deployments with no direct stdin/stdout stream. We return 101 Switching
@@ -297,16 +298,4 @@ func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
 	w.Header().Set("Connection", "close")
 	w.WriteHeader(http.StatusSwitchingProtocols)
-}
-
-// generateContainerName produces a random name for containers created without --name,
-// matching the two-word Docker naming convention (e.g. "happy_lovelace").
-func generateContainerName() string {
-	adjectives := []string{"happy", "brave", "clever", "eager", "fancy", "gentle", "jolly", "kind", "lively", "merry"}
-	names := []string{"lovelace", "turing", "hopper", "knuth", "dijkstra", "tesla", "curie", "darwin", "euler", "gauss"}
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	adj := adjectives[int(b[0])%len(adjectives)]
-	name := names[int(b[1])%len(names)]
-	return fmt.Sprintf("%s_%s", adj, name)
 }
