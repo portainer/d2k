@@ -39,8 +39,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: "[preparation] go mod tidy"
-        run: go mod tidy
+      - name: "[preparation] verify go mod tidy"
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum > /dev/null 2>&1; then
+            echo "::warning::go.mod or go.sum is out of date — please run 'go mod tidy' locally and commit the changes"
+          fi
 
       - name: "[preparation] set up QEMU"
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0

@@ -5,6 +5,9 @@ go 1.26
 require (
 	github.com/docker/docker v27.3.1+incompatible
 	github.com/docker/go-connections v0.4.0
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
+	github.com/moby/spdystream v0.5.0
+	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f
 	github.com/sethvargo/go-envconfig v0.9.0
 	go.uber.org/zap v1.26.0
 	k8s.io/api v0.31.2
