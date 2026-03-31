@@ -155,7 +155,7 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 	switch nameOrID {
 	case "bridge", "host", "none":
 		return fmt.Errorf("network %q is a pre-defined network and cannot be removed", nameOrID)
-	}
+	},
 
 	// All other networks are synthetic — nothing to delete in Kubernetes.
 	return nil
