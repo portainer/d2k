@@ -10,6 +10,9 @@ require (
 	k8s.io/api v0.31.2
 	k8s.io/apimachinery v0.31.2
 	k8s.io/client-go v0.31.2
+	github.com/gorilla/websocket v1.5.3
+	github.com/moby/spdystream v0.4.0
+	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f
 )
 
 require (
