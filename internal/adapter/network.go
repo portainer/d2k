@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -133,13 +134,20 @@ func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID s
 	}
 
 	// Unknown network names are treated as aliases for the namespace network.
-	return &NetworkSummary{
-		ID:     networkIDForName(nameOrID, a.namespace),
-		Name:   nameOrID,
-		Driver: syntheticNetworkDriver,
-		Scope:  "local",
-	}, nil
-}
+// Synthesise Compose labels if the name matches <project>_<network> pattern.
+		syntheticLabels := map[string]string{}
+		if idx := strings.LastIndex(nameOrID, "_"); idx != -1 {
+			syntheticLabels["com.docker.compose.network"] = nameOrID[idx+1:]
+			syntheticLabels["com.docker.compose.project"] = nameOrID[:idx]
+		}
+
+		return &NetworkSummary{
+			ID:     networkIDForName(nameOrID, a.namespace),
+			Name:   nameOrID,
+			Driver: syntheticNetworkDriver,
+			Scope:  "local",
+			Labels: syntheticLabels,
+		}, nil
 
 // RemoveNetwork is a no-op for d2k-managed networks since they are synthetic.
 // Built-in networks (bridge, host, none) return an error matching Docker behaviour.
