@@ -8,6 +8,11 @@ on:
     types: [opened, reopened, synchronize]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
 env:
   REGISTRY: portainerci
   IMAGE_NAME: d2k
@@ -40,10 +45,17 @@ jobs:
           go-version-file: go.mod
 
       - name: "[preparation] verify go mod tidy"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           go mod tidy
           if ! git diff --exit-code go.mod go.sum > /dev/null 2>&1; then
             echo "::warning::go.mod or go.sum is out of date — please run 'go mod tidy' locally and commit the changes"
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              gh pr comment ${{ github.event.pull_request.number }} \
+                --repo ${{ github.repository }} \
+                --body $'> [!WARNING]\n> `go.mod` or `go.sum` is out of date. Please run `go mod tidy` locally and commit the changes.'
+            fi
           fi
 
       - name: "[preparation] set up QEMU"
@@ -59,10 +71,11 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: "[execution] build and push multi-arch image"
-        run: |
-          docker buildx build \
-            --push \
-            --platform linux/amd64,linux/arm64 \
-            --build-arg VERSION=${{ github.sha }} \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.value }} \
-            .
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ github.sha }}
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.value }}
+          sbom: true
+          provenance: mode=max
