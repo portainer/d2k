@@ -323,50 +323,56 @@ func containerName(path, suffix string) string {
 
 // Stats handles GET /containers/{id}/stats.
 func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	name := containerName(r.URL.Path, "/stats")
+
+	resolved, err := h.adapter.ResolveContainerName(r.Context(), name)
+	if err != nil {
+		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	metrics, err := h.adapter.GetPodMetrics(r.Context(), resolved)
+	if err != nil {
+		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	stats := map[string]any{
-		"read":     now,
-		"preread":  now,
-		"num_procs": 0,
+		"read":    now,
+		"preread": now,
 		"cpu_stats": map[string]any{
 			"cpu_usage": map[string]any{
-				"total_usage":        0,
-				"percpu_usage":       []int{},
-				"usage_in_kernelmode": 0,
-				"usage_in_usermode":  0,
+				"total_usage":         metrics.CPUUsageNanoCores,
+				"usage_in_kernelmode": int64(0),
+				"usage_in_usermode":   metrics.CPUUsageNanoCores,
 			},
-			"system_cpu_usage": 0,
-			"num_cpus":         0,
+			"system_cpu_usage": int64(0),
+			"num_cpus":         1,
 			"throttling_data": map[string]any{
-				"throttled_periods":  0,
-				"throttled_time":     0,
-				"throttled_periods_total": 0,
+				"throttled_periods": 0,
+				"throttled_time":    0,
 			},
 		},
 		"precpu_stats": map[string]any{
 			"cpu_usage": map[string]any{
-				"total_usage":        0,
-				"percpu_usage":       []int{},
-				"usage_in_kernelmode": 0,
-				"usage_in_usermode":  0,
+				"total_usage":         int64(0),
+				"usage_in_kernelmode": int64(0),
+				"usage_in_usermode":   int64(0),
 			},
-			"system_cpu_usage": 0,
+			"system_cpu_usage": int64(0),
 			"throttling_data": map[string]any{
-				"throttled_periods":  0,
-				"throttled_time":     0,
-				"throttled_periods_total": 0,
+				"throttled_periods": 0,
+				"throttled_time":    0,
 			},
 		},
 		"memory_stats": map[string]any{
-			"usage":    0,
-			"maxusage": 0,
-			"limit":    0,
+			"usage":    metrics.MemoryUsageBytes,
+			"maxusage": metrics.MemoryUsageBytes,
+			"limit":    int64(1<<63 - 1),
 			"stats":    map[string]any{},
 		},
-		"networks": map[string]any{},
+		"networks":    map[string]any{},
 		"blkio_stats": map[string]any{
 			"io_service_bytes_recursive": []any{},
 			"io_serviced_recursive":      []any{},
@@ -376,15 +382,12 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, mustJSON(stats))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
-}
-
-func mustJSON(v any) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }
 
 // Attach handles POST /containers/{id}/attach.
