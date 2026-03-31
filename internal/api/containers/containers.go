@@ -15,7 +15,6 @@ package containers
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
