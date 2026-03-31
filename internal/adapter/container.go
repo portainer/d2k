@@ -440,7 +440,11 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 		state.StartedAt = startedAt
 	}
 
-	hostConfig := &container.HostConfig{}
+	hostConfig := &container.HostConfig{
+    LogConfig: container.LogConfig{
+        Type: "json-file",
+    },
+}
 
 	// Reconstruct port bindings from annotations for the inspect response.
 	portMap := nat.PortMap{}
