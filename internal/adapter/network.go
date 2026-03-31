@@ -74,6 +74,10 @@ summary := &NetworkSummary{
     Labels: labels,
 }
 
+	a.networksMu.Lock()
+	a.networks[opts.Name] = summary
+	a.networksMu.Unlock()
+
 	return summary, warnings, nil
 }
 
@@ -118,6 +122,14 @@ func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID s
 		if n.Name == nameOrID || n.ID == nameOrID {
 			return &n, nil
 		}
+	}
+
+	// Unknown network names are treated as aliases for the namespace network.
+	a.networksMu.RLock()
+	n, ok := a.networks[nameOrID]
+	a.networksMu.RUnlock()
+	if ok {
+		return n, nil
 	}
 
 	// Unknown network names are treated as aliases for the namespace network.
