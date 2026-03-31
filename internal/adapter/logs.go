@@ -21,7 +21,12 @@ type LogOptions struct {
 // GetContainerLogs resolves the Deployment to its current Pod and streams logs.
 // The returned ReadCloser must be closed by the caller.
 func (a *KubernetesDockerAdapter) GetContainerLogs(ctx context.Context, name string, opts LogOptions) (io.ReadCloser, error) {
-	pod, err := a.currentPodForDeployment(ctx, name)
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	pod, err := a.currentPodForDeployment(ctx, resolved)
 	if err != nil {
 		return nil, err
 	}
