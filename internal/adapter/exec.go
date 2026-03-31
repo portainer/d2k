@@ -7,7 +7,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/remotecommand"
-	"k8s.io/client-go/scheme"
+	"k8s.io/client-go/kubernetes/scheme"
 )
 
 // ExecOptions mirrors the subset of docker exec flags d2k supports.
