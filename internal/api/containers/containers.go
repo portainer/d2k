@@ -63,6 +63,8 @@ func (h *Handler) DispatchGet(w http.ResponseWriter, r *http.Request) {
 		h.Inspect(w, r)
 	case strings.HasSuffix(path, "/logs"):
 		h.Logs(w, r)
+	case strings.HasSuffix(path, "/stats"):
+		h.Stats(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -315,6 +317,72 @@ func containerName(path, suffix string) string {
 	s := strings.TrimPrefix(path, "/containers/")
 	s = strings.TrimSuffix(s, suffix)
 	return s
+}
+
+// Stats handles GET /containers/{id}/stats.
+func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	stats := map[string]any{
+		"read":     now,
+		"preread":  now,
+		"num_procs": 0,
+		"cpu_stats": map[string]any{
+			"cpu_usage": map[string]any{
+				"total_usage":        0,
+				"percpu_usage":       []int{},
+				"usage_in_kernelmode": 0,
+				"usage_in_usermode":  0,
+			},
+			"system_cpu_usage": 0,
+			"num_cpus":         0,
+			"throttling_data": map[string]any{
+				"throttled_periods":  0,
+				"throttled_time":     0,
+				"throttled_periods_total": 0,
+			},
+		},
+		"precpu_stats": map[string]any{
+			"cpu_usage": map[string]any{
+				"total_usage":        0,
+				"percpu_usage":       []int{},
+				"usage_in_kernelmode": 0,
+				"usage_in_usermode":  0,
+			},
+			"system_cpu_usage": 0,
+			"throttling_data": map[string]any{
+				"throttled_periods":  0,
+				"throttled_time":     0,
+				"throttled_periods_total": 0,
+			},
+		},
+		"memory_stats": map[string]any{
+			"usage":    0,
+			"maxusage": 0,
+			"limit":    0,
+			"stats":    map[string]any{},
+		},
+		"networks": map[string]any{},
+		"blkio_stats": map[string]any{
+			"io_service_bytes_recursive": []any{},
+			"io_serviced_recursive":      []any{},
+		},
+		"pids_stats": map[string]any{
+			"current": 0,
+		},
+	}
+
+	fmt.Fprintln(w, mustJSON(stats))
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func mustJSON(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 // Attach handles POST /containers/{id}/attach.
