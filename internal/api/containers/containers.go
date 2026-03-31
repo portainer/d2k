@@ -283,14 +283,30 @@ func (h *Handler) Logs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer logs.Close()
 
-	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
 	if opts.Follow {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 	}
 
-	if _, err := io.Copy(w, logs); err != nil {
-		h.logger.Warnw("log stream interrupted", "name", name, "error", err)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := logs.Read(buf)
+		if n > 0 {
+			header := []byte{
+				1, // stdout
+				0, 0, 0,
+				byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n),
+			}
+			w.Write(header)
+			w.Write(buf[:n])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+		if err != nil {
+			break
+		}
 	}
 }
 
