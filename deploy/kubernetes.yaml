@@ -1,0 +1,147 @@
+# Namespace that d2k is deployed into. Change this to your target namespace.
+# If the namespace doesn't exist, d2k will create it on startup.
+# Note: d2k does not need to be in the same namespace as your workloads,
+# but it's simplest to manage if it is.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: d2k   # change to your target namespace
+---
+# ServiceAccount that d2k runs as. Scoped to a single namespace by the
+# RoleBinding below — d2k gets no cluster-wide permissions.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: d2k
+  namespace: d2k   # change to your target namespace
+  labels:
+    app: d2k
+
+---
+# Role grants d2k the minimum permissions it needs to manage workloads
+# within the target namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: d2k
+  namespace: d2k   # change to your target namespace
+rules:
+  # Deployments — core workload primitive
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Pods — for log streaming and exec
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+
+  # Services — created alongside Deployments for port mappings
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "watch", "list", "create", "update", "patch", "delete"]
+
+  # PersistentVolumeClaims — docker volume create/rm
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "watch", "list", "create", "delete"]
+
+  # Namespaces — read-only, used for connectivity check on startup
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+  
+  # Metrics — optional, used for docker stats
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # Events — read-only, used for docker events history
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+---
+# RoleBinding ties the Role to the ServiceAccount, scoped to the namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: d2k
+  namespace: d2k   # change to your target namespace
+subjects:
+  - kind: ServiceAccount
+    name: d2k
+    namespace: d2k  # change to your target namespace
+roleRef:
+  kind: Role
+  name: d2k
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Deployment running d2k itself inside the target namespace.
+# It exposes the Docker API on port 2375 as a ClusterIP Service,
+# which Portainer or other tooling connects to.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: d2k
+  namespace: d2k   # change to your target namespace
+  labels:
+    app: d2k
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: d2k
+  template:
+    metadata:
+      labels:
+        app: d2k
+    spec:
+      serviceAccountName: d2k
+      containers:
+        - name: d2k
+          image: d2k:latest   # replace with your image
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 2375
+          env:
+            - name: D2K_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: D2K_PORT
+              value: "2375"
+            - name: D2K_LOG_LEVEL
+              value: "info"
+            # D2K_KUBECONFIG is intentionally not set — in-cluster auth is used.
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+
+---
+# Service exposing the Docker API within the cluster.
+# Connect Portainer (or docker context) to d2k-service.d2k.svc:2375
+apiVersion: v1
+kind: Service
+metadata:
+  name: d2k
+  namespace: d2k   # change to your target namespace
+  labels:
+    app: d2k
+spec:
+  selector:
+    app: d2k
+  ports:
+    - name: docker-api
+      port: 2375
+      targetPort: 2375
+  type: LoadBalancer
