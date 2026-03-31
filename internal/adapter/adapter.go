@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	metricsclient "k8s.io/metrics/pkg/client/clientset/versioned"
 
 	"github.com/portainer/d2k/internal/config"
 )
@@ -22,6 +23,7 @@ import (
 type KubernetesDockerAdapter struct {
 	// client is the Kubernetes API client.
 	client kubernetes.Interface
+	metricsClient    *metricsclient.Clientset
 
 	// namespace is the target Kubernetes namespace for all operations.
 	namespace string
@@ -58,8 +60,20 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		return nil, fmt.Errorf("unable to reach namespace %q in cluster: %w", opts.Config.Namespace, err)
 	}
 
+// Probe metrics API — optional, failures are non-fatal.
+	mc := initMetricsClient(restCfg)
+	if mc != nil {
+		if probeMetricsAPI(context.Background(), mc, opts.Config.Namespace) {
+			opts.Logger.Infow("metrics API available — stats will show real data")
+		} else {
+			opts.Logger.Infow("metrics API not available — stats will return zeroes")
+			mc = nil
+		}
+	}
+
 	return &KubernetesDockerAdapter{
 		client:           client,
+		metricsClient:    mc,
 		namespace:        opts.Config.Namespace,
 		lowPortThreshold: opts.Config.LowPortThreshold,
 		logger:           opts.Logger,
