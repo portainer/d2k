@@ -38,12 +38,17 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, logger *zap.Sugar
 	// Containers
 	mux.HandleFunc("GET /containers/json", c.List)
 	mux.HandleFunc("POST /containers/create", c.Create)
-	mux.HandleFunc("POST /containers/", c.DispatchAction) // /containers/{id}/start|stop
 	mux.HandleFunc("DELETE /containers/", c.Remove)
 	mux.HandleFunc("GET /containers/", c.DispatchGet) // /containers/{id}/json|logs
 
 	// Exec
-	mux.HandleFunc("POST /containers/", c.DispatchAction) // already exists, but also catches /exec
+	mux.HandleFunc("POST /containers/", func(w http.ResponseWriter, r *http.Request) {
+    if strings.HasSuffix(r.URL.Path, "/exec") {
+        e.Create(w, r)
+        return
+    }
+    c.DispatchAction(w, r)
+	})
 	mux.HandleFunc("POST /exec/", e.Start)
 	mux.HandleFunc("GET /exec/", e.Inspect)
 
