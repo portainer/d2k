@@ -58,16 +58,21 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 		))
 	}
 
-	summary := &NetworkSummary{
-		ID:     networkIDForName(opts.Name, a.namespace),
-		Name:   opts.Name,
-		Driver: syntheticNetworkDriver,
-		Scope:  "local",
-		Labels: map[string]string{
-			types.LabelManagedBy:    types.LabelManagedByValue,
-			types.LabelWorkloadName: opts.Name,
-		},
-	}
+labels := map[string]string{
+    types.LabelManagedBy:    types.LabelManagedByValue,
+    types.LabelWorkloadName: opts.Name,
+}
+for k, v := range opts.Labels {
+    labels[k] = v
+}
+
+summary := &NetworkSummary{
+    ID:     networkIDForName(opts.Name, a.namespace),
+    Name:   opts.Name,
+    Driver: syntheticNetworkDriver,
+    Scope:  "local",
+    Labels: labels,
+}
 
 	return summary, warnings, nil
 }
