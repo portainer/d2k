@@ -15,6 +15,7 @@ import (
 	"github.com/portainer/d2k/internal/api/system"
 	"github.com/portainer/d2k/internal/api/volumes"
 	"github.com/portainer/d2k/internal/middleware"
+	"github.com/portainer/d2k/internal/api/exec"
 )
 
 // New builds the router with all Docker API endpoints registered.
@@ -23,6 +24,7 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, logger *zap.Sugar
 
 	sys := system.NewHandler(namespace, logger)
 	c := containers.NewHandler(a, logger)
+	e := exec.NewHandler(a, logger)
 	v := volumes.NewHandler(a, logger)
 	n := networks.NewHandler(a, logger)
 	img := images.NewHandler(a, logger)
@@ -39,6 +41,11 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, logger *zap.Sugar
 	mux.HandleFunc("POST /containers/", c.DispatchAction) // /containers/{id}/start|stop
 	mux.HandleFunc("DELETE /containers/", c.Remove)
 	mux.HandleFunc("GET /containers/", c.DispatchGet) // /containers/{id}/json|logs
+
+	// Exec
+	mux.HandleFunc("POST /containers/", c.DispatchAction) // already exists, but also catches /exec
+	mux.HandleFunc("POST /exec/", e.Start)
+	mux.HandleFunc("GET /exec/", e.Inspect)
 
 	// Images
 	mux.HandleFunc("GET /images/json", img.List)
