@@ -35,7 +35,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: "[preparation] tidy modules"
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@4b73464b60e97efce5cc67aceb4b199e0e1b0692 # v6.3.0
         with:
           go-version-file: go.mod
 
@@ -47,10 +47,10 @@ jobs:
           fi
 
       - name: "[preparation] set up QEMU"
-        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
 
       - name: "[preparation] set up Docker Buildx"
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: "[preparation] log in to registry"
         uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
