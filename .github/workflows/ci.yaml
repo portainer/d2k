@@ -37,7 +37,7 @@ jobs:
       - name: "[preparation] tidy modules"
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
 
       - name: "[preparation] go mod tidy"
         run: go mod tidy
