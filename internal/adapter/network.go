@@ -3,7 +3,6 @@ package adapter
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -134,31 +133,24 @@ func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID s
 	}
 
 	// Unknown network names are treated as aliases for the namespace network.
-// Synthesise Compose labels if the name matches <project>_<network> pattern.
-		syntheticLabels := map[string]string{}
-		if idx := strings.LastIndex(nameOrID, "_"); idx != -1 {
-			syntheticLabels["com.docker.compose.network"] = nameOrID[idx+1:]
-			syntheticLabels["com.docker.compose.project"] = nameOrID[:idx]
-		}
-
-		return &NetworkSummary{
-			ID:     networkIDForName(nameOrID, a.namespace),
-			Name:   nameOrID,
-			Driver: syntheticNetworkDriver,
-			Scope:  "local",
-			Labels: syntheticLabels,
-		}, nil
+	return &NetworkSummary{
+		ID:     networkIDForName(nameOrID, a.namespace),
+		Name:   nameOrID,
+		Driver: syntheticNetworkDriver,
+		Scope:  "local",
+	}, nil
+}
 
 // RemoveNetwork is a no-op for d2k-managed networks since they are synthetic.
 // Built-in networks (bridge, host, none) return an error matching Docker behaviour.
 func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID string) error {
-    switch nameOrID {
-    case "bridge", "host", "none":
-        return fmt.Errorf("network %q is a pre-defined network and cannot be removed", nameOrID)
-    }
+	switch nameOrID {
+	case "bridge", "host", "none":
+		return fmt.Errorf("network %q is a pre-defined network and cannot be removed", nameOrID)
+	}
 
-    // All other networks are synthetic — nothing to delete in Kubernetes.
-    return nil
+	// All other networks are synthetic — nothing to delete in Kubernetes.
+	return nil
 }
 
 // networkIDForName produces a deterministic synthetic network ID from a name
