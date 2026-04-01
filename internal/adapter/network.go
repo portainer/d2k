@@ -3,25 +3,23 @@ package adapter
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/portainer/d2k/internal/types"
 )
 
 const (
-	// syntheticNetworkID is the fake network ID returned to Docker clients.
-	// We use the namespace name as the network — all pods in the namespace share
-	// the same flat network, so this is semantically accurate.
 	syntheticNetworkDriver = "d2k"
 )
 
 // NetworkSummary is a Docker-compatible network entry.
 type NetworkSummary struct {
-	ID         string
-	Name       string
-	Driver     string
-	Scope      string
-	Internal   bool
-	Labels     map[string]string
+	ID       string            `json:"Id"`
+	Name     string            `json:"Name"`
+	Driver   string            `json:"Driver"`
+	Scope    string            `json:"Scope"`
+	Internal bool              `json:"Internal"`
+	Labels   map[string]string `json:"Labels"`
 }
 
 // CreateNetworkOptions mirrors docker network create flags.
@@ -33,14 +31,6 @@ type CreateNetworkOptions struct {
 
 // CreateNetwork accepts a docker network create call and returns a synthetic
 // network backed by the target namespace.
-//
-// Kubernetes networking within a namespace is flat — every Pod can reach every
-// other Pod. There is no equivalent of Docker bridge isolation between networks
-// within a namespace. d2k therefore accepts the call, records the network name
-// as a label, and maps all containers to the same underlying namespace network.
-//
-// If the client creates multiple networks, they all resolve to the same flat
-// namespace network. A warning is returned to make this behaviour visible.
 func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts CreateNetworkOptions) (*NetworkSummary, []string, error) {
 	if opts.Name == "" {
 		return nil, nil, fmt.Errorf("network name is required")
@@ -48,8 +38,6 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 
 	var warnings []string
 
-	// If the client is creating a network other than the default namespace network,
-	// warn that isolation is not enforced.
 	if opts.Name != a.namespace && opts.Name != "bridge" && opts.Name != "host" {
 		warnings = append(warnings, fmt.Sprintf(
 			"network %q created but Kubernetes namespace networking is flat — "+
@@ -58,21 +46,26 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 		))
 	}
 
-labels := map[string]string{
-    types.LabelManagedBy:    types.LabelManagedByValue,
-    types.LabelWorkloadName: opts.Name,
-}
-for k, v := range opts.Labels {
-    labels[k] = v
-}
+	labels := map[string]string{
+		types.LabelManagedBy:    types.LabelManagedByValue,
+		types.LabelWorkloadName: opts.Name,
+	}
+	// Synthesise Compose labels if the name matches <project>_<network> pattern.
+	if idx := strings.LastIndex(opts.Name, "_"); idx != -1 {
+		labels["com.docker.compose.network"] = opts.Name[idx+1:]
+		labels["com.docker.compose.project"] = opts.Name[:idx]
+	}
+	for k, v := range opts.Labels {
+		labels[k] = v
+	}
 
-summary := &NetworkSummary{
-    ID:     networkIDForName(opts.Name, a.namespace),
-    Name:   opts.Name,
-    Driver: syntheticNetworkDriver,
-    Scope:  "local",
-    Labels: labels,
-}
+	summary := &NetworkSummary{
+		ID:     networkIDForName(opts.Name, a.namespace),
+		Name:   opts.Name,
+		Driver: syntheticNetworkDriver,
+		Scope:  "local",
+		Labels: labels,
+	}
 
 	a.networksMu.Lock()
 	a.networks[opts.Name] = summary
@@ -82,9 +75,11 @@ summary := &NetworkSummary{
 }
 
 // ListNetworks returns the synthetic network list.
-// We always return at least the namespace default network plus any well-known names.
 func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSummary, error) {
-	return []NetworkSummary{
+	a.networksMu.RLock()
+	defer a.networksMu.RUnlock()
+
+	networks := []NetworkSummary{
 		{
 			ID:     networkIDForName(a.namespace, a.namespace),
 			Name:   a.namespace,
@@ -99,20 +94,30 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 			Name:   "bridge",
 			Driver: "bridge",
 			Scope:  "local",
+			Labels: map[string]string{},
 		},
 		{
 			ID:     networkIDForName("host", a.namespace),
 			Name:   "host",
 			Driver: "host",
 			Scope:  "host",
+			Labels: map[string]string{},
 		},
 		{
 			ID:     networkIDForName("none", a.namespace),
 			Name:   "none",
 			Driver: "null",
 			Scope:  "local",
+			Labels: map[string]string{},
 		},
-	}, nil
+	}
+
+	// Include any networks created via CreateNetwork.
+	for _, n := range a.networks {
+		networks = append(networks, *n)
+	}
+
+	return networks, nil
 }
 
 // InspectNetwork returns a synthetic network by name or ID.
@@ -124,20 +129,19 @@ func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID s
 		}
 	}
 
-	// Unknown network names are treated as aliases for the namespace network.
-	a.networksMu.RLock()
-	n, ok := a.networks[nameOrID]
-	a.networksMu.RUnlock()
-	if ok {
-		return n, nil
+	// Synthesise a response for unknown networks, with Compose labels if applicable.
+	syntheticLabels := map[string]string{}
+	if idx := strings.LastIndex(nameOrID, "_"); idx != -1 {
+		syntheticLabels["com.docker.compose.network"] = nameOrID[idx+1:]
+		syntheticLabels["com.docker.compose.project"] = nameOrID[:idx]
 	}
 
-	// Unknown network names are treated as aliases for the namespace network.
 	return &NetworkSummary{
 		ID:     networkIDForName(nameOrID, a.namespace),
 		Name:   nameOrID,
 		Driver: syntheticNetworkDriver,
 		Scope:  "local",
+		Labels: syntheticLabels,
 	}, nil
 }
 
@@ -149,14 +153,15 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 		return fmt.Errorf("network %q is a pre-defined network and cannot be removed", nameOrID)
 	}
 
-	// All other networks are synthetic — nothing to delete in Kubernetes.
+	a.networksMu.Lock()
+	delete(a.networks, nameOrID)
+	a.networksMu.Unlock()
+
 	return nil
 }
 
 // networkIDForName produces a deterministic synthetic network ID from a name
 // and namespace, giving Docker clients a stable ID to reference across calls.
 func networkIDForName(name, namespace string) string {
-	// Simple deterministic format: not a real UUID but stable and unique enough
-	// for Docker client purposes within this d2k instance.
 	return fmt.Sprintf("d2k-%s-%s", namespace, name)
 }
