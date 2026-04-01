@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"strings"
 	"strconv"
 	"time"
@@ -197,7 +196,11 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 
 func (a *KubernetesDockerAdapter) buildDeployment(opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, error) {
 	labels := managedLabels(opts.Name)
-	maps.Copy(labels, opts.Labels)
+	for k, v := range opts.Labels {
+    	if clean, ok := sanitiseLabelValue(v); ok {
+        labels[k] = clean
+    	}
+	}
 
 	// Encode port mappings as an annotation so we can reconstruct them later.
 	// Annotations (unlike labels) accept arbitrary string values, which is required
