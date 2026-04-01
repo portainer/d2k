@@ -52,9 +52,18 @@ func (h *Handler) DispatchAction(w http.ResponseWriter, r *http.Request) {
 		h.Wait(w, r)
 	case strings.HasSuffix(path, "/attach"):
 		h.Attach(w, r)
+	case strings.HasSuffix(path, "/rename"):
+    h.Rename(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// Rename handles POST /containers/{id}/rename.
+// d2k ignores rename requests — container names are Kubernetes Deployment names
+// and cannot be renamed without recreating the Deployment.
+func (h *Handler) Rename(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // DispatchGet handles GET /containers/{id}/json and GET /containers/{id}/logs.
