@@ -2,6 +2,7 @@ package adapter
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"strings"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -27,4 +28,20 @@ func managedLabels(name string) map[string]string {
 		// app label for selector convenience
 		"app": name,
 	}
+}
+// sanitiseLabelValue truncates and cleans a string so it is a valid
+// Kubernetes label value: max 63 chars, alphanumeric plus [-_.],
+// must start and end with alphanumeric. Invalid values are dropped entirely.
+func sanitiseLabelValue(v string) (string, bool) {
+    if len(v) > 63 {
+        v = v[:63]
+    }
+    // Trim leading/trailing non-alphanumeric characters.
+    v = strings.TrimFunc(v, func(r rune) bool {
+        return !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9')
+    })
+    if v == "" {
+        return "", false
+    }
+    return v, true
 }
