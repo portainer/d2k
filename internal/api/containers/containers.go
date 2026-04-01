@@ -60,9 +60,14 @@ func (h *Handler) DispatchAction(w http.ResponseWriter, r *http.Request) {
 }
 
 // Rename handles POST /containers/{id}/rename.
-// d2k ignores rename requests — container names are Kubernetes Deployment names
-// and cannot be renamed without recreating the Deployment.
 func (h *Handler) Rename(w http.ResponseWriter, r *http.Request) {
+	name := containerName(r.URL.Path, "/rename")
+	newName := r.URL.Query().Get("name")
+	if err := h.adapter.RenameContainer(r.Context(), name, newName); err != nil {
+		h.logger.Errorw("RenameContainer failed", "name", name, "newName", newName, "error", err)
+		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
