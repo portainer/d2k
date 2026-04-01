@@ -24,38 +24,28 @@ import (
 
 // RunOptions mirrors the subset of docker run flags that d2k supports.
 type RunOptions struct {
-	// Name is the --name flag value.
-	Name string
-	// Image is the container image reference.
-	Image string
-	// Cmd overrides the image default command.
-	Cmd []string
-	// Env is a list of KEY=VALUE environment variable strings.
-	Env []string
-	// Labels are user-supplied labels (-l / --label).
-	Labels map[string]string
-	// PortBindings are raw -p flag values, e.g. "8080:80", "127.0.0.1:443:443".
+	Name         string
+	Image        string
+	Cmd          []string
+	Env          []string
+	Labels       map[string]string
 	PortBindings []string
-	// PublishAll corresponds to -P.
-	PublishAll bool
-	// ExposedPorts are the ports declared in the image config, used with -P.
+	PublishAll   bool
 	ExposedPorts map[string]struct{}
-	// Volumes are -v flag values (host:container or just container path).
-	// Phase 1: stored as annotation only; volume mounting is a follow-on.
-	Volumes []string
+	Volumes      []string
 }
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
 type ContainerSummary struct {
-    ID        string
-    Names     []string
-    Image     string
-    Status    string
-    State     string
-    Created   int64
-    Ports     []dockertypes.Port
-    Labels    map[string]string
-    IPAddress string  // ← add this
+	ID        string
+	Names     []string
+	Image     string
+	Status    string
+	State     string
+	Created   int64
+	Ports     []dockertypes.Port
+	Labels    map[string]string
+	IPAddress string
 }
 
 // CreateContainer implements docker run: creates a Deployment and, where
@@ -64,6 +54,13 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	if opts.Name == "" {
 		return "", nil, fmt.Errorf("container name is required")
 	}
+
+	// Sanitise the name for Kubernetes: lowercase, underscores to hyphens, max 63 chars.
+	opts.Name = strings.ToLower(strings.ReplaceAll(opts.Name, "_", "-"))
+	if len(opts.Name) > 63 {
+		opts.Name = opts.Name[:63]
+	}
+	opts.Name = strings.TrimRight(opts.Name, "-")
 
 	// Resolve port mappings and determine Service type.
 	pmReq := portmapper.Request{
@@ -85,6 +82,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			return "", nil, fmt.Errorf("container name %q is already in use", opts.Name)
+		}
 		return "", nil, fmt.Errorf("unable to create deployment %q: %w", opts.Name, err)
 	}
 
@@ -105,35 +105,32 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 }
 
 // ListContainers implements docker ps.
-// When all is false, only Deployments with at least one ready replica are returned (running containers).
-// When all is true, all d2k-managed Deployments are returned.
 func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) ([]ContainerSummary, error) {
-    deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
-    if err != nil {
-        return nil, fmt.Errorf("unable to list deployments: %w", err)
-    }
+	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list deployments: %w", err)
+	}
 
-    var summaries []ContainerSummary
+	var summaries []ContainerSummary
 
-    for _, d := range deployments.Items {
-        if !all && d.Status.ReadyReplicas == 0 {
-            continue
-        }
-        summary := deploymentToSummary(d)
+	for _, d := range deployments.Items {
+		if !all && d.Status.ReadyReplicas == 0 {
+			continue
+		}
+		summary := deploymentToSummary(d)
 
-        // Look up the Service to get the LoadBalancer IP.
-        svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, d.Name, metav1GetOptions())
-        if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
-            summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].IP
-            if summary.IPAddress == "" {
-                summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].Hostname
-            }
-        }
+		svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, d.Name, metav1GetOptions())
+		if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
+			summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].IP
+			if summary.IPAddress == "" {
+				summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].Hostname
+			}
+		}
 
-        summaries = append(summaries, summary)
-    }
+		summaries = append(summaries, summary)
+	}
 
-    return summaries, nil
+	return summaries, nil
 }
 
 // StopContainer implements docker stop: scales the Deployment to 0 replicas.
@@ -157,7 +154,6 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
 	}
 
-	// Best-effort Service deletion — the Service may not exist.
 	svcErr := a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{})
 	if svcErr != nil && !errors.IsNotFound(svcErr) {
 		a.logger.Warnw("unable to delete service", "name", resolved, "error", svcErr)
@@ -178,7 +174,6 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 		return nil, fmt.Errorf("unable to get deployment %q: %w", resolved, err)
 	}
 
-	// Look up the Service to get the LoadBalancer external IP, if one exists.
 	lbIP := ""
 	svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, resolved, metav1GetOptions())
 	if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
@@ -197,14 +192,11 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 func (a *KubernetesDockerAdapter) buildDeployment(opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, error) {
 	labels := managedLabels(opts.Name)
 	for k, v := range opts.Labels {
-    	if clean, ok := sanitiseLabelValue(v); ok {
-        labels[k] = clean
-    	}
+		if clean, ok := sanitiseLabelValue(v); ok {
+			labels[k] = clean
+		}
 	}
 
-	// Encode port mappings as an annotation so we can reconstruct them later.
-	// Annotations (unlike labels) accept arbitrary string values, which is required
-	// because the JSON-encoded port mappings contain characters like ':' and '['.
 	portAnnotation, err := encodePortMappings(opts.PortBindings, opts.PublishAll)
 	if err != nil {
 		return nil, err
@@ -223,7 +215,6 @@ func (a *KubernetesDockerAdapter) buildDeployment(opts RunOptions, kind portmapp
 	}
 	labels[types.LabelServiceType] = serviceTypeLabel
 
-	// Build container ports for the pod spec.
 	var containerPorts []corev1.ContainerPort
 	for _, m := range mappings {
 		containerPorts = append(containerPorts, corev1.ContainerPort{
@@ -232,7 +223,6 @@ func (a *KubernetesDockerAdapter) buildDeployment(opts RunOptions, kind portmapp
 		})
 	}
 
-	// Build env vars.
 	var envVars []corev1.EnvVar
 	for _, e := range opts.Env {
 		parts := strings.SplitN(e, "=", 2)
@@ -299,8 +289,6 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 			TargetPort: intstr.FromInt(m.ContainerPort),
 			Protocol:   corev1.Protocol(m.Protocol),
 		}
-		// For NodePort the scheduler assigns the node port; for LB we set it as the Service port.
-		// HostPort=0 means auto-assign (used by -P).
 		if m.HostPort == 0 {
 			sp.Port = int32(m.ContainerPort)
 		}
@@ -323,11 +311,6 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 
 // --- name/ID resolution ---
 
-// resolveDeploymentName maps a Docker container name or UID to a Kubernetes Deployment
-// name. After CreateContainer the Docker CLI uses the returned UID for every follow-up
-// call (start, wait, inspect), so we must accept both forms.
-// Fast path: try the value directly as a Deployment name.
-// Slow path: list all managed Deployments and match by UID.
 func (a *KubernetesDockerAdapter) resolveDeploymentName(ctx context.Context, nameOrID string) (string, error) {
 	_, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, nameOrID, metav1GetOptions())
 	if err == nil {
@@ -356,9 +339,6 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 		return err
 	}
 
-	// Retry on conflict — Kubernetes uses optimistic concurrency and will reject
-	// an Update if the resource has been modified since our Get. The Deployment
-	// controller modifies status fields frequently, so conflicts are common here.
 	for attempt := 0; attempt < 5; attempt++ {
 		d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
 		if err != nil {
@@ -373,7 +353,6 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 		if !errors.IsConflict(err) {
 			return fmt.Errorf("unable to scale deployment %q to %d: %w", name, replicas, err)
 		}
-		// Conflict — resource was modified between Get and Update, retry.
 	}
 
 	return fmt.Errorf("unable to scale deployment %q to %d: too many conflicts", name, replicas)
@@ -395,7 +374,6 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 		}
 	}
 
-	// Reconstruct ports from the annotation for the container list response.
 	var ports []dockertypes.Port
 	rawPorts := d.Annotations[types.AnnotationPortMappings]
 	if rawPorts != "" {
@@ -439,17 +417,15 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 	if running {
 		state.Status = "running"
 		state.Running = true
-		startedAt := d.CreationTimestamp.Time.Format(time.RFC3339)
-		state.StartedAt = startedAt
+		state.StartedAt = d.CreationTimestamp.Time.Format(time.RFC3339)
 	}
 
 	hostConfig := &container.HostConfig{
-    LogConfig: container.LogConfig{
-        Type: "json-file",
-    },
-}
+		LogConfig: container.LogConfig{
+			Type: "json-file",
+		},
+	}
 
-	// Reconstruct port bindings from annotations for the inspect response.
 	portMap := nat.PortMap{}
 	rawPorts := d.Annotations[types.AnnotationPortMappings]
 	if rawPorts != "" {
@@ -476,30 +452,30 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 			HostConfig: hostConfig,
 		},
 		Config: &container.Config{
-   			Image:        d.Annotations[types.AnnotationImageRef],
-    		ExposedPorts: nat.PortSet{},
-    		Tty:          false,
-    		AttachStdin:  false,
-   			AttachStdout: true,
-    		AttachStderr: true,
-    		Cmd:          []string{"/bin/sh"},
-    		Entrypoint:   []string{},
-    		Env:          []string{},
-			Labels: map[string]string{},
+			Image:        d.Annotations[types.AnnotationImageRef],
+			ExposedPorts: nat.PortSet{},
+			Tty:          false,
+			AttachStdin:  false,
+			AttachStdout: true,
+			AttachStderr: true,
+			Cmd:          []string{"/bin/sh"},
+			Entrypoint:   []string{},
+			Env:          []string{},
+			Labels:       map[string]string{},
 		},
 		NetworkSettings: &dockertypes.NetworkSettings{
-    		NetworkSettingsBase: dockertypes.NetworkSettingsBase{
-        		Ports: nat.PortMap(portMap),
-    		},
-    		DefaultNetworkSettings: dockertypes.DefaultNetworkSettings{
-        		IPAddress: lbIP,
-    		},
+			NetworkSettingsBase: dockertypes.NetworkSettingsBase{
+				Ports: nat.PortMap(portMap),
+			},
+			DefaultNetworkSettings: dockertypes.DefaultNetworkSettings{
+				IPAddress: lbIP,
+			},
 			Networks: map[string]*network.EndpointSettings{
-    		"bridge": {
-        		IPAddress: lbIP,
-				NetworkID: "bridge",
-    		},
-		},
+				"bridge": {
+					IPAddress: lbIP,
+					NetworkID: "bridge",
+				},
+			},
 		},
 	}
 }
@@ -516,6 +492,7 @@ func encodePortMappings(bindings []string, publishAll bool) (string, error) {
 	b, err := json.Marshal(bindings)
 	return string(b), err
 }
+
 // ResolveContainerName is the public wrapper around resolveDeploymentName.
 func (a *KubernetesDockerAdapter) ResolveContainerName(ctx context.Context, name string) (string, error) {
 	return a.resolveDeploymentName(ctx, name)
