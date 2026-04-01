@@ -36,6 +36,8 @@ type KubernetesDockerAdapter struct {
 	logger *zap.SugaredLogger
 	prevCPU   map[string]int64
 	prevCPUMu sync.RWMutex
+	networks   map[string]*NetworkSummary
+	networksMu sync.RWMutex
 }
 
 // Options configures a new KubernetesDockerAdapter.
@@ -81,6 +83,7 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		lowPortThreshold: opts.Config.LowPortThreshold,
 		logger:           opts.Logger,
 		prevCPU:          map[string]int64{},
+		networks:         map[string]*NetworkSummary{},
 	}, nil
 }
 

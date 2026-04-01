@@ -70,11 +70,19 @@ mux.HandleFunc("GET /exec/", e.Inspect)
 	mux.HandleFunc("GET /networks/", n.Inspect)
 	mux.HandleFunc("DELETE /networks/", n.Remove)
 	
+
 	// Events
 	mux.HandleFunc("GET /events", ev.Stream)
 
+	// Catch-all for unmatched routes — logs the method and path for debugging.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		logger.Warnw("unmatched route", "method", r.Method, "path", r.URL.Path)
+		http.NotFound(w, r)
+	})
+
 	// Versioned path prefix stripping — Docker CLI sends /v1.41/containers/json etc.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
 		if strings.HasPrefix(r.URL.Path, "/v") {
 			// Find the end of the version segment, e.g. /v1.41/...
 			rest := r.URL.Path[1:] // strip leading /
