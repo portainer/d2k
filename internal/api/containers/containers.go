@@ -14,10 +14,10 @@
 package containers
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
-	"encoding/json"
 	"time"
 
 	"go.uber.org/zap"
@@ -89,43 +89,43 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		PublicPort  uint16 `json:"PublicPort"`
 		Type        string `json:"Type"`
 	}
-type item struct {
-    ID        string            `json:"Id"`
-    Names     []string          `json:"Names"`
-    Image     string            `json:"Image"`
-    Status    string            `json:"Status"`
-    State     string            `json:"State"`
-    Created   int64             `json:"Created"`
-    Ports     []portBinding     `json:"Ports"`
-    Labels    map[string]string `json:"Labels"`
-    IPAddress string            `json:"IPAddress"`  // ← add this
-}
+
+	type item struct {
+		ID        string            `json:"Id"`
+		Names     []string          `json:"Names"`
+		Image     string            `json:"Image"`
+		Status    string            `json:"Status"`
+		State     string            `json:"State"`
+		Created   int64             `json:"Created"`
+		Ports     []portBinding     `json:"Ports"`
+		Labels    map[string]string `json:"Labels"`
+		IPAddress string            `json:"IPAddress"`
+	}
 
 	result := make([]item, 0, len(ctrs))
 	for _, c := range ctrs {
+		var ports []portBinding
+		for _, p := range c.Ports {
+			ports = append(ports, portBinding{
+				IP:          p.IP,
+				PrivatePort: p.PrivatePort,
+				PublicPort:  p.PublicPort,
+				Type:        p.Type,
+			})
+		}
 		result = append(result, item{
-			ID:      c.ID,
-			Names:   c.Names,
-			Image:   c.Image,
-			Status:  c.Status,
-			State:   c.State,
-			Created: c.Created,
-			Labels:  c.Labels,
+			ID:        c.ID,
+			Names:     c.Names,
+			Image:     c.Image,
+			Status:    c.Status,
+			State:     c.State,
+			Created:   c.Created,
+			Labels:    c.Labels,
 			IPAddress: c.IPAddress,
-			Ports: func() []portBinding {
-    		var out []portBinding
-    		for _, p := range c.Ports {
-        	out = append(out, portBinding{
-            	IP:          p.IP,
-            	PrivatePort: p.PrivatePort,
-            	PublicPort:  p.PublicPort,
-            	Type:        p.Type,
-        })
-    }
-    return out
-}(),
+			Ports:     ports,
 		})
 	}
+
 	httputils.WriteJSON(w, http.StatusOK, result)
 }
 
@@ -161,7 +161,6 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	// Translate Docker HostConfig.PortBindings map into raw "-p" strings.
 	var portBindings []string
 	for containerPortProto, hostBindings := range body.HostConfig.PortBindings {
-		// containerPortProto is e.g. "80/tcp"
 		containerPort := strings.SplitN(containerPortProto, "/", 2)[0]
 		for _, hb := range hostBindings {
 			if hb.HostIP != "" && hb.HostIP != "0.0.0.0" {
@@ -186,7 +185,11 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	id, warnings, err := h.adapter.CreateContainer(r.Context(), opts)
 	if err != nil {
 		h.logger.Errorw("CreateContainer failed", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "already in use") {
+			status = http.StatusConflict
+		}
+		httputils.WriteError(w, status, err.Error())
 		return
 	}
 
@@ -197,8 +200,6 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 // Wait handles POST /containers/{id}/wait.
-// Deployments are long-running and don't exit naturally, so we return immediately
-// with StatusCode 0 regardless of the requested condition.
 func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
 	httputils.WriteJSON(w, http.StatusOK, map[string]any{
 		"StatusCode": 0,
@@ -318,7 +319,6 @@ func (h *Handler) Logs(w http.ResponseWriter, r *http.Request) {
 func containerName(path, suffix string) string {
 	s := strings.TrimPrefix(path, "/containers/")
 	s = strings.TrimSuffix(s, suffix)
-	// Take only the first path segment — container names don't contain slashes.
 	if idx := strings.Index(s, "/"); idx != -1 {
 		s = s[:idx]
 	}
@@ -380,7 +380,7 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 				"limit":    int64(1<<63 - 1),
 				"stats":    map[string]any{},
 			},
-			"networks":    map[string]any{},
+			"networks": map[string]any{},
 			"blkio_stats": map[string]any{
 				"io_service_bytes_recursive": []any{},
 				"io_serviced_recursive":      []any{},
@@ -406,16 +406,14 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
 // Attach handles POST /containers/{id}/attach.
-// d2k does not support interactive attachment — containers run as Kubernetes
-// Deployments with no direct stdin/stdout stream. We return 101 Switching
-// Protocols with an immediate close to satisfy the Docker CLI handshake,
-// which causes it to detach cleanly rather than hanging.
 func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
 	w.Header().Set("Connection", "close")
 	w.WriteHeader(http.StatusSwitchingProtocols)
 }
+
 func mustJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
