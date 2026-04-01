@@ -346,6 +346,9 @@ func (a *KubernetesDockerAdapter) resolveDeploymentName(ctx context.Context, nam
 		if string(d.UID) == nameOrID {
 			return d.Name, nil
 		}
+		if strings.HasSuffix(d.Name, "-"+nameOrID) {
+			return d.Name, nil
+		}
 	}
 	return "", fmt.Errorf("container %q not found", nameOrID)
 }
