@@ -2,7 +2,6 @@ package adapter
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"strings"
 
 	"github.com/portainer/d2k/internal/types"
 )
