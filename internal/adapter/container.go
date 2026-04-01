@@ -119,7 +119,10 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 		}
 		summary := deploymentToSummary(d)
 
-		svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, d.Name, metav1GetOptions())
+		// Look up the Service to get the LoadBalancer IP.
+		// Service name may have a "svc-" prefix if the deployment name started with a digit.
+		svcName := serviceName(d.Name)
+		svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, svcName, metav1GetOptions())
 		if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
 			summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].IP
 			if summary.IPAddress == "" {
@@ -154,7 +157,8 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
 	}
 
-	svcErr := a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{})
+	// Best-effort Service deletion — try both the plain name and the svc- prefixed name.
+	svcErr := a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
 	if svcErr != nil && !errors.IsNotFound(svcErr) {
 		a.logger.Warnw("unable to delete service", "name", resolved, "error", svcErr)
 	}
@@ -175,7 +179,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 	}
 
 	lbIP := ""
-	svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, serviceName(resolved), metav1GetOptions())
 	if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
 		lbIP = svc.Status.LoadBalancer.Ingress[0].IP
 		if lbIP == "" {
@@ -295,9 +299,11 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 		ports = append(ports, sp)
 	}
 
+	svcName := serviceName(name)
+
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      svcName,
 			Namespace: a.namespace,
 			Labels:    managedLabels(name),
 		},
@@ -307,6 +313,19 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 			Ports:    ports,
 		},
 	}, nil
+}
+
+// serviceName returns the Kubernetes Service name for a given deployment name.
+// Service names must conform to DNS-1035: start with a letter. If the deployment
+// name starts with a digit, we prefix with "svc-".
+func serviceName(name string) string {
+	if len(name) > 0 && name[0] >= '0' && name[0] <= '9' {
+		name = "svc-" + name
+	}
+	if len(name) > 63 {
+		name = name[:63]
+	}
+	return strings.TrimRight(name, "-")
 }
 
 // --- name/ID resolution ---
