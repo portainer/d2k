@@ -24,6 +24,7 @@ Run d2k inside your cluster. It exposes the Docker Engine API on port 2375 and t
 | `docker exec` | Kubernetes pod exec via SPDY |
 | `docker stats` | Kubernetes metrics API (falls back to zeroes if unavailable) |
 | `docker events` | Kubernetes resource watch + event history |
+| `--gpus all` / `--gpus N` | Pod resource limits via device plugin (opt-in) |
 
 ---
 
@@ -46,6 +47,39 @@ Kubernetes namespace networking is flat. All Pods in the namespace can reach eac
 `docker volume create` creates a PersistentVolumeClaim using the cluster's default StorageClass with `ReadWriteOnce` access mode. Size defaults to `1Gi` and can be overridden with `--opt size=5Gi`.
 
 Bind mounts (`-v /host/path:/container/path`) are not supported. Named volume mounts (`-v myvolume:/data`) map to PVC mounts.
+
+---
+
+## GPU support
+
+d2k can translate Docker's `--gpus` flag into Kubernetes device plugin resource requests. Support is opt-in via the `D2K_GPU_RESOURCE_NAME` environment variable — when unset, GPU flags are silently ignored for backward compatibility.
+
+Set `D2K_GPU_RESOURCE_NAME` to the resource name advertised by the device plugin installed on your cluster:
+
+| GPU vendor | Typical resource name |
+|---|---|
+| NVIDIA | `nvidia.com/gpu` |
+| AMD | `amd.com/gpu` |
+| Intel | `intel.com/gpu` or `gpu.intel.com/i915` |
+
+To verify what your nodes advertise:
+
+```bash
+kubectl get nodes -o json | jq '.items[].status.allocatable' | grep -Ei 'gpu|neuron|tpu'
+```
+
+Once configured, `docker run --gpus all` or `--gpus 2` will create a Deployment with the matching resource limit on the container spec, and the Kubernetes scheduler will place the pod on a GPU node.
+
+```bash
+docker --context d2k run -d --gpus all --name ml-job pytorch/pytorch:latest
+```
+
+### Notes and limitations
+
+- Docker sends `--gpus all` as `Count=-1`. d2k treats this as `1` since Kubernetes device plugins require an explicit count. Use `--gpus N` to request more.
+- Only one resource name is supported per d2k instance. Clusters with mixed GPU vendors need separate d2k deployments.
+- Fractional GPUs, MIG slicing, and vendor-specific capability selectors are not parsed — d2k only emits integer counts against a single resource name.
+- The device plugin for your GPU vendor must be installed and healthy on the cluster. d2k does not install or manage it.
 
 ---
 
@@ -118,6 +152,7 @@ All configuration is via environment variables.
 | `D2K_LOG_FORMAT` | `text` | Log format: text, json |
 | `D2K_KUBECONFIG` | _(empty)_ | Path to kubeconfig. Empty = in-cluster auth |
 | `D2K_LOW_PORT_THRESHOLD` | `1024` | Reserved, not currently used |
+| `D2K_GPU_RESOURCE_NAME` | _(empty)_ | Kubernetes device plugin resource name for `--gpus` translation (e.g. `nvidia.com/gpu`). Empty = GPU flags ignored |
 
 `D2K_KUBECONFIG` should not be set when running inside the cluster. The in-cluster ServiceAccount token is used automatically.
 
