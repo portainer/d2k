@@ -15,6 +15,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -33,6 +34,7 @@ type RunOptions struct {
 	PublishAll   bool
 	ExposedPorts map[string]struct{}
 	Volumes      []string
+	GPUCount     int
 }
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
@@ -272,6 +274,13 @@ func (a *KubernetesDockerAdapter) buildDeployment(opts RunOptions, kind portmapp
 		envVars = append(envVars, corev1.EnvVar{Name: parts[0], Value: parts[1]})
 	}
 
+	var resourceLimits corev1.ResourceList
+	if opts.GPUCount > 0 && a.gpuResourceName != "" {
+		resourceLimits = corev1.ResourceList{
+			corev1.ResourceName(a.gpuResourceName): resource.MustParse(fmt.Sprintf("%d", opts.GPUCount)),
+		}
+	}
+
 	replicas := int32(1)
 
 	return &appsv1.Deployment{
@@ -302,6 +311,9 @@ func (a *KubernetesDockerAdapter) buildDeployment(opts RunOptions, kind portmapp
 							Command: opts.Cmd,
 							Env:     envVars,
 							Ports:   containerPorts,
+							Resources: corev1.ResourceRequirements{
+								Limits: resourceLimits,
+							},
 						},
 					},
 				},

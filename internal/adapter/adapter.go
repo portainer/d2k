@@ -33,6 +33,10 @@ type KubernetesDockerAdapter struct {
 	// in a LoadBalancer Service instead of a NodePort Service.
 	lowPortThreshold int
 
+	// gpuResourceName is the Kubernetes resource name for GPU device requests
+	// (e.g. "nvidia.com/gpu" or "amd.com/gpu"). Empty means GPU support is disabled.
+	gpuResourceName string
+
 	logger *zap.SugaredLogger
 	prevCPU   map[string]int64
 	prevCPUMu sync.RWMutex
@@ -81,6 +85,7 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		metricsClient:    mc,
 		namespace:        opts.Config.Namespace,
 		lowPortThreshold: opts.Config.LowPortThreshold,
+		gpuResourceName:  opts.Config.GPUResourceName,
 		logger:           opts.Logger,
 		prevCPU:          map[string]int64{},
 		networks:         map[string]*NetworkSummary{},

@@ -3,9 +3,9 @@
 //
 // Implemented endpoints:
 //
-//	GET  /_ping     → liveness check, returns "OK"
-//	GET  /version   → Docker API version negotiation
-//	GET  /info      → cluster/daemon info
+//	GET  /_ping     -> liveness check, returns "OK"
+//	GET  /version   -> Docker API version negotiation
+//	GET  /info      -> cluster/daemon info
 package system
 
 import (
@@ -21,12 +21,13 @@ import (
 // Handler holds dependencies for system endpoints.
 type Handler struct {
 	namespace string
+	swarmMode bool
 	logger    *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(namespace string, logger *zap.SugaredLogger) *Handler {
-	return &Handler{namespace: namespace, logger: logger}
+func NewHandler(namespace string, swarmMode bool, logger *zap.SugaredLogger) *Handler {
+	return &Handler{namespace: namespace, swarmMode: swarmMode, logger: logger}
 }
 
 // Ping handles GET /_ping.
@@ -47,6 +48,38 @@ func (h *Handler) Version(w http.ResponseWriter, r *http.Request) {
 		"Arch":          runtime.GOARCH,
 		"KernelVersion": "d2k",
 	})
+}
+
+// swarmInfo returns the Swarm section of the /info response.
+// When swarm mode is active, Portainer (and Docker CLI) use LocalNodeState and
+// ControlAvailable to decide whether to show the Swarm UI.
+func (h *Handler) swarmInfo() map[string]any {
+	if !h.swarmMode {
+		return map[string]any{
+			"LocalNodeState": "inactive",
+		}
+	}
+	return map[string]any{
+		"LocalNodeState":   "active",
+		"ControlAvailable": true,
+		"Error":            "",
+		"NodeID":           "d2k",
+		"NodeAddr":         "",
+		"RemoteManagers":   []map[string]any{{"NodeID": "d2k", "Addr": ""}},
+		"Nodes":            1,
+		"Managers":         1,
+		"Cluster": map[string]any{
+			"ID": "d2k-cluster",
+			"Version": map[string]any{"Index": uint64(1)},
+			"Spec": map[string]any{
+				"Name":   "d2k",
+				"Labels": map[string]string{},
+				"Orchestration": map[string]any{
+					"TaskHistoryRetentionLimit": 5,
+				},
+			},
+		},
+	}
 }
 
 // Info handles GET /info.
@@ -80,9 +113,7 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
     "NCPU":              1,
     "MemTotal":          int64(2 * 1024 * 1024 * 1024),
     "SecurityOptions":   []string{},
-    "Swarm": map[string]any{
-        "LocalNodeState": "inactive",
-    },
+    "Swarm": h.swarmInfo(),
     "Labels": []string{
         "d2k.portainer.io/translator=true",
         "d2k.portainer.io/namespace=" + h.namespace,

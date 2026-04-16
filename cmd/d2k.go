@@ -35,6 +35,7 @@ func main() {
 	logger.Infow("starting d2k",
 		"namespace", cfg.Namespace,
 		"port", cfg.Port,
+		"swarm_mode", cfg.SwarmMode,
 	)
 
 	adapterOpts := &adapter.Options{
@@ -49,7 +50,7 @@ func main() {
 
 	logger.Infow("connected to Kubernetes namespace", "namespace", cfg.Namespace)
 
-	handler := router.New(a, cfg.Namespace, logger)
+	handler := router.New(a, cfg.Namespace, cfg.SwarmMode, logger)
 
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

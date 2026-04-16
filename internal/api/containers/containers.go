@@ -156,6 +156,10 @@ type createBody struct {
 			HostPort string `json:"HostPort"`
 		} `json:"PortBindings"`
 		PublishAllPorts bool `json:"PublishAllPorts"`
+		DeviceRequests  []struct {
+			Count        int        `json:"Count"`
+			Capabilities [][]string `json:"Capabilities"`
+		} `json:"DeviceRequests"`
 	} `json:"HostConfig"`
 }
 
@@ -185,6 +189,24 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Extract GPU count from DeviceRequests. Docker sends Count=-1 for "all GPUs"
+	// and Count=N for a specific number. We treat -1 as 1 since Kubernetes device
+	// plugins require an explicit count.
+	var gpuCount int
+	for _, dr := range body.HostConfig.DeviceRequests {
+		for _, caps := range dr.Capabilities {
+			for _, c := range caps {
+				if c == "gpu" {
+					if dr.Count < 0 {
+						gpuCount = 1
+					} else if dr.Count > gpuCount {
+						gpuCount = dr.Count
+					}
+				}
+			}
+		}
+	}
+
 	opts := adapter.RunOptions{
 		Name:         name,
 		Image:        body.Image,
@@ -194,6 +216,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		ExposedPorts: body.ExposedPorts,
 		PortBindings: portBindings,
 		PublishAll:   body.HostConfig.PublishAllPorts,
+		GPUCount:     gpuCount,
 	}
 
 	id, warnings, err := h.adapter.CreateContainer(r.Context(), opts)
