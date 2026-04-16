@@ -1,8 +1,8 @@
-# d2k — Docker-to-Kubernetes Translator
+# d2k â€” Docker-to-Kubernetes Translator
 
 d2k lets Docker tooling manage a single Kubernetes namespace. It exposes the Docker Engine API on port 2375 and translates every Docker call into Kubernetes operations scoped to one namespace. Portainer, the Docker CLI, or any Docker SDK client connects to d2k and gets a Kubernetes-backed execution environment without needing to know about Kubernetes.
 
-Enable `D2K_SWARM_MODE=true` and the same endpoint emulates a single-node Docker Swarm cluster instead, translating Swarm API calls (services, stacks, tasks, secrets, configs) into Kubernetes Deployments and resources.
+Enable `D2K_SWARM_MODE=true` and the same endpoint emulates a Docker Swarm cluster instead, translating Swarm API calls (services, stacks, tasks, secrets, configs) into Kubernetes Deployments and resources.
 
 ---
 
@@ -12,7 +12,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 
 **Docker host mode** (default) emulates a single Docker Engine. `docker run`, `docker ps`, `docker exec`, and all container-level operations are translated to Kubernetes Deployments and Pods. Portainer connects as a Docker standalone environment.
 
-**Swarm mode** (`D2K_SWARM_MODE=true`) emulates a single-node Docker Swarm cluster. `docker service`, `docker stack`, `docker secret`, and `docker config` operations are translated to Kubernetes resources. Portainer connects as a Swarm environment and renders the full cluster view including nodes, services, stacks, and secrets.
+**Swarm mode** (`D2K_SWARM_MODE=true`) emulates a Docker Swarm cluster. `docker service`, `docker stack`, `docker secret`, and `docker config` operations are translated to Kubernetes resources. Portainer connects as a Swarm environment and renders the full cluster view including nodes, services, stacks, and secrets.
 
 ---
 
@@ -29,7 +29,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | No port flags | No Service created |
 | `docker volume create` | PersistentVolumeClaim |
 | `docker network create` | Synthetic (namespace network is flat) |
-| `docker pull` | Acknowledged — Kubernetes pulls at schedule time |
+| `docker pull` | Acknowledged â€” Kubernetes pulls at schedule time |
 | `docker logs` | Kubernetes pod log stream |
 | `docker exec` | Kubernetes pod exec via SPDY |
 | `docker stats` | Kubernetes metrics API (falls back to zeroes if unavailable) |
