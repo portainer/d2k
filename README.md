@@ -34,6 +34,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `docker exec` | Kubernetes pod exec via SPDY |
 | `docker stats` | Kubernetes metrics API (falls back to zeroes if unavailable) |
 | `docker events` | Kubernetes resource watch + event history |
+| `--gpus all` / `--gpus N` | Pod resource limits via device plugin (opt-in) |
 
 ---
 
@@ -56,7 +57,40 @@ Swarm IDs are derived deterministically from Kubernetes UIDs so they are stable 
 
 `docker service create`, `docker service scale`, `docker service update --image`, and `docker service rm` all converge correctly with the CLI progress bar. `docker service logs` and `docker service logs --follow` stream with correct Docker multiplexed wire format and swarm details context. `docker stack deploy`, `docker stack ls`, `docker stack ps`, and `docker stack rm` all work correctly alongside standalone services. `docker secret` and `docker config` CRUD are fully functional. Portainer renders the Swarm cluster view including nodes, CPU, memory, services, stacks, networks, secrets, and configs.
 
-### Known limitations in Swarm mode
+## GPU support
+
+d2k can translate Docker's `--gpus` flag into Kubernetes device plugin resource requests. Support is opt-in via the `D2K_GPU_RESOURCE_NAME` environment variable — when unset, GPU flags are silently ignored for backward compatibility.
+
+Set `D2K_GPU_RESOURCE_NAME` to the resource name advertised by the device plugin installed on your cluster:
+
+| GPU vendor | Typical resource name |
+|---|---|
+| NVIDIA | `nvidia.com/gpu` |
+| AMD | `amd.com/gpu` |
+| Intel | `intel.com/gpu` or `gpu.intel.com/i915` |
+
+To verify what your nodes advertise:
+
+```bash
+kubectl get nodes -o json | jq '.items[].status.allocatable' | grep -Ei 'gpu|neuron|tpu'
+```
+
+Once configured, `docker run --gpus all` or `--gpus 2` will create a Deployment with the matching resource limit on the container spec, and the Kubernetes scheduler will place the pod on a GPU node.
+
+```bash
+docker --context d2k run -d --gpus all --name ml-job pytorch/pytorch:latest
+```
+
+### Notes and limitations
+
+- Docker sends `--gpus all` as `Count=-1`. d2k treats this as `1` since Kubernetes device plugins require an explicit count. Use `--gpus N` to request more.
+- Only one resource name is supported per d2k instance. Clusters with mixed GPU vendors need separate d2k deployments.
+- Fractional GPUs, MIG slicing, and vendor-specific capability selectors are not parsed — d2k only emits integer counts against a single resource name.
+- The device plugin for your GPU vendor must be installed and healthy on the cluster. d2k does not install or manage it.
+
+---
+
+## Logs
 
 Global mode services (`--mode global`) are deployed as replicated with a warning. Service rollback (`docker service rollback`) is not implemented. Node drain evicts the cordon annotation but does not evict existing pods. Secrets and configs are mounted into service containers via Kubernetes volume mounts but end-to-end injection has not been verified. Port conflict detection across services is not enforced.
 
