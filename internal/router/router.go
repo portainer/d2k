@@ -10,20 +10,22 @@ import (
 
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/api/containers"
+	"github.com/portainer/d2k/internal/api/events"
+	"github.com/portainer/d2k/internal/api/exec"
 	"github.com/portainer/d2k/internal/api/images"
 	"github.com/portainer/d2k/internal/api/networks"
+	"github.com/portainer/d2k/internal/api/swarm"
 	"github.com/portainer/d2k/internal/api/system"
 	"github.com/portainer/d2k/internal/api/volumes"
 	"github.com/portainer/d2k/internal/middleware"
-	"github.com/portainer/d2k/internal/api/events"
-	"github.com/portainer/d2k/internal/api/exec"
 )
 
 // New builds the router with all Docker API endpoints registered.
-func New(a *adapter.KubernetesDockerAdapter, namespace string, logger *zap.SugaredLogger) http.Handler {
+// If swarmMode is true, the Docker Swarm API surface is also registered.
+func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, logger *zap.SugaredLogger) http.Handler {
 	mux := http.NewServeMux()
 
-	sys := system.NewHandler(namespace, logger)
+	sys := system.NewHandler(namespace, swarmMode, logger)
 	c := containers.NewHandler(a, logger)
 	v := volumes.NewHandler(a, logger)
 	n := networks.NewHandler(a, logger)
@@ -74,13 +76,48 @@ mux.HandleFunc("GET /exec/", e.Inspect)
 	// Events
 	mux.HandleFunc("GET /events", ev.Stream)
 
-	// Catch-all for unmatched routes — logs the method and path for debugging.
+	// Swarm mode - only registered when D2K_SWARM_MODE=true.
+	if swarmMode {
+		logger.Infow("swarm mode enabled - registering Swarm API endpoints")
+		sw := swarm.NewHandler(a, namespace, logger)
+
+		mux.HandleFunc("GET /swarm", sw.InspectSwarm)
+		mux.HandleFunc("POST /swarm/init", sw.InitSwarm)
+		mux.HandleFunc("POST /swarm/leave", sw.LeaveSwarm)
+
+		mux.HandleFunc("GET /nodes", sw.ListNodes)
+		mux.HandleFunc("GET /nodes/", sw.DispatchNode)
+		mux.HandleFunc("POST /nodes/", sw.DispatchNode)
+
+		mux.HandleFunc("POST /services/create", sw.CreateService)
+		mux.HandleFunc("GET /services", sw.ListServices)
+		mux.HandleFunc("GET /services/", sw.DispatchService)
+		mux.HandleFunc("POST /services/", sw.DispatchService)
+		mux.HandleFunc("DELETE /services/", sw.DispatchService)
+
+		mux.HandleFunc("GET /tasks", sw.ListTasks)
+		mux.HandleFunc("GET /tasks/", sw.InspectTask)
+
+		mux.HandleFunc("POST /secrets/create", sw.CreateSecret)
+		mux.HandleFunc("GET /secrets", sw.ListSecrets)
+		mux.HandleFunc("GET /secrets/", sw.DispatchSecret)
+		mux.HandleFunc("DELETE /secrets/", sw.DispatchSecret)
+
+		mux.HandleFunc("POST /configs/create", sw.CreateConfig)
+		mux.HandleFunc("GET /configs", sw.ListConfigs)
+		mux.HandleFunc("GET /configs/", sw.DispatchConfig)
+		mux.HandleFunc("DELETE /configs/", sw.DispatchConfig)
+
+		mux.HandleFunc("GET /distribution/", sw.DistributionInspect)
+	}
+
+	// Catch-all for unmatched routes - logs the method and path for debugging.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		logger.Warnw("unmatched route", "method", r.Method, "path", r.URL.Path)
 		http.NotFound(w, r)
 	})
 
-	// Versioned path prefix stripping — Docker CLI sends /v1.41/containers/json etc.
+	// Versioned path prefix stripping - Docker CLI sends /v1.41/containers/json etc.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 		if strings.HasPrefix(r.URL.Path, "/v") {

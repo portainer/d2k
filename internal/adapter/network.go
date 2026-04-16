@@ -12,14 +12,28 @@ const (
 	syntheticNetworkDriver = "d2k"
 )
 
+// NetworkIPAM is the IPAM configuration for a network.
+type NetworkIPAM struct {
+	Driver string       `json:"Driver"`
+	Config []IPAMConfig `json:"Config"`
+}
+
+// IPAMConfig is a single IPAM address pool entry.
+type IPAMConfig struct {
+	Subnet  string `json:"Subnet,omitempty"`
+	Gateway string `json:"Gateway,omitempty"`
+}
+
 // NetworkSummary is a Docker-compatible network entry.
 type NetworkSummary struct {
-	ID       string            `json:"Id"`
-	Name     string            `json:"Name"`
-	Driver   string            `json:"Driver"`
-	Scope    string            `json:"Scope"`
-	Internal bool              `json:"Internal"`
-	Labels   map[string]string `json:"Labels"`
+	ID         string            `json:"Id"`
+	Name       string            `json:"Name"`
+	Driver     string            `json:"Driver"`
+	Scope      string            `json:"Scope"`
+	Internal   bool              `json:"Internal"`
+	Attachable bool              `json:"Attachable"`
+	IPAM       NetworkIPAM       `json:"IPAM"`
+	Labels     map[string]string `json:"Labels"`
 }
 
 // CreateNetworkOptions mirrors docker network create flags.
@@ -40,7 +54,7 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 
 	if opts.Name != a.namespace && opts.Name != "bridge" && opts.Name != "host" {
 		warnings = append(warnings, fmt.Sprintf(
-			"network %q created but Kubernetes namespace networking is flat — "+
+			"network %q created but Kubernetes namespace networking is flat - "+
 				"all containers share the same network regardless of which network they are assigned to",
 			opts.Name,
 		))
@@ -62,8 +76,9 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 	summary := &NetworkSummary{
 		ID:     networkIDForName(opts.Name, a.namespace),
 		Name:   opts.Name,
-		Driver: syntheticNetworkDriver,
-		Scope:  "local",
+		Driver: "overlay",
+		Scope:  "swarm",
+		IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
 		Labels: labels,
 	}
 
@@ -81,10 +96,12 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 
 	networks := []NetworkSummary{
 		{
-			ID:     networkIDForName(a.namespace, a.namespace),
-			Name:   a.namespace,
-			Driver: syntheticNetworkDriver,
-			Scope:  "local",
+			ID:         networkIDForName(a.namespace, a.namespace),
+			Name:       a.namespace,
+			Driver:     "overlay",
+			Scope:      "swarm",
+			Attachable: true,
+			IPAM:       NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
 			Labels: map[string]string{
 				types.LabelManagedBy: types.LabelManagedByValue,
 			},
@@ -94,6 +111,7 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 			Name:   "bridge",
 			Driver: "bridge",
 			Scope:  "local",
+			IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{{Subnet: "172.17.0.0/16", Gateway: "172.17.0.1"}}},
 			Labels: map[string]string{},
 		},
 		{
@@ -101,6 +119,7 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 			Name:   "host",
 			Driver: "host",
 			Scope:  "host",
+			IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
 			Labels: map[string]string{},
 		},
 		{
@@ -108,7 +127,17 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 			Name:   "none",
 			Driver: "null",
 			Scope:  "local",
+			IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
 			Labels: map[string]string{},
+		},
+		{
+			ID:         networkIDForName("ingress", a.namespace),
+			Name:       "ingress",
+			Driver:     "overlay",
+			Scope:      "swarm",
+			Attachable: false,
+			IPAM:       NetworkIPAM{Driver: "default", Config: []IPAMConfig{{Subnet: "10.0.0.0/24", Gateway: "10.0.0.1"}}},
+			Labels:     map[string]string{"com.docker.network.driver.overlay.vxlanid_list": "4096"},
 		},
 	}
 
@@ -139,9 +168,41 @@ func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID s
 	return &NetworkSummary{
 		ID:     networkIDForName(nameOrID, a.namespace),
 		Name:   nameOrID,
-		Driver: syntheticNetworkDriver,
-		Scope:  "local",
+		Driver: "overlay",
+		Scope:  "swarm",
+		IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
 		Labels: syntheticLabels,
+	}, nil
+}
+
+// InspectNetworkDetail returns a full Docker network inspect response suitable
+// for Portainer and other tooling that expects more fields than the list view.
+func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, nameOrID string) (map[string]any, error) {
+	network, err := a.InspectNetwork(ctx, nameOrID)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"Name":       network.Name,
+		"Id":         network.ID,
+		"Created":    "2024-01-01T00:00:00.000000000Z",
+		"Scope":      network.Scope,
+		"Driver":     network.Driver,
+		"EnableIPv6": false,
+		"IPAM": map[string]any{
+			"Driver":  "default",
+			"Options": map[string]string{},
+			"Config":  network.IPAM.Config,
+		},
+		"Internal":   network.Internal,
+		"Attachable": network.Attachable,
+		"Ingress":    network.Name == "ingress",
+		"ConfigFrom": map[string]any{"Network": ""},
+		"ConfigOnly": false,
+		"Containers": map[string]any{},
+		"Options":    map[string]string{},
+		"Labels":     network.Labels,
 	}, nil
 }
 

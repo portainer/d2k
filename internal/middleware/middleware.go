@@ -59,6 +59,12 @@ func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	}
 	return hijacker.Hijack()
 }
+
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
 func newRequestID() string {
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
