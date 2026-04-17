@@ -1,0 +1,98 @@
+name: ci-publish
+
+# Triggered after the ci workflow completes on a pull_request event.
+# This workflow always runs from the default branch (develop), so its code
+# is never controlled by a fork contributor. Secrets are only accessed here,
+# never in the ci workflow that runs fork-contributed code.
+on:
+  workflow_run:
+    workflows: ["ci"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  REGISTRY: portainerci
+  IMAGE_NAME: d2k
+
+jobs:
+  publish:
+    # Only run when the triggering ci workflow succeeded and was itself triggered
+    # by a pull_request event (not a push or workflow_dispatch).
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: "[preparation] download image artifact"
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: pr-image
+          path: /tmp
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "[preparation] download image tag artifact"
+        uses: actions/download-artifact@95815c38cf2ff2164869cbab79da8d1f422bc89e # v4.2.1
+        with:
+          name: pr-image-tag
+          path: /tmp
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "[preparation] resolve and validate image tag"
+        id: tag
+        run: |
+          # Read tag from artifact written by the unprivileged ci workflow.
+          # Validate strictly — only allow the expected pr-<number> format to
+          # prevent injection if the artifact content were ever tampered with.
+          RAW_TAG=$(cat /tmp/image-tag.txt)
+          if [[ ! "$RAW_TAG" =~ ^pr-[0-9]+$ ]]; then
+            echo "::error::Unexpected image tag format: $RAW_TAG"
+            exit 1
+          fi
+          echo "value=$RAW_TAG" >> $GITHUB_OUTPUT
+
+          PR_NUMBER="${RAW_TAG#pr-}"
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+
+      - name: "[preparation] set up Docker Buildx"
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: "[preparation] log in to registry"
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: "[execution] push image to registry"
+        # Extract the pre-built OCI tarball and push via imagetools create.
+        # When given an oci-layout:// source, imagetools uploads all blobs and
+        # platform manifests from the local layout then creates the manifest
+        # index — correctly handling the multi-arch image index end-to-end.
+        # The fork's code was compiled in the sandboxed ci workflow — we never
+        # execute it here.
+        run: |
+          mkdir /tmp/image-oci
+          tar -xf /tmp/image.tar -C /tmp/image-oci
+          docker buildx imagetools create \
+            --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }} \
+            oci-layout:///tmp/image-oci
+
+      - name: "[execution] post PR comment"
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const prNumber = parseInt('${{ steps.tag.outputs.pr_number }}', 10);
+            const tag = '${{ steps.tag.outputs.value }}';
+            const registry = '${{ env.REGISTRY }}';
+            const image = '${{ env.IMAGE_NAME }}';
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: `> [!NOTE]\n> PR image published: \`${registry}/${image}:${tag}\``,
+            });

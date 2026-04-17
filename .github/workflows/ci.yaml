@@ -10,11 +10,9 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
   id-token: write
 
 env:
-  REGISTRY: portainerci
   IMAGE_NAME: d2k
 
 jobs:
@@ -39,23 +37,16 @@ jobs:
       - name: "[preparation] checkout the current branch"
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: "[preparation] tidy modules"
+      - name: "[preparation] set up golang"
         uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
 
       - name: "[preparation] verify go mod tidy"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           go mod tidy
           if ! git diff --exit-code go.mod go.sum > /dev/null 2>&1; then
             echo "::warning::go.mod or go.sum is out of date — please run 'go mod tidy' locally and commit the changes"
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              gh pr comment ${{ github.event.pull_request.number }} \
-                --repo ${{ github.repository }} \
-                --body $'> [!WARNING]\n> `go.mod` or `go.sum` is out of date. Please run `go mod tidy` locally and commit the changes.'
-            fi
           fi
 
       - name: "[preparation] set up QEMU"
@@ -64,18 +55,52 @@ jobs:
       - name: "[preparation] set up Docker Buildx"
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
+      - name: "[execution] build multi-arch image and export as OCI tarball"
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          push: false
+          load: false
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ github.sha }}
+          tags: ${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.value }}
+          outputs: type=oci,dest=/tmp/image.tar
+
+      - name: "[execution] save image tag metadata"
+        if: github.event_name == 'pull_request'
+        run: |
+          echo "${{ needs.tag.outputs.value }}" > /tmp/image-tag.txt
+
+      - name: "[execution] upload image artifact"
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr-image
+          path: /tmp/image.tar
+          retention-days: 1
+
+      - name: "[execution] upload image tag artifact"
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pr-image-tag
+          path: /tmp/image-tag.txt
+          retention-days: 1
+
       - name: "[preparation] log in to registry"
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: "[execution] build and push multi-arch image"
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: VERSION=${{ github.sha }}
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.value }}
+          tags: portainerci/${{ env.IMAGE_NAME }}:${{ needs.tag.outputs.value }}
           sbom: true
           provenance: mode=max
