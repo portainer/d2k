@@ -319,6 +319,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	}
 
 	// --- resource limits/requests ---
+	// Build from whatever the service spec provided first.
 	resourceReqs := corev1.ResourceRequirements{}
 	if spec.TaskTemplate.Resources.Limits.MemoryBytes > 0 || spec.TaskTemplate.Resources.Limits.NanoCPUs > 0 {
 		limits := corev1.ResourceList{}
@@ -341,6 +342,18 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		resourceReqs.Requests = requests
 	}
 
+	// --- quota-aware request injection ---
+	// If the namespace has a ResourceQuota that requires requests.cpu or
+	// requests.memory, any pod without those fields will be rejected 403 Forbidden.
+	// Docker has no concept of ResourceQuotas so the caller has no way to know they
+	// need --reserve-cpu / --reserve-memory. Inspect active quotas and inject the
+	// minimum required values when the service spec didn't provide them.
+	var quotaErr error
+	resourceReqs, quotaErr = a.injectQuotaDefaults(ctx, resourceReqs)
+	if quotaErr != nil {
+		return nil, quotaErr
+	}
+
 	// --- restart policy ---
 	restartPolicy := corev1.RestartPolicyAlways
 	switch spec.TaskTemplate.RestartPolicy.Condition {
@@ -350,26 +363,57 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		restartPolicy = corev1.RestartPolicyOnFailure
 	}
 
-	// --- placement constraints ??? nodeSelector ---
+	// --- placement constraints -> nodeSelector + nodeAffinity ---
+	// Swarm constraint format: "node.role == worker", "node.hostname == mynode",
+	// "node.labels.foo == bar". We translate each to the closest Kubernetes
+	// equivalent. node.role==worker is special: worker nodes in Kubernetes have
+	// no affirmative label, so we use a NotIn affinity on control-plane instead
+	// of a nodeSelector that would silently match nothing.
 	nodeSelector := map[string]string{}
+	var workerAffinity bool
 	for _, c := range spec.TaskTemplate.Placement.Constraints {
-		// Swarm format: "node.role == worker", "node.labels.foo == bar"
-		// We handle node.role only; custom label constraints are passed through.
 		c = strings.TrimSpace(c)
-		if strings.Contains(c, "node.role") {
-			if strings.Contains(c, "worker") {
-				nodeSelector["node-role.kubernetes.io/worker"] = ""
-			} else if strings.Contains(c, "manager") {
+		parts := strings.SplitN(c, "==", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		lhs := strings.TrimSpace(parts[0])
+		rhs := strings.TrimSpace(parts[1])
+		switch {
+		case lhs == "node.role":
+			if rhs == "worker" {
+				// Workers have no affirmative label in Kubernetes — use affinity
+				// to exclude control-plane nodes instead.
+				workerAffinity = true
+			} else if rhs == "manager" {
 				nodeSelector["node-role.kubernetes.io/control-plane"] = ""
 			}
-		} else if strings.Contains(c, "node.labels.") {
-			// "node.labels.foo == bar" ??? extract key/value
-			parts := strings.SplitN(c, "==", 2)
-			if len(parts) == 2 {
-				key := strings.TrimSpace(strings.TrimPrefix(parts[0], "node.labels."))
-				val := strings.TrimSpace(parts[1])
-				nodeSelector[key] = val
-			}
+		case lhs == "node.hostname":
+			// Map directly to the well-known Kubernetes hostname label.
+			nodeSelector["kubernetes.io/hostname"] = rhs
+		case strings.HasPrefix(lhs, "node.labels."):
+			// Pass user node labels through directly.
+			key := strings.TrimPrefix(lhs, "node.labels.")
+			nodeSelector[key] = rhs
+		}
+	}
+
+	// Build NodeAffinity for worker constraint (NotIn control-plane).
+	var nodeAffinity *corev1.NodeAffinity
+	if workerAffinity {
+		nodeAffinity = &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{
+					{
+						MatchExpressions: []corev1.NodeSelectorRequirement{
+							{
+								Key:      "node-role.kubernetes.io/control-plane",
+								Operator: corev1.NodeSelectorOpDoesNotExist,
+							},
+						},
+					},
+				},
+			},
 		}
 	}
 
@@ -497,6 +541,12 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 				Spec: corev1.PodSpec{
 					RestartPolicy: restartPolicy,
 					NodeSelector:  nodeSelector,
+					Affinity: func() *corev1.Affinity {
+						if nodeAffinity == nil {
+							return nil
+						}
+						return &corev1.Affinity{NodeAffinity: nodeAffinity}
+					}(),
 					Volumes:       volumes,
 					Containers: []corev1.Container{
 						{
@@ -524,6 +574,11 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
 			return nil, fmt.Errorf("service %q already exists", name)
+		}
+		if errors.IsForbidden(err) {
+			// Surface quota / RBAC rejections directly so the Docker CLI sees the
+			// reason rather than hanging in the "preparing" task loop indefinitely.
+			return nil, fmt.Errorf("deployment rejected by Kubernetes: %w", err)
 		}
 		return nil, fmt.Errorf("unable to create deployment for service %q: %w", name, err)
 	}
@@ -1574,6 +1629,62 @@ func swarmLabels(extra map[string]string) map[string]string {
 
 // sanitiseResourceName lowercases and sanitises a Swarm service name for use as
 // a Kubernetes resource name: lowercase, underscores to hyphens, max 63 chars.
+// injectQuotaDefaults inspects the namespace ResourceQuotas and ensures that
+// requests.cpu and requests.memory are set on the ResourceRequirements when the
+// quota enforces them. Without this, pods are rejected 403 Forbidden by the
+// quota admission controller when the caller (Docker) did not specify resources.
+//
+// Strategy: inject small fixed defaults (10m CPU, 32Mi memory) when the quota
+// requires the field to be present but the caller didn't set it. These values
+// are intentionally minimal — the quota admission controller only requires the
+// field to exist, not that it reflects actual consumption. The Kubernetes
+// scheduler independently handles real placement based on node capacity.
+// Already-set values from the caller are never overwritten.
+func (a *KubernetesDockerAdapter) injectQuotaDefaults(ctx context.Context, reqs corev1.ResourceRequirements) (corev1.ResourceRequirements, error) {
+	quotas, err := a.client.CoreV1().ResourceQuotas(a.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil || len(quotas.Items) == 0 {
+		return reqs, nil
+	}
+
+	needsCPU := false
+	needsMem := false
+
+	for _, q := range quotas.Items {
+		if _, ok := q.Spec.Hard[corev1.ResourceRequestsCPU]; ok {
+			needsCPU = true
+		}
+		if _, ok := q.Spec.Hard[corev1.ResourceRequestsMemory]; ok {
+			needsMem = true
+		}
+	}
+
+	if !needsCPU && !needsMem {
+		return reqs, nil
+	}
+
+	if reqs.Requests == nil {
+		reqs.Requests = corev1.ResourceList{}
+	}
+
+	if needsCPU {
+		if _, alreadySet := reqs.Requests[corev1.ResourceCPU]; !alreadySet {
+			reqs.Requests[corev1.ResourceCPU] = resource.MustParse("10m")
+			a.logger.Infow("injected requests.cpu to satisfy namespace ResourceQuota",
+				"namespace", a.namespace, "value", "10m")
+		}
+	}
+
+	if needsMem {
+		if _, alreadySet := reqs.Requests[corev1.ResourceMemory]; !alreadySet {
+			reqs.Requests[corev1.ResourceMemory] = resource.MustParse("32Mi")
+			a.logger.Infow("injected requests.memory to satisfy namespace ResourceQuota",
+				"namespace", a.namespace, "value", "32Mi")
+		}
+	}
+
+	return reqs, nil
+}
+
 func sanitiseResourceName(name string) string {
 	name = strings.ToLower(strings.ReplaceAll(name, "_", "-"))
 	if len(name) > 63 {
