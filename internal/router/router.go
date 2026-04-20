@@ -25,7 +25,7 @@ import (
 func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, logger *zap.SugaredLogger) http.Handler {
 	mux := http.NewServeMux()
 
-	sys := system.NewHandler(namespace, swarmMode, logger)
+	sys := system.NewHandler(a, namespace, swarmMode, logger)
 	c := containers.NewHandler(a, logger)
 	v := volumes.NewHandler(a, logger)
 	n := networks.NewHandler(a, logger)

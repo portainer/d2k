@@ -139,7 +139,7 @@ func (a *KubernetesDockerAdapter) SwarmListNodes(ctx context.Context) ([]map[str
 
 	result := make([]map[string]any, 0, len(nodeList.Items))
 	for _, n := range nodeList.Items {
-		result = append(result, kubeNodeToSwarm(n))
+		result = append(result, kubeNodeToSwarm(n, a.apiServerHost))
 	}
 	return result, nil
 }
@@ -156,7 +156,7 @@ func (a *KubernetesDockerAdapter) SwarmInspectNode(ctx context.Context, id strin
 	}
 	for _, n := range nodeList.Items {
 		if n.Name == id || swarmID(string(n.UID)) == id {
-			return kubeNodeToSwarm(n), nil
+			return kubeNodeToSwarm(n, a.apiServerHost), nil
 		}
 	}
 	return nil, fmt.Errorf("node %q not found", id)
@@ -1222,9 +1222,11 @@ func (a *KubernetesDockerAdapter) SwarmDeleteStack(ctx context.Context, stackNam
 
 // --- translation helpers ---
 
-func kubeNodeToSwarm(n corev1.Node) map[string]any {
+func kubeNodeToSwarm(n corev1.Node, apiServerHost string) map[string]any {
 	role := "worker"
-	if _, ok := n.Labels["node-role.kubernetes.io/control-plane"]; ok {
+	_, isControlPlane := n.Labels["node-role.kubernetes.io/control-plane"]
+	_, isMaster := n.Labels["node-role.kubernetes.io/master"] // older clusters
+	if isControlPlane || isMaster {
 		role = "manager"
 	}
 
@@ -1267,10 +1269,10 @@ func kubeNodeToSwarm(n corev1.Node) map[string]any {
 			},
 		},
 		"Status": map[string]any{
-			"State":   state,
-			"Addr":    nodeAddress(n),
+			"State": state,
+			"Addr":  nodeAddress(n),
 		},
-		"ManagerStatus": managerStatus(n, role),
+		"ManagerStatus": managerStatus(n, role, apiServerHost),
 	}
 }
 
@@ -1283,12 +1285,31 @@ func nodeAddress(n corev1.Node) string {
 	return ""
 }
 
-func managerStatus(n corev1.Node, role string) any {
+func managerStatus(n corev1.Node, role, apiServerHost string) any {
 	if role != "manager" {
 		return nil
 	}
+	// A node is the leader if its internal IP (or external IP, as fallback)
+	// matches the host d2k is using to reach the Kubernetes API server.
+	// In a single control-plane cluster this is always true for the one manager.
+	// In a multi-control-plane cluster only the node actually serving the API
+	// gets Leader=true; the others are reachable managers but not leader.
+	leader := false
+	if apiServerHost != "" {
+		for _, addr := range n.Status.Addresses {
+			if (addr.Type == corev1.NodeInternalIP || addr.Type == corev1.NodeExternalIP) &&
+				addr.Address == apiServerHost {
+				leader = true
+				break
+			}
+		}
+		// Also match by hostname in case the API server URL uses a DNS name.
+		if !leader && n.Name == apiServerHost {
+			leader = true
+		}
+	}
 	return map[string]any{
-		"Leader":       true,
+		"Leader":       leader,
 		"Reachability": "reachable",
 		"Addr":         nodeAddress(n),
 	}

@@ -8,6 +8,7 @@ package adapter
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sync"
 
 	"go.uber.org/zap"
@@ -28,6 +29,12 @@ type KubernetesDockerAdapter struct {
 
 	// namespace is the target Kubernetes namespace for all operations.
 	namespace string
+
+	// apiServerHost is the hostname or IP of the Kubernetes API server derived
+	// from the REST config. Used to identify the leader control-plane node:
+	// the control-plane node whose internal IP matches this host is reported
+	// as the Swarm leader.
+	apiServerHost string
 
 	// lowPortThreshold is the port number below which explicit -p mappings result
 	// in a LoadBalancer Service instead of a NodePort Service.
@@ -84,12 +91,24 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		client:           client,
 		metricsClient:    mc,
 		namespace:        opts.Config.Namespace,
+		apiServerHost:    apiServerHost(restCfg.Host),
 		lowPortThreshold: opts.Config.LowPortThreshold,
 		gpuResourceName:  opts.Config.GPUResourceName,
 		logger:           opts.Logger,
 		prevCPU:          map[string]int64{},
 		networks:         map[string]*NetworkSummary{},
 	}, nil
+}
+
+// apiServerHost extracts the bare hostname or IP from a Kubernetes API server
+// URL (e.g. "https://10.0.0.1:6443" -> "10.0.0.1").
+func apiServerHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	host := u.Hostname() // strips port
+	return host
 }
 
 // buildRestConfig returns a *rest.Config from a kubeconfig file path, or falls

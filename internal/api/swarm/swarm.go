@@ -73,16 +73,15 @@ func (h *Handler) InspectSwarm(w http.ResponseWriter, r *http.Request) {
 }
 
 // LeaveSwarm handles POST /swarm/leave.
-// This is a single-node cluster backed by Kubernetes - the node cannot leave.
+// Not implemented: d2k is a Kubernetes-backed API translator, not a real Swarm node.
 func (h *Handler) LeaveSwarm(w http.ResponseWriter, r *http.Request) {
-	httputils.WriteError(w, http.StatusServiceUnavailable, "This node is the last node in the cluster, node cannot leave.")
+	httputils.WriteError(w, http.StatusNotImplemented, "d2k is a Kubernetes-backed Docker API translator. 'docker swarm leave' is not applicable.")
 }
 
 // InitSwarm handles POST /swarm/init.
-// This node is already part of a swarm (the Kubernetes cluster) - return
-// the standard Docker error so callers know not to re-initialise.
+// Not implemented: d2k is a Kubernetes-backed API translator, not a real Swarm node.
 func (h *Handler) InitSwarm(w http.ResponseWriter, r *http.Request) {
-	httputils.WriteError(w, http.StatusServiceUnavailable, "This node is already part of a swarm. Use 'docker swarm leave' to leave this swarm and join another one.")
+	httputils.WriteError(w, http.StatusNotImplemented, "d2k is a Kubernetes-backed Docker API translator. 'docker swarm init' is not applicable.")
 }
 
 // --- /nodes ---
