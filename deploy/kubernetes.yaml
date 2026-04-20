@@ -7,8 +7,8 @@ kind: Namespace
 metadata:
   name: d2k   # change to your target namespace
 ---
-# ServiceAccount that d2k runs as. Scoped to a single namespace by the
-# RoleBinding below — d2k gets no cluster-wide permissions.
+# ServiceAccount that d2k runs as. Bound to the namespace Role below for
+# workload management, and to the ClusterRole below for read-only node access.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -47,26 +47,44 @@ rules:
     resources: ["services"]
     verbs: ["get", "watch", "list", "create", "update", "patch", "delete"]
 
+  # ConfigMaps — used for swarm identity (d2k-identity) and swarm configs
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Secrets — used for swarm secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
   # PersistentVolumeClaims — docker volume create/rm
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "watch", "list", "create", "delete"]
 
-  # Namespaces — read-only, used for connectivity check on startup
+  # Namespaces — read-only, used for cluster UID derivation and connectivity check
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get"]
-  
+
+  # ResourceQuotas — read-only, used to inject requests.cpu/memory when the
+  # namespace quota enforces them (Docker has no concept of ResourceQuotas)
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["get", "list"]
+
   # Metrics — optional, used for docker stats
   - apiGroups: ["metrics.k8s.io"]
     resources: ["pods"]
     verbs: ["get", "list"]
+
   # Events — read-only, used for docker events history
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list"]
+
 ---
-# RoleBinding ties the Role to the ServiceAccount, scoped to the namespace.
+# RoleBinding ties the namespace-scoped Role to the ServiceAccount.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -75,16 +93,47 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: d2k
-    namespace: d2k  # change to your target namespace
+    namespace: d2k   # change to your target namespace
 roleRef:
   kind: Role
   name: d2k
   apiGroup: rbac.authorization.k8s.io
 
 ---
+# ClusterRole grants read access to nodes across the cluster.
+# Nodes are a cluster-scoped resource and cannot be granted via a namespaced Role.
+# Required for: SwarmListNodes, SwarmInspectNode, SwarmUpdateNode, and leader
+# election in /info (matching the API server host to a control-plane node IP).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: d2k-node-reader
+  labels:
+    app: d2k
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+
+---
+# ClusterRoleBinding ties the node ClusterRole to the d2k ServiceAccount.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d2k-node-reader
+  labels:
+    app: d2k
+subjects:
+  - kind: ServiceAccount
+    name: d2k
+    namespace: d2k   # change to your target namespace
+roleRef:
+  kind: ClusterRole
+  name: d2k-node-reader
+  apiGroup: rbac.authorization.k8s.io
+
+---
 # Deployment running d2k itself inside the target namespace.
-# It exposes the Docker API on port 2375 as a ClusterIP Service,
-# which Portainer or other tooling connects to.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -105,7 +154,7 @@ spec:
       serviceAccountName: d2k
       containers:
         - name: d2k
-          image: d2k:latest   # replace with your image
+          image: neilcresswell/d2k:latest   # replace with your image
           imagePullPolicy: Always
           ports:
             - containerPort: 2375
@@ -116,6 +165,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: D2K_PORT
               value: "2375"
+            - name: D2K_SWARM_MODE
+              value: "true"   # set to "false" to run in Docker host mode instead
             - name: D2K_LOG_LEVEL
               value: "info"
             # D2K_KUBECONFIG is intentionally not set — in-cluster auth is used.
@@ -128,8 +179,11 @@ spec:
               memory: "128Mi"
 
 ---
-# Service exposing the Docker API within the cluster.
-# Connect Portainer (or docker context) to d2k-service.d2k.svc:2375
+# OPTION A — LoadBalancer Service
+# Use this when your cluster has a cloud load balancer controller or a bare-metal
+# equivalent (e.g. MetalLB). The controller assigns an external IP automatically.
+# Connect Portainer to: tcp://<EXTERNAL-IP>:2375
+# Delete this section if you are using the NodePort option below.
 apiVersion: v1
 kind: Service
 metadata:
@@ -145,3 +199,29 @@ spec:
       port: 2375
       targetPort: 2375
   type: LoadBalancer
+
+---
+# OPTION B — NodePort Service
+# Use this when your cluster does not have a load balancer controller (e.g. bare
+# metal, on-prem, or single-node clusters). The Docker API is reachable on every
+# node at the assigned NodePort (30000-32767 range, assigned by Kubernetes).
+# Connect Portainer to: tcp://<ANY-NODE-IP>:<NODE-PORT>:2375
+# You can pin the NodePort to a specific value by uncommenting nodePort below.
+# Delete this section if you are using the LoadBalancer option above.
+#
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: d2k
+#   namespace: d2k   # change to your target namespace
+#   labels:
+#     app: d2k
+# spec:
+#   selector:
+#     app: d2k
+#   ports:
+#     - name: docker-api
+#       port: 2375
+#       targetPort: 2375
+#       # nodePort: 32375   # uncomment to pin to a specific port
+#   type: NodePort
