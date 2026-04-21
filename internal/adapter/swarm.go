@@ -1622,8 +1622,14 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name
 	// service IP in the services list. Use the external LB IP if available.
 	virtualIPs := []any{}
 	if externalIP != "" {
+		// Docker CLI parses VirtualIPs[].Addr with netip.ParsePrefix so it
+		// must be CIDR notation. Use /32 for IPv4, /128 for IPv6.
+		cidr := externalIP + "/32"
+		if strings.Contains(externalIP, ":") {
+			cidr = externalIP + "/128"
+		}
 		virtualIPs = []any{
-			map[string]any{"Addr": externalIP},
+			map[string]any{"Addr": cidr},
 		}
 	}
 
