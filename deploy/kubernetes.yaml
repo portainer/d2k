@@ -100,10 +100,12 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 
 ---
-# ClusterRole grants read access to nodes across the cluster.
+# ClusterRole grants read-only access to nodes across the cluster.
 # Nodes are a cluster-scoped resource and cannot be granted via a namespaced Role.
-# Required for: SwarmListNodes, SwarmInspectNode, SwarmUpdateNode, and leader
-# election in /info (matching the API server host to a control-plane node IP).
+# Required for: SwarmListNodes, SwarmInspectNode, and leader election in /info
+# (matching the API server host to a control-plane node IP).
+# Node state changes (drain/pause/active) and label mutations are intentionally
+# blocked — d2k is a workload consumption tool, not a cluster administration tool.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -113,7 +115,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch"]
 
 ---
 # ClusterRoleBinding ties the node ClusterRole to the d2k ServiceAccount.
