@@ -96,6 +96,28 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	// Always create a ClusterIP Service so the container name resolves via
 	// Kubernetes DNS from other pods in the namespace. This makes Docker
 	// short-name DNS work (e.g. "redis", "postgres") without needing FQDNs.
+	// Build ClusterIP ports from container port mappings.
+	var clusterPorts []corev1.ServicePort
+	for i, m := range mappings {
+		clusterPorts = append(clusterPorts, corev1.ServicePort{
+			Name:       fmt.Sprintf("port-%d", i),
+			Protocol:   corev1.Protocol(m.Protocol),
+			Port:       int32(m.ContainerPort),
+			TargetPort: intstr.FromInt(m.ContainerPort),
+		})
+	}
+	// Use headless (clusterIP: None) when there are no ports — Kubernetes rejects
+	// ClusterIP Services with an empty ports list but headless Services are allowed
+	// without ports and still register the DNS name for short-name resolution.
+	clusterSpec := corev1.ServiceSpec{
+		Selector: map[string]string{"app": opts.Name},
+		Ports:    clusterPorts,
+	}
+	if len(clusterPorts) == 0 {
+		clusterSpec.ClusterIP = "None"
+	} else {
+		clusterSpec.Type = corev1.ServiceTypeClusterIP
+	}
 	clusterSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      opts.Name,
@@ -105,19 +127,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 				"d2k.portainer.io/dns-service": "true",
 			},
 		},
-		Spec: corev1.ServiceSpec{
-			Type:     corev1.ServiceTypeClusterIP,
-			Selector: map[string]string{"app": opts.Name},
-		},
-	}
-	// Add ports to the ClusterIP service if we have container port mappings.
-	for i, m := range mappings {
-		clusterSvc.Spec.Ports = append(clusterSvc.Spec.Ports, corev1.ServicePort{
-			Name:       fmt.Sprintf("port-%d", i),
-			Protocol:   corev1.Protocol(m.Protocol),
-			Port:       int32(m.ContainerPort),
-			TargetPort: intstr.FromInt(m.ContainerPort),
-		})
+		Spec: clusterSpec,
 	}
 	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
 		if !errors.IsAlreadyExists(svcErr) {
