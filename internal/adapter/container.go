@@ -77,7 +77,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	}
 
 	// Build and create the Deployment.
-	deployment, err := a.buildDeployment(opts, kind, mappings)
+	deployment, err := a.buildDeployment(ctx, opts, kind, mappings)
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to build deployment: %w", err)
 	}
@@ -86,6 +86,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
 			return "", nil, fmt.Errorf("container name %q is already in use", opts.Name)
+		}
+		if errors.IsForbidden(err) {
+			return "", nil, fmt.Errorf("deployment rejected by Kubernetes: %w", err)
 		}
 		return "", nil, fmt.Errorf("unable to create deployment %q: %w", opts.Name, err)
 	}
@@ -231,7 +234,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 
 // --- builders ---
 
-func (a *KubernetesDockerAdapter) buildDeployment(opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, error) {
+func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, error) {
 	labels := managedLabels(opts.Name)
 	for k, v := range opts.Labels {
 		if clean, ok := sanitiseLabelValue(v); ok {
@@ -281,6 +284,16 @@ func (a *KubernetesDockerAdapter) buildDeployment(opts RunOptions, kind portmapp
 		}
 	}
 
+	// Inject requests.cpu / requests.memory when the namespace has a ResourceQuota
+	// that requires them. Docker has no concept of ResourceQuotas so the caller
+	// cannot know they are needed. injectQuotaDefaults is a no-op when no quota exists.
+	resourceReqs, err := a.injectQuotaDefaults(ctx, corev1.ResourceRequirements{
+		Limits: resourceLimits,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	replicas := int32(1)
 
 	return &appsv1.Deployment{
@@ -311,9 +324,7 @@ func (a *KubernetesDockerAdapter) buildDeployment(opts RunOptions, kind portmapp
 							Command: opts.Cmd,
 							Env:     envVars,
 							Ports:   containerPorts,
-							Resources: corev1.ResourceRequirements{
-								Limits: resourceLimits,
-							},
+							Resources: resourceReqs,
 						},
 					},
 				},
