@@ -619,6 +619,20 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		})
 	}
 
+	// Use a headless Service (clusterIP: None) when there are no ports.
+	// Kubernetes rejects ClusterIP Services with an empty ports list, but
+	// headless Services are allowed without ports and still register the DNS
+	// name so short-name resolution (e.g. "redis") works from other pods.
+	clusterSvcSpec := corev1.ServiceSpec{
+		Selector: map[string]string{"app": name},
+		Ports:    clusterIPPorts,
+	}
+	if len(clusterIPPorts) == 0 {
+		clusterSvcSpec.ClusterIP = "None"
+	} else {
+		clusterSvcSpec.Type = corev1.ServiceTypeClusterIP
+	}
+
 	clusterSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -628,11 +642,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 				"d2k.portainer.io/dns-service": "true",
 			},
 		},
-		Spec: corev1.ServiceSpec{
-			Type:     corev1.ServiceTypeClusterIP,
-			Selector: map[string]string{"app": name},
-			Ports:    clusterIPPorts,
-		},
+		Spec: clusterSvcSpec,
 	}
 	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
 		if !errors.IsAlreadyExists(svcErr) {
