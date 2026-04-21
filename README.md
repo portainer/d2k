@@ -24,9 +24,9 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `docker stop` | Scale Deployment to 0 |
 | `docker start` | Scale Deployment to 1 |
 | `docker rm` | Delete Deployment + Service |
-| `-p <host>:<container>` | LoadBalancer Service |
+| `-p <host>:<container>` | LoadBalancer Service (host port < 1024) or NodePort Service |
 | `-P` (publish all) | NodePort Service |
-| No port flags | No Service created |
+| No port flags | ClusterIP headless Service (DNS only, no external exposure) |
 | `docker volume create` | PersistentVolumeClaim |
 | `docker network create` | Synthetic (namespace network is flat) |
 | `docker pull` | Acknowledged — Kubernetes pulls at schedule time |
@@ -42,11 +42,11 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 
 | Swarm concept | Kubernetes translation |
 |---|---|
-| Service | Deployment + optional LoadBalancer Service |
+| Service | Deployment + ClusterIP DNS Service + optional LoadBalancer Service |
 | Task | Pod |
 | Stack | Group of Deployments labelled by stack name |
-| Secret | Kubernetes Secret |
-| Config | Kubernetes ConfigMap |
+| Secret | Kubernetes Secret, mounted at `/run/secrets/<name>` |
+| Config | Kubernetes ConfigMap, mounted at the path specified in `File.Name` |
 | Node | Kubernetes Node |
 | Manager node | Control-plane node (`node-role.kubernetes.io/control-plane` or `master`) |
 | Worker node | Non-control-plane node |
@@ -57,9 +57,23 @@ Swarm IDs are derived deterministically from Kubernetes UIDs so they are stable 
 
 Node count, manager count, and the Swarm leader are derived from the live Kubernetes cluster on every `/info` call. Multi-node clusters are represented correctly. `docker swarm init` and `docker swarm leave` return `501 Not Implemented` — d2k is a translator, not a real Swarm node.
 
+### DNS and service discovery
+
+Every service creates a Kubernetes DNS Service named after the bare service name (not the stack-prefixed name). This means containers in the same namespace can reach each other using Docker short names: `redis`, `db`, `postgres` — without FQDNs. The DNS Service is headless (`ClusterIP: None`) when no ports are published, and ClusterIP when ports are declared.
+
+For stack deployments, Docker names services as `<stack>_<service>` (e.g. `example-app_redis`). d2k registers the DNS Service under the bare name (`redis`) so inter-service communication works without any application changes. A known limitation: Docker stack deploy creates services concurrently, so a service that starts before its dependency's DNS entry is registered may fail on first connection. Most Docker applications retry, so this self-heals in practice.
+
+### Secrets and configs
+
+Secrets are mounted at `/run/secrets/<name>` by default, matching Docker Swarm convention. Custom mount paths are supported via the `target` option in `docker service create --secret` or in Compose `secrets` blocks. The secret value is stored and mounted as raw bytes.
+
+Configs are mounted at the absolute path specified in `File.Name`. If no target path is specified, the config is mounted at `/<config-name>`.
+
 ### Tested and confirmed working
 
-`docker service create`, `docker service scale`, `docker service update --image`, and `docker service rm` all converge correctly with the CLI progress bar. `docker service logs` and `docker service logs --follow` stream with correct Docker multiplexed wire format and swarm details context. `docker stack deploy`, `docker stack ls`, `docker stack ps`, and `docker stack rm` all work correctly alongside standalone services. `docker secret` and `docker config` CRUD are fully functional. Portainer renders the Swarm cluster view including nodes, CPU, memory, services, stacks, networks, secrets, and configs.
+`docker service create`, `docker service scale` (including scale to zero), `docker service update --image`, and `docker service rm` all converge correctly with the CLI progress bar. `docker service logs` and `docker service logs --follow` stream with correct Docker multiplexed wire format and swarm details context. `docker stack deploy`, `docker stack ls`, `docker stack ps`, and `docker stack rm` all work correctly alongside standalone services. `docker secret` and `docker config` CRUD are fully functional and secrets/configs mount correctly into service containers. Portainer renders the Swarm cluster view including nodes, CPU, memory, services, stacks, networks (with external IP), secrets, and configs. Placement constraints (`node.role`, `node.hostname`, `node.labels.*`) are correctly translated to Kubernetes nodeSelector and NodeAffinity rules.
+
+---
 
 ## GPU support
 
@@ -96,25 +110,25 @@ docker --context d2k run -d --gpus all --name ml-job pytorch/pytorch:latest
 
 ## Logs
 
-Global mode services (`--mode global`) are deployed as replicated with a warning. Service rollback (`docker service rollback`) is not implemented. Node drain cordon-annotates the node but does not evict existing pods. Secrets and configs are mounted into service containers via Kubernetes volume mounts but end-to-end injection has not been verified. Port conflict detection across services is not enforced.
+Global mode services (`--mode global`) are deployed as replicated with a warning. Service rollback (`docker service rollback`) is not implemented. Node drain cordon-annotates the node but does not evict existing pods. Port conflict detection across services is not enforced.
 
 ---
 
 ## Port mapping rules
 
-No `-p` flag means no Service is created. `-P` (publish all) creates a NodePort Service. Explicit `-p host:container` creates a LoadBalancer Service. If a host IP is included (e.g. `-p 127.0.0.1:8080:80`), it is ignored with a warning.
+No `-p` flag means no LoadBalancer or NodePort Service is created, but a headless ClusterIP Service is always created for DNS. `-P` (publish all) creates a NodePort Service. Explicit `-p host:container` creates a LoadBalancer Service when the host port is below `D2K_LOW_PORT_THRESHOLD` (default 1024), otherwise a NodePort Service. If a host IP is included (e.g. `-p 127.0.0.1:8080:80`), it is ignored with a warning.
 
 ---
 
 ## Networking
 
-Kubernetes namespace networking is flat. All Pods in the namespace can reach each other by IP regardless of which Docker network they are assigned to. `docker network create` is accepted and returns a synthetic network, but no actual network isolation is enforced.
+Kubernetes namespace networking is flat. All Pods in the namespace can reach each other by IP regardless of which Docker network they are assigned to. `docker network create` is accepted and returns a synthetic network, but no actual network isolation is enforced. Every service and container gets a Kubernetes DNS Service so Docker short names resolve within the namespace.
 
 ---
 
 ## Volumes
 
-`docker volume create` creates a PersistentVolumeClaim using the cluster's default StorageClass with `ReadWriteOnce` access mode. Size defaults to `1Gi` and can be overridden with `--opt size=5Gi`. Bind mounts are not supported.
+`docker volume create` creates a PersistentVolumeClaim using the cluster's default StorageClass with `ReadWriteOnce` access mode. Size defaults to `1Gi` and can be overridden with `--opt size=5Gi`. Bind mounts are not supported. Note that `ReadWriteOnce` PVCs can only be mounted by pods on a single node — services scaled across multiple nodes that share a named volume may fail to schedule on nodes other than where the PVC is bound.
 
 ---
 
@@ -151,6 +165,8 @@ docker --context d2k service ls
 | `D2K_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
 | `D2K_LOG_FORMAT` | `text` | Log format: text, json |
 | `D2K_KUBECONFIG` | _(empty)_ | Path to kubeconfig. Empty = in-cluster auth |
+| `D2K_LOW_PORT_THRESHOLD` | `1024` | Host ports below this value use LoadBalancer, above use NodePort |
+| `D2K_GPU_RESOURCE_NAME` | _(empty)_ | Kubernetes device plugin resource name for `--gpus` support (e.g. `nvidia.com/gpu`) |
 
 ---
 
@@ -181,7 +197,7 @@ Docker client
 |  +-- container.go   (Deployments)        |
 |  +-- swarm.go       (Swarm surface)      |
 |  +-- volume.go      (PVCs)               |
-|  +-- network.go     (synthetic)          |
+|  +-- network.go     (synthetic + DNS)    |
 |  +-- logs.go        (pod log stream)     |
 |  +-- exec.go        (pod exec/SPDY)      |
 |  +-- metrics.go     (metrics-server)     |
@@ -209,6 +225,7 @@ Docker host mode requires namespace-scoped permissions only.
 | secrets | get, list, watch, create, update, patch, delete |
 | persistentvolumeclaims | get, list, watch, create, delete |
 | namespaces | get |
+| resourcequotas | get, list |
 | events | get, list |
 | metrics.k8s.io/pods | get, list _(optional)_ |
 
@@ -232,3 +249,6 @@ Node update/patch is required for `docker node update` (drain/active/pause), whi
 - Swarm services are scoped to a single namespace. Multi-namespace deployments require separate d2k instances.
 - `docker swarm init` and `docker swarm leave` return `501 Not Implemented`.
 - Global mode services (`--mode global`) are deployed as replicated with a warning.
+- `ReadWriteOnce` PVCs cannot be shared across nodes — services with multiple replicas that mount the same named volume may fail to schedule.
+- Stack deploy creates services concurrently. Services that connect to dependencies on startup may fail on first attempt if the dependency's DNS entry has not yet been registered. Applications that retry connections will self-heal.
+- `node.role == manager` placement constraint requires the control-plane node to have its taint removed or the workload to tolerate it (`node-role.kubernetes.io/control-plane:NoSchedule`).
