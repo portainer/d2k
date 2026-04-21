@@ -152,9 +152,20 @@ spec:
         app: d2k
     spec:
       serviceAccountName: d2k
+      volumes:
+        # TLS Secret mount — optional. If the d2k-tls Secret does not exist,
+        # the mount is silently skipped and d2k listens on port 2375 without TLS.
+        # To enable TLS:
+        #   kubectl create secret tls d2k-tls --cert=server.crt --key=server.key -n d2k
+        #   kubectl rollout restart deployment/d2k -n d2k
+        # d2k will then listen on port 2376 with TLS automatically.
+        - name: tls
+          secret:
+            secretName: d2k-tls
+            optional: true
       containers:
         - name: d2k
-          image: portainerci/d2k:develop   # replace with your image
+          image: neilcresswell/d2k:latest   # replace with your image
           imagePullPolicy: Always
           ports:
             - containerPort: 2375
@@ -170,6 +181,13 @@ spec:
             - name: D2K_LOG_LEVEL
               value: "info"
             # D2K_KUBECONFIG is intentionally not set — in-cluster auth is used.
+            # D2K_TLS_CERT_FILE and D2K_TLS_KEY_FILE are not set here — they
+            # default to /etc/d2k/tls/tls.crt and /etc/d2k/tls/tls.key which
+            # are populated by the d2k-tls volume mount below if the Secret exists.
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/d2k/tls
+              readOnly: true
           resources:
             requests:
               cpu: "50m"
@@ -182,7 +200,8 @@ spec:
 # OPTION A — LoadBalancer Service
 # Use this when your cluster has a cloud load balancer controller or a bare-metal
 # equivalent (e.g. MetalLB). The controller assigns an external IP automatically.
-# Connect Portainer to: tcp://<EXTERNAL-IP>:2375
+# Connect Portainer to: tcp://<EXTERNAL-IP>:2375 (no TLS) or tcp://<EXTERNAL-IP>:2376 (TLS)
+# Update the port value below to 2376 if TLS is configured.
 # Delete this section if you are using the NodePort option below.
 apiVersion: v1
 kind: Service
