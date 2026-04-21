@@ -633,13 +633,26 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		clusterSvcSpec.Type = corev1.ServiceTypeClusterIP
 	}
 
+	// Determine the DNS service name.
+	// For stack services, Docker sends spec.Name as "<stack>_<service>" (e.g.
+	// "example-app_redis"). We register DNS using just the bare service name
+	// ("redis") so apps can connect using short names without stack prefixes.
+	// For standalone services, the name is used as-is.
+	dnsName := name
+	if idx := strings.LastIndex(spec.Name, "_"); idx != -1 {
+		if bare := sanitiseResourceName(spec.Name[idx+1:]); bare != "" {
+			dnsName = bare
+		}
+	}
+
 	clusterSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      dnsName,
 			Namespace: a.namespace,
 			Labels:    baseLabels,
 			Annotations: map[string]string{
-				"d2k.portainer.io/dns-service": "true",
+				"d2k.portainer.io/dns-service":    "true",
+				"d2k.portainer.io/dns-for-deploy": name,
 			},
 		},
 		Spec: clusterSvcSpec,
@@ -647,7 +660,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
 		if !errors.IsAlreadyExists(svcErr) {
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
-			return nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", name, svcErr)
+			return nil, fmt.Errorf("unable to create DNS service for %q: %w", name, svcErr)
 		}
 	}
 
@@ -825,10 +838,14 @@ func (a *KubernetesDockerAdapter) SwarmDeleteService(ctx context.Context, id str
 			if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{}); err != nil {
 				return err
 			}
-			// Best-effort delete all associated k8s Services:
-			// - ClusterIP DNS service (named after the deployment)
-			// - LoadBalancer service (named with -lb suffix)
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{})
+			// Delete DNS service (bare name for stack services, full name for standalone).
+			dnsName := d.Name
+			if idx := strings.LastIndex(d.Name, "-"); idx != -1 {
+				if bare := d.Name[idx+1:]; bare != "" {
+					dnsName = bare
+				}
+			}
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{})
 			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name)+"-lb", metav1.DeleteOptions{})
 			return nil
 		}
@@ -1312,8 +1329,15 @@ func (a *KubernetesDockerAdapter) SwarmDeleteStack(ctx context.Context, stackNam
 	}
 	for _, d := range deps.Items {
 		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{})
-		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{})
 		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name)+"-lb", metav1.DeleteOptions{})
+		// DNS service is registered under the bare name for stack services.
+		dnsName := d.Name
+		if idx := strings.LastIndex(d.Name, "-"); idx != -1 {
+			if bare := d.Name[idx+1:]; bare != "" {
+				dnsName = bare
+			}
+		}
+		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{})
 	}
 
 	// Delete Secrets labelled with this stack.
