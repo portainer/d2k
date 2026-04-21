@@ -1419,7 +1419,17 @@ func kubeNodeToSwarm(n corev1.Node, apiServerHost string) map[string]any {
 				"MemoryBytes": n.Status.Capacity.Memory().Value(),
 			},
 			"Engine": map[string]any{
-				"EngineVersion": "d2k",
+				"EngineVersion": "d2k/" + n.Status.NodeInfo.KubeletVersion,
+				// Plugins must be a flat array of {Type, Name} objects.
+				// Portainer's NodeDetailsViewController calls transformPlugins()
+				// which filters this array by Type — if missing, .filter() throws
+				// "can't access property filter, t is undefined".
+				"Plugins": []map[string]any{
+					{"Type": "Network", "Name": "bridge"},
+					{"Type": "Network", "Name": "host"},
+					{"Type": "Network", "Name": "null"},
+					{"Type": "Log",     "Name": "json-file"},
+				},
 			},
 		},
 		"Status": map[string]any{
