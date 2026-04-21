@@ -40,6 +40,10 @@ type KubernetesDockerAdapter struct {
 	// in a LoadBalancer Service instead of a NodePort Service.
 	lowPortThreshold int
 
+	// restConfig is the Kubernetes REST config used to build the client.
+	// Stored so exec operations can reuse it without rebuilding from disk each time.
+	restConfig *rest.Config
+
 	// gpuResourceName is the Kubernetes resource name for GPU device requests
 	// (e.g. "nvidia.com/gpu" or "amd.com/gpu"). Empty means GPU support is disabled.
 	gpuResourceName string
@@ -90,6 +94,7 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 	return &KubernetesDockerAdapter{
 		client:           client,
 		metricsClient:    mc,
+		restConfig:       restCfg,
 		namespace:        opts.Config.Namespace,
 		apiServerHost:    apiServerHost(restCfg.Host),
 		lowPortThreshold: opts.Config.LowPortThreshold,
