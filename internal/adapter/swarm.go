@@ -1556,6 +1556,9 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 					"Replicas": replicas,
 				},
 			},
+			// EndpointSpec.Ports: Portainer service detail reads this to render
+			// the "Published ports" panel. Populated from the LB Service if present.
+			"EndpointSpec": a.swarmServiceEndpointSpec(ctx, d.Name),
 		},
 		"ServiceStatus": map[string]any{
 			"RunningTasks":   runningTasks,
@@ -1615,23 +1618,54 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name
 		ports = []any{}
 	}
 
-	// Spec.Ports mirrors Ports — used by Portainer and docker service inspect.
-	endpoint := map[string]any{
+	// VirtualIPs: Portainer reads Endpoint.VirtualIPs[].Addr to display the
+	// service IP in the services list. Use the external LB IP if available.
+	virtualIPs := []any{}
+	if externalIP != "" {
+		virtualIPs = []any{
+			map[string]any{"Addr": externalIP},
+		}
+	}
+
+	return map[string]any{
+		// Spec.Ports: Portainer service detail panel reads EndpointSpec.Ports
+		// to populate the "Published ports" section.
 		"Spec": map[string]any{
 			"Mode":  "vip",
 			"Ports": ports,
 		},
 		"Ports":      ports,
-		"VirtualIPs": []any{},
+		"VirtualIPs": virtualIPs,
 	}
+}
 
-	// If we have an external IP, surface it in the Ports entries and as a
-	// top-level annotation so the CLI can display it.
-	if externalIP != "" {
-		endpoint["ExternalIPs"] = []string{externalIP}
+
+// swarmServiceEndpointSpec returns the EndpointSpec block for the Spec field
+// of a service inspect response. Portainer reads Spec.EndpointSpec.Ports to
+// render the "Published ports" panel in the service detail view.
+func (a *KubernetesDockerAdapter) swarmServiceEndpointSpec(ctx context.Context, name string) map[string]any {
+	lbName := serviceName(name) + "-lb"
+	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, lbName, metav1.GetOptions{})
+	if err != nil {
+		return map[string]any{"Mode": "vip", "Ports": []any{}}
 	}
-
-	return endpoint
+	var ports []any
+	for _, p := range svc.Spec.Ports {
+		proto := "tcp"
+		if p.Protocol == corev1.ProtocolUDP {
+			proto = "udp"
+		}
+		ports = append(ports, map[string]any{
+			"Protocol":      proto,
+			"TargetPort":    int(p.TargetPort.IntVal),
+			"PublishedPort": int(p.Port),
+			"PublishMode":   "ingress",
+		})
+	}
+	if ports == nil {
+		ports = []any{}
+	}
+	return map[string]any{"Mode": "vip", "Ports": ports}
 }
 
 
