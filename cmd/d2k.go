@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,6 +18,12 @@ import (
 	"github.com/portainer/d2k/internal/logging"
 	"github.com/portainer/d2k/internal/router"
 )
+
+// fileExists returns true if the file at path exists and is readable.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 func main() {
 	ctx := context.Background()
@@ -52,8 +59,19 @@ func main() {
 
 	handler := router.New(a, cfg.Namespace, cfg.SwarmMode, logger)
 
+	// Detect TLS: if both cert and key files exist, listen on TLSPort with TLS.
+	// The files are typically mounted from a Kubernetes Secret named d2k-tls.
+	useTLS := fileExists(cfg.TLSCertFile) && fileExists(cfg.TLSKeyFile)
+
+	var listenAddr string
+	if useTLS {
+		listenAddr = fmt.Sprintf(":%d", cfg.TLSPort)
+	} else {
+		listenAddr = fmt.Sprintf(":%d", cfg.Port)
+	}
+
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
+		Addr:         listenAddr,
 		Handler:      handler,
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 0, // 0 = no timeout; needed for streaming log endpoints
@@ -65,9 +83,25 @@ func main() {
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 
 	go func() {
-		logger.Infow("d2k listening", "addr", srv.Addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatalw("server error", "error", err)
+		if useTLS {
+			cert, tlsErr := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+			if tlsErr != nil {
+				logger.Fatalw("unable to load TLS certificate", "error", tlsErr)
+			}
+			srv.TLSConfig = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				MinVersion:   tls.VersionTLS12,
+			}
+			logger.Infow("d2k listening with TLS", "addr", srv.Addr, "cert", cfg.TLSCertFile)
+			if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				logger.Fatalw("server error", "error", err)
+			}
+		} else {
+			logger.Warnw("TLS not configured — listening without TLS", "addr", srv.Addr,
+				"hint", "mount a Kubernetes Secret named d2k-tls with tls.crt and tls.key to enable TLS")
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Fatalw("server error", "error", err)
+			}
 		}
 	}()
 
