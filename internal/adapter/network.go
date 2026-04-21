@@ -153,6 +153,47 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 		networks = append(networks, *n)
 	}
 
+	// Add per-service networks for all swarm-managed deployments.
+	// Portainer maps Spec.Networks[].Target against availableNetworks by ID —
+	// if the ID isn't in this list the Networks panel shows empty. We generate
+	// one synthetic overlay network per service, with the LB IP as the IPAM
+	// subnet so Portainer displays it in the IP address column.
+	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
+	})
+	if err == nil {
+		for _, d := range deps.Items {
+			netID := networkIDForName(d.Name, a.namespace)
+			// Look up LB service IP for the subnet value.
+			subnet := "10.0.0.0/8"
+			lbSvc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, serviceName(d.Name)+"-lb", metav1.GetOptions{})
+			if svcErr == nil {
+				for _, ing := range lbSvc.Status.LoadBalancer.Ingress {
+					if ing.IP != "" {
+						subnet = ing.IP + "/32"
+						break
+					}
+					if ing.Hostname != "" {
+						subnet = ing.Hostname
+						break
+					}
+				}
+			}
+			networks = append(networks, NetworkSummary{
+				ID:         netID,
+				Name:       d.Name,
+				Driver:     "overlay",
+				Scope:      "swarm",
+				Attachable: true,
+				IPAM:       NetworkIPAM{Driver: "default", Config: []IPAMConfig{{Subnet: subnet}}},
+				Labels: map[string]string{
+					types.LabelManagedBy:      types.LabelManagedByValue,
+					types.LabelSwarmManagedBy: types.LabelSwarmManagedByValue,
+				},
+			})
+		}
+	}
+
 	return networks, nil
 }
 
