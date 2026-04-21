@@ -186,7 +186,16 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 }
 
 // StopContainer implements docker stop: scales the Deployment to 0 replicas.
+// Returns an error if the Deployment is managed by the Swarm layer.
 func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string) error {
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return err
+	}
+	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+		return fmt.Errorf("cannot stop a container that is managed by swarm: use docker service scale instead")
+	}
 	return a.scaleDeployment(ctx, name, 0)
 }
 
@@ -196,10 +205,18 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 }
 
 // RemoveContainer implements docker rm: deletes the Deployment and its associated Service (if any).
+// Returns an error if the Deployment is managed by the Swarm layer — use docker service rm instead.
 func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name string) error {
 	resolved, err := a.resolveDeploymentName(ctx, name)
 	if err != nil {
 		return err
+	}
+
+	// Refuse to remove containers that back a swarm service — the same guard
+	// Docker Swarm applies: "cannot remove a running container that is managed by swarm".
+	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+		return fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead")
 	}
 
 	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
