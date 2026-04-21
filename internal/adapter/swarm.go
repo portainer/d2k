@@ -588,46 +588,96 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	created.Annotations[types.AnnotationSwarmServiceID] = serviceID
 	_, _ = a.client.AppsV1().Deployments(a.namespace).Update(ctx, created, metav1.UpdateOptions{})
 
-	// --- published ports ??? LoadBalancer Service ---
+	// --- Kubernetes Services ---
+	// Always create a ClusterIP Service so the service name resolves via
+	// Kubernetes DNS within the namespace. This is what makes Docker short-name
+	// DNS (e.g. "redis", "postgres") work between containers in a stack —
+	// Kubernetes DNS resolves <service-name> to the ClusterIP from any pod in
+	// the same namespace without needing a FQDN.
+	// If ports are also published, a LoadBalancer Service is created separately
+	// for external access (using a -lb suffix to avoid name collision).
 	var warnings []string
+
+	// Build ClusterIP ports from whichever port spec is available.
+	// If no ports are declared at all we still create a headless-style ClusterIP
+	// with no ports — enough to register the DNS name.
+	var clusterIPPorts []corev1.ServicePort
+	for i, p := range spec.EndpointSpec.Ports {
+		proto := corev1.ProtocolTCP
+		if strings.ToUpper(p.Protocol) == "UDP" {
+			proto = corev1.ProtocolUDP
+		}
+		port := int32(p.TargetPort)
+		if port == 0 {
+			continue
+		}
+		clusterIPPorts = append(clusterIPPorts, corev1.ServicePort{
+			Name:       fmt.Sprintf("port-%d", i),
+			Protocol:   proto,
+			Port:       port,
+			TargetPort: intstr.FromInt(p.TargetPort),
+		})
+	}
+
+	clusterSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: a.namespace,
+			Labels:    baseLabels,
+			Annotations: map[string]string{
+				"d2k.portainer.io/dns-service": "true",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeClusterIP,
+			Selector: map[string]string{"app": name},
+			Ports:    clusterIPPorts,
+		},
+	}
+	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
+		if !errors.IsAlreadyExists(svcErr) {
+			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
+			return nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", name, svcErr)
+		}
+	}
+
+	// Create a LoadBalancer Service for externally published ports.
 	if len(spec.EndpointSpec.Ports) > 0 {
 		if spec.EndpointSpec.Mode == "dnsrr" {
-			warnings = append(warnings, "d2k: dnsrr endpoint mode is not supported; a ClusterIP Service will be created instead")
+			warnings = append(warnings, "d2k: dnsrr endpoint mode is not supported; a ClusterIP Service will be used for DNS")
 		}
-		var svcPorts []corev1.ServicePort
+		var lbPorts []corev1.ServicePort
 		for i, p := range spec.EndpointSpec.Ports {
+			if p.PublishedPort == 0 {
+				continue
+			}
 			proto := corev1.ProtocolTCP
 			if strings.ToUpper(p.Protocol) == "UDP" {
 				proto = corev1.ProtocolUDP
 			}
-			sp := corev1.ServicePort{
+			lbPorts = append(lbPorts, corev1.ServicePort{
 				Name:       fmt.Sprintf("port-%d", i),
 				Protocol:   proto,
 				Port:       int32(p.PublishedPort),
 				TargetPort: intstr.FromInt(p.TargetPort),
-			}
-			if p.PublishedPort == 0 {
-				sp.Port = int32(p.TargetPort)
-			}
-			svcPorts = append(svcPorts, sp)
+			})
 		}
-
-		svc := &corev1.Service{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      serviceName(name),
-				Namespace: a.namespace,
-				Labels:    baseLabels,
-			},
-			Spec: corev1.ServiceSpec{
-				Type:     corev1.ServiceTypeLoadBalancer,
-				Selector: map[string]string{"app": name},
-				Ports:    svcPorts,
-			},
-		}
-		if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{}); svcErr != nil {
-			// Roll back Deployment so we don't leave an orphan.
-			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
-			return nil, fmt.Errorf("unable to create service for %q: %w", name, svcErr)
+		if len(lbPorts) > 0 {
+			lbSvc := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      serviceName(name) + "-lb",
+					Namespace: a.namespace,
+					Labels:    baseLabels,
+				},
+				Spec: corev1.ServiceSpec{
+					Type:     corev1.ServiceTypeLoadBalancer,
+					Selector: map[string]string{"app": name},
+					Ports:    lbPorts,
+				},
+			}
+			if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, lbSvc, metav1.CreateOptions{}); svcErr != nil {
+				warnings = append(warnings, fmt.Sprintf("d2k: unable to create LoadBalancer service for %q: %s", name, svcErr))
+			}
 		}
 	}
 
@@ -648,7 +698,7 @@ func (a *KubernetesDockerAdapter) SwarmListServices(ctx context.Context) ([]map[
 
 	result := make([]map[string]any, 0, len(deps.Items))
 	for _, d := range deps.Items {
-		result = append(result, kubeDeploymentToSwarmService(d))
+		result = append(result, a.deploymentToSwarmService(ctx, d))
 	}
 	return result, nil
 }
@@ -663,7 +713,7 @@ func (a *KubernetesDockerAdapter) SwarmInspectService(ctx context.Context, id st
 	}
 	for _, d := range deps.Items {
 		if d.Annotations[types.AnnotationSwarmServiceID] == id || d.Name == id {
-			return kubeDeploymentToSwarmService(d), nil
+			return a.deploymentToSwarmService(ctx, d), nil
 		}
 	}
 	return nil, fmt.Errorf("service %q not found", id)
@@ -765,8 +815,11 @@ func (a *KubernetesDockerAdapter) SwarmDeleteService(ctx context.Context, id str
 			if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{}); err != nil {
 				return err
 			}
-			// Best-effort delete associated k8s Service.
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name), metav1.DeleteOptions{})
+			// Best-effort delete all associated k8s Services:
+			// - ClusterIP DNS service (named after the deployment)
+			// - LoadBalancer service (named with -lb suffix)
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name)+"-lb", metav1.DeleteOptions{})
 			return nil
 		}
 	}
@@ -1249,7 +1302,8 @@ func (a *KubernetesDockerAdapter) SwarmDeleteStack(ctx context.Context, stackNam
 	}
 	for _, d := range deps.Items {
 		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{})
-		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name), metav1.DeleteOptions{})
+		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{})
+		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name)+"-lb", metav1.DeleteOptions{})
 	}
 
 	// Delete Secrets labelled with this stack.
@@ -1385,7 +1439,10 @@ func serviceSpecLabels(depLabels map[string]string) map[string]string {
 	return result
 }
 
-func kubeDeploymentToSwarmService(d appsv1.Deployment) map[string]any {
+// deploymentToSwarmService converts a Deployment to a Swarm service map,
+// looking up the associated LoadBalancer Service to populate Endpoint.Ports
+// with the external IP and published port mappings.
+func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, d appsv1.Deployment) map[string]any {
 	serviceID := d.Annotations[types.AnnotationSwarmServiceID]
 	if serviceID == "" {
 		serviceID = swarmID(string(d.UID))
@@ -1495,14 +1552,78 @@ func kubeDeploymentToSwarmService(d appsv1.Deployment) map[string]any {
 			"DesiredTasks":   replicas,
 			"CompletedTasks": 0,
 		},
-		"Endpoint": map[string]any{
-			"Spec":              map[string]any{},
-			"Ports":             []any{},
-			"VirtualIPs":        []any{},
-		},
+		"Endpoint": a.swarmServiceEndpoint(ctx, d.Name),
 		"UpdateStatus": updateStatus, // nil on new services - CLI polls tasks instead
 	}
 }
+
+// swarmServiceEndpoint looks up the LoadBalancer Service for a swarm service
+// (named <service>-lb) and returns a Docker Endpoint map populated with the
+// external IP and published port mappings. Falls back to empty arrays when no
+// LB Service exists or the LB IP has not yet been assigned.
+func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name string) map[string]any {
+	lbName := serviceName(name) + "-lb"
+	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, lbName, metav1.GetOptions{})
+	if err != nil {
+		// No LB service — return empty endpoint.
+		return map[string]any{
+			"Spec":       map[string]any{},
+			"Ports":      []any{},
+			"VirtualIPs": []any{},
+		}
+	}
+
+	// Extract the external IP assigned by the LB controller.
+	externalIP := ""
+	for _, ing := range svc.Status.LoadBalancer.Ingress {
+		if ing.IP != "" {
+			externalIP = ing.IP
+			break
+		}
+		if ing.Hostname != "" {
+			externalIP = ing.Hostname
+			break
+		}
+	}
+
+	// Build the Ports list in Docker Swarm wire format.
+	var ports []any
+	for _, p := range svc.Spec.Ports {
+		proto := "tcp"
+		if p.Protocol == corev1.ProtocolUDP {
+			proto = "udp"
+		}
+		entry := map[string]any{
+			"Protocol":      proto,
+			"TargetPort":    int(p.TargetPort.IntVal),
+			"PublishedPort": int(p.Port),
+			"PublishMode":   "ingress",
+		}
+		ports = append(ports, entry)
+	}
+	if ports == nil {
+		ports = []any{}
+	}
+
+	// Spec.Ports mirrors Ports — used by Portainer and docker service inspect.
+	endpoint := map[string]any{
+		"Spec": map[string]any{
+			"Mode":  "vip",
+			"Ports": ports,
+		},
+		"Ports":      ports,
+		"VirtualIPs": []any{},
+	}
+
+	// If we have an external IP, surface it in the Ports entries and as a
+	// top-level annotation so the CLI can display it.
+	if externalIP != "" {
+		endpoint["ExternalIPs"] = []string{externalIP}
+	}
+
+	return endpoint
+}
+
 
 func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot int) map[string]any {
 	// Map pod phase + container readiness to a Swarm task state.
