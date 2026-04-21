@@ -155,6 +155,51 @@ docker --context d2k service ls
 
 ---
 
+## TLS
+
+TLS is opt-in. d2k detects TLS automatically at startup by checking whether a certificate and key exist at the configured paths (defaults: `/etc/d2k/tls/tls.crt` and `/etc/d2k/tls/tls.key`). If both files are present, d2k listens on port 2376 with TLS. If either is absent, d2k listens on port 2375 without TLS and logs a warning.
+
+The standard way to provide a certificate is via a Kubernetes Secret mounted into the pod. The manifest already includes the volume mount with `optional: true` — the pod starts normally whether or not the Secret exists.
+
+```bash
+# Create the Secret from your cert and key
+kubectl create secret tls d2k-tls   --cert=server.crt   --key=server.key   -n d2k
+
+# Restart d2k to pick up the new Secret
+kubectl rollout restart deployment/d2k -n d2k
+```
+
+d2k does not generate self-signed certificates. The operator is responsible for the certificate, including the SANs. For external access, the certificate must include the IP address or DNS name that clients use to connect — typically the LoadBalancer external IP, a DNS record pointing to it, or both.
+
+If your cluster has cert-manager installed, you can automate certificate issuance and renewal:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: d2k-tls
+  namespace: d2k
+spec:
+  secretName: d2k-tls
+  dnsNames:
+    - d2k.yourdomain.com
+  issuerRef:
+    name: your-issuer
+    kind: ClusterIssuer
+```
+
+cert-manager writes the certificate into the `d2k-tls` Secret automatically. A rollout restart picks it up. For automated rotation, configure cert-manager's `renewBefore` and add a restart annotation or use Reloader.
+
+Once TLS is active, update your Docker context or Portainer environment to use port 2376:
+
+```bash
+docker context create d2k   --docker "host=tcp://d2k.yourdomain.com:2376"
+```
+
+The Service manifest port value should also be updated from 2375 to 2376 when TLS is in use.
+
+---
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -167,6 +212,9 @@ docker --context d2k service ls
 | `D2K_KUBECONFIG` | _(empty)_ | Path to kubeconfig. Empty = in-cluster auth |
 | `D2K_LOW_PORT_THRESHOLD` | `1024` | Host ports below this value use LoadBalancer, above use NodePort |
 | `D2K_GPU_RESOURCE_NAME` | _(empty)_ | Kubernetes device plugin resource name for `--gpus` support (e.g. `nvidia.com/gpu`) |
+| `D2K_TLS_CERT_FILE` | `/etc/d2k/tls/tls.crt` | Path to TLS certificate file. TLS is enabled when both cert and key exist |
+| `D2K_TLS_KEY_FILE` | `/etc/d2k/tls/tls.key` | Path to TLS private key file |
+| `D2K_TLS_PORT` | `2376` | Port used when TLS is active |
 
 ---
 
