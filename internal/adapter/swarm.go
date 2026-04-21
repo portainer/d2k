@@ -20,6 +20,7 @@ package adapter
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -305,7 +306,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		// Global mode = DaemonSet. We don't translate DaemonSets - warn and
 		// treat as replicated with 1 replica so the service still comes up.
 		a.logger.Warnw("global mode service requested; d2k does not support DaemonSet translation, deploying as replicated with 1 replica", "service", name)
-	} else if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas > 0 {
+	} else if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
 		replicas = int32(spec.Mode.Replicated.Replicas)
 	}
 
@@ -461,9 +462,11 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 				},
 			},
 		})
+		// Ensure mount path is absolute without double-slash if targetName already has a leading slash.
+		configMountPath := "/" + strings.TrimPrefix(targetName, "/")
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      "config-" + c.ConfigName,
-			MountPath: "/" + targetName,
+			MountPath: configMountPath,
 			SubPath:   targetName,
 			ReadOnly:  true,
 		})
@@ -788,7 +791,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		target.Spec.Template.Spec.Containers[0].Env = envVars
 	}
 
-	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas > 0 {
+	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
 		r := int32(spec.Mode.Replicated.Replicas)
 		target.Spec.Replicas = &r
 		// Cache desired replica count in annotation so ServiceInspect returns
@@ -1138,13 +1141,21 @@ func (a *KubernetesDockerAdapter) SwarmCreateSecret(ctx context.Context, body io
 		return nil, fmt.Errorf("invalid secret request: %w", err)
 	}
 
+	// Docker sends secret Data as a base64-encoded string — decode before storing
+	// so the raw value is available when mounted into containers.
+	decodedData, decErr := base64.StdEncoding.DecodeString(req.Data)
+	if decErr != nil {
+		// Fall back to raw bytes if decoding fails (e.g. already raw).
+		decodedData = []byte(req.Data)
+	}
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      req.Name,
 			Namespace: a.namespace,
 			Labels:    swarmLabels(req.Labels),
 		},
-		Data: map[string][]byte{req.Name: []byte(req.Data)},
+		Data: map[string][]byte{req.Name: decodedData},
 	}
 
 	created, err := a.client.CoreV1().Secrets(a.namespace).Create(ctx, secret, metav1.CreateOptions{})
