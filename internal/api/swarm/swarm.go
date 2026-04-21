@@ -11,7 +11,7 @@
 //	POST /swarm/init             -> no-op, cluster already exists
 //	GET  /nodes                  -> list Kubernetes nodes as Swarm nodes
 //	GET  /nodes/{id}             -> inspect single node
-//	POST /nodes/{id}/update      -> drain -> cordon+drain, active -> uncordon
+//	POST /nodes/{id}/update      -> 403 Forbidden (node state changes not permitted)
 //	POST /services/create        -> Compose service -> Deployment + Service
 //	GET  /services               -> list Deployments as Swarm services
 //	GET  /services/{id}          -> inspect single service
@@ -127,11 +127,12 @@ func (h *Handler) inspectNode(w http.ResponseWriter, r *http.Request, id string)
 }
 
 func (h *Handler) updateNode(w http.ResponseWriter, r *http.Request, id string) {
-	if err := h.adapter.SwarmUpdateNode(r.Context(), id, r.Body); err != nil {
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	httputils.WriteJSON(w, http.StatusOK, map[string]any{})
+	// d2k is a consumption tool, not a cluster administration tool.
+	// Node state changes (drain, pause, active) and label mutations are blocked.
+	// Cluster node management must be performed directly via kubectl or the
+	// Kubernetes API by a cluster administrator.
+	httputils.WriteError(w, http.StatusForbidden,
+		"node state changes are not permitted via d2k: manage Kubernetes nodes directly via kubectl")
 }
 
 // --- /services ---
