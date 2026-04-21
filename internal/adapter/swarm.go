@@ -1577,7 +1577,7 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 				// Networks: Portainer reads TaskTemplate.Networks to populate the
 				// "Networks" panel in the service detail view.
 				"Networks": []map[string]any{
-					{"Target": networkIDForName(a.namespace, a.namespace), "Aliases": []string{d.Name}},
+					{"Target": networkIDForName(d.Name, a.namespace), "Aliases": []string{d.Name}},
 				},
 			},
 			"Mode": map[string]any{
@@ -1587,7 +1587,7 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 			},
 			// Networks at the service spec level — also read by some Portainer versions.
 			"Networks": []map[string]any{
-				{"Target": networkIDForName(a.namespace, a.namespace), "Aliases": []string{d.Name}},
+				{"Target": networkIDForName(d.Name, a.namespace), "Aliases": []string{d.Name}},
 			},
 			// EndpointSpec.Ports: Portainer service detail reads this to render
 			// the "Published ports" panel. Populated from the LB Service if present.
@@ -1665,7 +1665,9 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name
 			map[string]any{
 				// NetworkID must match Spec.Networks[].Target so Portainer can
 				// associate the IP with the namespace network name.
-				"NetworkID": networkIDForName(a.namespace, a.namespace),
+				// NetworkID matches Spec.Networks[].Target so Portainer associates the IP
+				// with the service network in the detail panel.
+				"NetworkID": networkIDForName(name, a.namespace),
 				"Addr":      cidr,
 			},
 		}
