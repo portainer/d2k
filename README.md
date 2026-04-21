@@ -281,9 +281,9 @@ Swarm mode adds a ClusterRole for node access:
 
 | Resource | Verbs | Scope |
 |---|---|---|
-| nodes | get, list, watch, update, patch | ClusterRole |
+| nodes | get, list, watch | ClusterRole |
 
-Node update/patch is required for `docker node update` (drain/active/pause), which cordon-annotates the Kubernetes node.
+Node state changes (`docker node update --availability drain/pause/active`) and label mutations are intentionally blocked. d2k is a workload consumption tool — cluster node management must be performed directly via kubectl by a cluster administrator. Attempts to change node state via d2k return `403 Forbidden`.
 
 ---
 
