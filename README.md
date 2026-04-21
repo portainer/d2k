@@ -47,11 +47,15 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | Stack | Group of Deployments labelled by stack name |
 | Secret | Kubernetes Secret |
 | Config | Kubernetes ConfigMap |
-| Node | Kubernetes Node (read-only) |
-| Swarm cluster | Single-namespace, single-node synthetic cluster |
+| Node | Kubernetes Node |
+| Manager node | Control-plane node (`node-role.kubernetes.io/control-plane` or `master`) |
+| Worker node | Non-control-plane node |
+| Swarm leader | Control-plane node serving the Kubernetes API (matched by IP) |
 | Overlay network | Synthetic (namespace network is flat) |
 
 Swarm IDs are derived deterministically from Kubernetes UIDs so they are stable across d2k restarts. The cluster identity is stored in a ConfigMap (`d2k-identity`) in the target namespace.
+
+Node count, manager count, and the Swarm leader are derived from the live Kubernetes cluster on every `/info` call. Multi-node clusters are represented correctly. `docker swarm init` and `docker swarm leave` return `501 Not Implemented` — d2k is a translator, not a real Swarm node.
 
 ### Tested and confirmed working
 
@@ -92,7 +96,7 @@ docker --context d2k run -d --gpus all --name ml-job pytorch/pytorch:latest
 
 ## Logs
 
-Global mode services (`--mode global`) are deployed as replicated with a warning. Service rollback (`docker service rollback`) is not implemented. Node drain evicts the cordon annotation but does not evict existing pods. Secrets and configs are mounted into service containers via Kubernetes volume mounts but end-to-end injection has not been verified. Port conflict detection across services is not enforced.
+Global mode services (`--mode global`) are deployed as replicated with a warning. Service rollback (`docker service rollback`) is not implemented. Node drain cordon-annotates the node but does not evict existing pods. Secrets and configs are mounted into service containers via Kubernetes volume mounts but end-to-end injection has not been verified. Port conflict detection across services is not enforced.
 
 ---
 
@@ -116,13 +120,13 @@ Kubernetes namespace networking is flat. All Pods in the namespace can reach eac
 
 ## Deployment
 
-d2k runs inside the target cluster namespace using a ServiceAccount with a namespace-scoped Role. It has no cluster-wide permissions except the optional metrics API.
+d2k runs inside the target cluster namespace using a ServiceAccount bound to a namespace-scoped Role for workload management and a ClusterRole for node read access (required for Swarm mode node listing and leader election).
 
 ```bash
 kubectl apply -f deploy/kubernetes.yaml
 ```
 
-For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. A separate manifest (`deploy/sd2k-kubernetes.yaml`) is provided with the correct RBAC for Swarm mode, which additionally requires node read access via a ClusterRole.
+For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. The single manifest covers both modes — the ClusterRole and ClusterRoleBinding for node access are always included.
 
 Connect Portainer or the Docker CLI to the d2k Service:
 
@@ -201,18 +205,20 @@ Docker host mode requires namespace-scoped permissions only.
 | pods/log | get |
 | pods/exec | create |
 | services | get, list, watch, create, update, patch, delete |
+| configmaps | get, list, watch, create, update, patch, delete |
+| secrets | get, list, watch, create, update, patch, delete |
 | persistentvolumeclaims | get, list, watch, create, delete |
 | namespaces | get |
 | events | get, list |
 | metrics.k8s.io/pods | get, list _(optional)_ |
 
-Swarm mode adds:
+Swarm mode adds a ClusterRole for node access:
 
 | Resource | Verbs | Scope |
 |---|---|---|
 | nodes | get, list, watch, update, patch | ClusterRole |
-| secrets | get, list, watch, create, update, patch, delete | namespace |
-| configmaps | get, list, watch, create, update, patch, delete | namespace |
+
+Node update/patch is required for `docker node update` (drain/active/pause), which cordon-annotates the Kubernetes node.
 
 ---
 
@@ -223,4 +229,6 @@ Swarm mode adds:
 - Network isolation is not enforced. All pods share the namespace network.
 - Image metadata is synthesised. Actual image metadata lives on cluster nodes.
 - `docker stats` requires metrics-server to return real data.
-- Swarm mode is single-namespace and single-node. Multi-node scheduling constraints are accepted but ignored.
+- Swarm services are scoped to a single namespace. Multi-namespace deployments require separate d2k instances.
+- `docker swarm init` and `docker swarm leave` return `501 Not Implemented`.
+- Global mode services (`--mode global`) are deployed as replicated with a warning.

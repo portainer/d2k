@@ -9,25 +9,28 @@
 package system
 
 import (
+	"context"
 	"net/http"
 	"runtime"
 
 	"go.uber.org/zap"
 
+	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/types"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
 // Handler holds dependencies for system endpoints.
 type Handler struct {
+	adapter   *adapter.KubernetesDockerAdapter
 	namespace string
 	swarmMode bool
 	logger    *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(namespace string, swarmMode bool, logger *zap.SugaredLogger) *Handler {
-	return &Handler{namespace: namespace, swarmMode: swarmMode, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, logger *zap.SugaredLogger) *Handler {
+	return &Handler{adapter: a, namespace: namespace, swarmMode: swarmMode, logger: logger}
 }
 
 // Ping handles GET /_ping.
@@ -53,23 +56,62 @@ func (h *Handler) Version(w http.ResponseWriter, r *http.Request) {
 // swarmInfo returns the Swarm section of the /info response.
 // When swarm mode is active, Portainer (and Docker CLI) use LocalNodeState and
 // ControlAvailable to decide whether to show the Swarm UI.
-func (h *Handler) swarmInfo() map[string]any {
+// Node counts and the manager node ID are derived from the live Kubernetes cluster
+// so multi-node clusters are represented correctly.
+func (h *Handler) swarmInfo(ctx context.Context) map[string]any {
 	if !h.swarmMode {
 		return map[string]any{
 			"LocalNodeState": "inactive",
 		}
 	}
+
+	// Fetch live node list to get accurate counts.
+	nodes, err := h.adapter.SwarmListNodes(ctx)
+	if err != nil {
+		h.logger.Warnw("swarmInfo: unable to list nodes", "error", err)
+	}
+	totalNodes := len(nodes)
+	managerCount := 0
+	for _, n := range nodes {
+		if spec, ok := n["Spec"].(map[string]any); ok {
+			if spec["Role"] == "manager" {
+				managerCount++
+			}
+		}
+	}
+	if totalNodes == 0 {
+		totalNodes = 1
+	}
+	if managerCount == 0 {
+		managerCount = 1
+	}
+
+	// Fetch stable cluster identity so NodeID matches what /swarm returns.
+	nodeID := "d2k"
+	clusterID := "d2k-cluster"
+	identity, err := h.adapter.SwarmIdentity(ctx)
+	if err != nil {
+		h.logger.Warnw("swarmInfo: unable to get swarm identity", "error", err)
+	} else {
+		if id, ok := identity["NodeID"].(string); ok && id != "" {
+			nodeID = id
+		}
+		if id, ok := identity["ID"].(string); ok && id != "" {
+			clusterID = id
+		}
+	}
+
 	return map[string]any{
 		"LocalNodeState":   "active",
 		"ControlAvailable": true,
 		"Error":            "",
-		"NodeID":           "d2k",
+		"NodeID":           nodeID,
 		"NodeAddr":         "",
-		"RemoteManagers":   []map[string]any{{"NodeID": "d2k", "Addr": ""}},
-		"Nodes":            1,
-		"Managers":         1,
+		"RemoteManagers":   []map[string]any{{"NodeID": nodeID, "Addr": ""}},
+		"Nodes":            totalNodes,
+		"Managers":         managerCount,
 		"Cluster": map[string]any{
-			"ID": "d2k-cluster",
+			"ID":      clusterID,
 			"Version": map[string]any{"Index": uint64(1)},
 			"Spec": map[string]any{
 				"Name":   "d2k",
@@ -113,7 +155,7 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
     "NCPU":              1,
     "MemTotal":          int64(2 * 1024 * 1024 * 1024),
     "SecurityOptions":   []string{},
-    "Swarm": h.swarmInfo(),
+    "Swarm": h.swarmInfo(r.Context()),
     "Labels": []string{
         "d2k.portainer.io/translator=true",
         "d2k.portainer.io/namespace=" + h.namespace,
