@@ -160,10 +160,22 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
         "d2k.portainer.io/translator=true",
         "d2k.portainer.io/namespace=" + h.namespace,
     },
+    // Plugins must be arrays of objects with Name/Type fields.
+    // Portainer's node-details-view-controller calls .filter() on these arrays
+    // and will throw "can't access property filter, t is undefined" if they
+    // are plain string arrays or missing fields.
     "Plugins": map[string]any{
-        "Volume":  []string{},
-        "Network": []string{"bridge", "host", "null"},
-        "Log":     []string{},
+        "Volume": []map[string]any{},
+        "Network": []map[string]any{
+            {"Name": "bridge", "Type": "Network"},
+            {"Name": "host",   "Type": "Network"},
+            {"Name": "null",   "Type": "Network"},
+        },
+        "Log": []map[string]any{
+            {"Name": "json-file", "Type": "Log"},
+        },
+        "Authorization": []map[string]any{},
+        "Builder":       []map[string]any{},
     },
 })
 }
