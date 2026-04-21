@@ -101,7 +101,12 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 			Driver:     "overlay",
 			Scope:      "swarm",
 			Attachable: true,
-			IPAM:       NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
+			// Portainer reads IPAM.Config[].Subnet to populate the IP address column
+			// in the service Networks panel. Without a subnet entry the column is blank
+			// even when VirtualIPs[].Addr is correctly populated.
+			IPAM: NetworkIPAM{Driver: "default", Config: []IPAMConfig{
+				{Subnet: "10.0.0.0/8"},
+			}},
 			Labels: map[string]string{
 				types.LabelManagedBy: types.LabelManagedByValue,
 			},
@@ -191,7 +196,7 @@ func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, name
 		"Driver":     network.Driver,
 		"EnableIPv6": false,
 		"IPAM": map[string]any{
-			"Driver":  "default",
+			"Driver":  network.IPAM.Driver,
 			"Options": map[string]string{},
 			"Config":  network.IPAM.Config,
 		},
