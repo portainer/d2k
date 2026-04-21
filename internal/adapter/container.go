@@ -93,15 +93,49 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, fmt.Errorf("unable to create deployment %q: %w", opts.Name, err)
 	}
 
-	// Create the Service if needed.
+	// Always create a ClusterIP Service so the container name resolves via
+	// Kubernetes DNS from other pods in the namespace. This makes Docker
+	// short-name DNS work (e.g. "redis", "postgres") without needing FQDNs.
+	clusterSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      opts.Name,
+			Namespace: a.namespace,
+			Labels:    managedLabels(opts.Name),
+			Annotations: map[string]string{
+				"d2k.portainer.io/dns-service": "true",
+			},
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeClusterIP,
+			Selector: map[string]string{"app": opts.Name},
+		},
+	}
+	// Add ports to the ClusterIP service if we have container port mappings.
+	for i, m := range mappings {
+		clusterSvc.Spec.Ports = append(clusterSvc.Spec.Ports, corev1.ServicePort{
+			Name:       fmt.Sprintf("port-%d", i),
+			Protocol:   corev1.Protocol(m.Protocol),
+			Port:       int32(m.ContainerPort),
+			TargetPort: intstr.FromInt(m.ContainerPort),
+		})
+	}
+	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
+		if !errors.IsAlreadyExists(svcErr) {
+			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+			return "", nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
+		}
+	}
+
+	// Create a LoadBalancer or NodePort Service for externally published ports.
 	if kind != portmapper.NoService && len(mappings) > 0 {
 		svc, svcErr := a.buildService(opts.Name, kind, mappings)
 		if svcErr != nil {
 			return "", nil, fmt.Errorf("unable to build service: %w", svcErr)
 		}
 		if _, svcErr = a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{}); svcErr != nil {
-			// Roll back the Deployment so we don't leave an orphan.
+			// Roll back the Deployment and ClusterIP service so we don't leave orphans.
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
 			return "", nil, fmt.Errorf("unable to create service for %q: %w", opts.Name, svcErr)
 		}
 	}
@@ -162,11 +196,9 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
 	}
 
-	// Best-effort Service deletion — try both the plain name and the svc- prefixed name.
-	svcErr := a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
-	if svcErr != nil && !errors.IsNotFound(svcErr) {
-		a.logger.Warnw("unable to delete service", "name", resolved, "error", svcErr)
-	}
+	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
+	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{})
+	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
 
 	return nil
 }
