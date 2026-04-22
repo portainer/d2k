@@ -222,9 +222,38 @@ Node update/patch is required for `docker node update` (drain/active/pause), whi
 
 ---
 
+## Not supported
+
+These features are absent by design. They reflect fundamental differences between the Docker and Kubernetes models and will not be added.
+
+### Image management
+
+`docker build`, `docker commit`, `docker tag`, `docker push`, `docker save`, `docker load`, `docker image prune`, and all `docker buildx` commands are not supported. d2k is a runtime translator. Image build and registry operations operate below the Kubernetes layer — Kubernetes pulls images at schedule time from a registry and has no equivalent concept of a local image daemon. Use a standard CI pipeline and container registry to build and push images before running them through d2k.
+
+### Advanced networking
+
+`docker network create --driver macvlan` and `--driver ipvlan` are not supported and will not be. macvlan and ipvlan require direct Layer 2 hardware access, assigning real MAC and IP addresses to container interfaces. Kubernetes networking is CNI-managed and operates above this level — there is no Kubernetes equivalent. If your workload requires macvlan (e.g. direct access to a physical LAN segment), it cannot be translated and must remain on a native Docker host.
+
+Additional networking features with no Kubernetes equivalent:
+
+- `--network host` — host network namespace sharing. Use `hostNetwork: true` in a raw Kubernetes manifest instead.
+- Per-container `--dns` and `--dns-search` overrides. DNS in Kubernetes is cluster-wide and namespace-scoped via CoreDNS.
+- `--ip` and `--mac-address` — static IP and MAC assignment. Not applicable in CNI-managed networking.
+- `--link` — legacy Docker container linking. Has no Kubernetes equivalent.
+
+### Other Docker-native features
+
+- `docker checkpoint` / `docker checkpoint restore` — CRIU-based container checkpointing. No Kubernetes equivalent.
+- `--privileged` — may be blocked by cluster admission policy (PodSecurity, OPA/Gatekeeper). d2k passes the flag but enforcement is cluster-dependent.
+- `--device` — host device passthrough (e.g. `/dev/video0`). Requires a device plugin on Kubernetes; d2k does not configure one.
+- `--ulimit` — kernel resource limits. Not expressible in Kubernetes Pod spec.
+- `--sysctl` — kernel parameter overrides. Supported only for a restricted set by Kubernetes; d2k does not translate these.
+- `docker system prune` and `docker system df` — operate against a local Docker daemon. Not meaningful in a Kubernetes context.
+
+---
+
 ## Limitations
 
-- `docker commit`, `docker save`, and `docker load` are not supported.
 - Bind mounts are not supported in either mode.
 - Network isolation is not enforced. All pods share the namespace network.
 - Image metadata is synthesised. Actual image metadata lives on cluster nodes.
