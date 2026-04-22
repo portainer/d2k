@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/portainer/d2k/internal/types"
 )
 
@@ -101,7 +103,12 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 			Driver:     "overlay",
 			Scope:      "swarm",
 			Attachable: true,
-			IPAM:       NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
+			// Portainer reads IPAM.Config[].Subnet to populate the IP address column
+			// in the service Networks panel. Without a subnet entry the column is blank
+			// even when VirtualIPs[].Addr is correctly populated.
+			IPAM: NetworkIPAM{Driver: "default", Config: []IPAMConfig{
+				{Subnet: "10.0.0.0/8"},
+			}},
 			Labels: map[string]string{
 				types.LabelManagedBy: types.LabelManagedByValue,
 			},
@@ -146,6 +153,47 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 		networks = append(networks, *n)
 	}
 
+	// Add per-service networks for all swarm-managed deployments.
+	// Portainer maps Spec.Networks[].Target against availableNetworks by ID —
+	// if the ID isn't in this list the Networks panel shows empty. We generate
+	// one synthetic overlay network per service, with the LB IP as the IPAM
+	// subnet so Portainer displays it in the IP address column.
+	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
+	})
+	if err == nil {
+		for _, d := range deps.Items {
+			netID := networkIDForName(d.Name, a.namespace)
+			// Look up LB service IP for the subnet value.
+			subnet := "10.0.0.0/8"
+			lbSvc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, serviceName(d.Name)+"-lb", metav1.GetOptions{})
+			if svcErr == nil {
+				for _, ing := range lbSvc.Status.LoadBalancer.Ingress {
+					if ing.IP != "" {
+						subnet = ing.IP + "/32"
+						break
+					}
+					if ing.Hostname != "" {
+						subnet = ing.Hostname
+						break
+					}
+				}
+			}
+			networks = append(networks, NetworkSummary{
+				ID:         netID,
+				Name:       d.Name,
+				Driver:     "overlay",
+				Scope:      "swarm",
+				Attachable: true,
+				IPAM:       NetworkIPAM{Driver: "default", Config: []IPAMConfig{{Subnet: subnet}}},
+				Labels: map[string]string{
+					types.LabelManagedBy:      types.LabelManagedByValue,
+					types.LabelSwarmManagedBy: types.LabelSwarmManagedByValue,
+				},
+			})
+		}
+	}
+
 	return networks, nil
 }
 
@@ -177,7 +225,21 @@ func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID s
 
 // InspectNetworkDetail returns a full Docker network inspect response suitable
 // for Portainer and other tooling that expects more fields than the list view.
+//
+// Per-service network IDs follow the pattern "d2k-<namespace>-<service>" and
+// are used in Spec.Networks so Portainer can display the LB IP in the Networks
+// panel (it reads IPAM.Config[0].Subnet from this response).
 func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, nameOrID string) (map[string]any, error) {
+	// Check if this is a per-service network ID (d2k-<namespace>-<service>).
+	// If so, look up the LB Service IP and return it as the IPAM subnet.
+	prefix := "d2k-" + a.namespace + "-"
+	if strings.HasPrefix(nameOrID, prefix) {
+		serviceName := strings.TrimPrefix(nameOrID, prefix)
+		if serviceName != "" && serviceName != a.namespace {
+			return a.serviceNetworkDetail(ctx, nameOrID, serviceName)
+		}
+	}
+
 	network, err := a.InspectNetwork(ctx, nameOrID)
 	if err != nil {
 		return nil, err
@@ -191,7 +253,7 @@ func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, name
 		"Driver":     network.Driver,
 		"EnableIPv6": false,
 		"IPAM": map[string]any{
-			"Driver":  "default",
+			"Driver":  network.IPAM.Driver,
 			"Options": map[string]string{},
 			"Config":  network.IPAM.Config,
 		},
@@ -203,6 +265,51 @@ func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, name
 		"Containers": map[string]any{},
 		"Options":    map[string]string{},
 		"Labels":     network.Labels,
+	}, nil
+}
+
+// serviceNetworkDetail returns a synthetic network inspect response for a
+// per-service network ID. It looks up the LoadBalancer Service for the given
+// swarm service name and returns its external IP as the IPAM subnet, so
+// Portainer displays it in the Networks panel IP address column.
+func (a *KubernetesDockerAdapter) serviceNetworkDetail(ctx context.Context, networkID, svcName string) (map[string]any, error) {
+	subnet := "10.0.0.0/8" // fallback if no LB IP assigned yet
+
+	lbName := serviceName(svcName) + "-lb"
+	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, lbName, metav1.GetOptions{})
+	if err == nil {
+		for _, ing := range svc.Status.LoadBalancer.Ingress {
+			if ing.IP != "" {
+				subnet = ing.IP + "/32"
+				break
+			}
+			if ing.Hostname != "" {
+				subnet = ing.Hostname
+				break
+			}
+		}
+	}
+
+	return map[string]any{
+		"Name":       svcName,
+		"Id":         networkID,
+		"Created":    "2024-01-01T00:00:00.000000000Z",
+		"Scope":      "swarm",
+		"Driver":     "overlay",
+		"EnableIPv6": false,
+		"IPAM": map[string]any{
+			"Driver":  "default",
+			"Options": map[string]string{},
+			"Config":  []map[string]any{{"Subnet": subnet}},
+		},
+		"Internal":   false,
+		"Attachable": true,
+		"Ingress":    false,
+		"ConfigFrom": map[string]any{"Network": ""},
+		"ConfigOnly": false,
+		"Containers": map[string]any{},
+		"Options":    map[string]string{},
+		"Labels":     map[string]string{},
 	}, nil
 }
 

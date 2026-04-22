@@ -44,4 +44,18 @@ type Config struct {
 	// Kubernetes equivalents in the configured namespace.
 	// Provided via D2K_SWARM_MODE env var, defaults to false.
 	SwarmMode bool `env:"D2K_SWARM_MODE,default=false"`
+
+	// TLSCertFile is the path to the TLS certificate file.
+	// When both TLSCertFile and TLSKeyFile point to existing files, d2k listens
+	// on TLSPort with TLS instead of Port without TLS.
+	// Defaults to /etc/d2k/tls/tls.crt (standard Kubernetes Secret mount path).
+	TLSCertFile string `env:"D2K_TLS_CERT_FILE,default=/etc/d2k/tls/tls.crt"`
+
+	// TLSKeyFile is the path to the TLS private key file.
+	// Defaults to /etc/d2k/tls/tls.key (standard Kubernetes Secret mount path).
+	TLSKeyFile string `env:"D2K_TLS_KEY_FILE,default=/etc/d2k/tls/tls.key"`
+
+	// TLSPort is the port used when TLS is active.
+	// Defaults to 2376 (standard Docker TLS port).
+	TLSPort int `env:"D2K_TLS_PORT,default=2376"`
 }

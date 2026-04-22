@@ -93,15 +93,59 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, fmt.Errorf("unable to create deployment %q: %w", opts.Name, err)
 	}
 
-	// Create the Service if needed.
+	// Always create a ClusterIP Service so the container name resolves via
+	// Kubernetes DNS from other pods in the namespace. This makes Docker
+	// short-name DNS work (e.g. "redis", "postgres") without needing FQDNs.
+	// Build ClusterIP ports from container port mappings.
+	var clusterPorts []corev1.ServicePort
+	for i, m := range mappings {
+		clusterPorts = append(clusterPorts, corev1.ServicePort{
+			Name:       fmt.Sprintf("port-%d", i),
+			Protocol:   corev1.Protocol(m.Protocol),
+			Port:       int32(m.ContainerPort),
+			TargetPort: intstr.FromInt(m.ContainerPort),
+		})
+	}
+	// Use headless (clusterIP: None) when there are no ports — Kubernetes rejects
+	// ClusterIP Services with an empty ports list but headless Services are allowed
+	// without ports and still register the DNS name for short-name resolution.
+	clusterSpec := corev1.ServiceSpec{
+		Selector: map[string]string{"app": opts.Name},
+		Ports:    clusterPorts,
+	}
+	if len(clusterPorts) == 0 {
+		clusterSpec.ClusterIP = "None"
+	} else {
+		clusterSpec.Type = corev1.ServiceTypeClusterIP
+	}
+	clusterSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      opts.Name,
+			Namespace: a.namespace,
+			Labels:    managedLabels(opts.Name),
+			Annotations: map[string]string{
+				"d2k.portainer.io/dns-service": "true",
+			},
+		},
+		Spec: clusterSpec,
+	}
+	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
+		if !errors.IsAlreadyExists(svcErr) {
+			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+			return "", nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
+		}
+	}
+
+	// Create a LoadBalancer or NodePort Service for externally published ports.
 	if kind != portmapper.NoService && len(mappings) > 0 {
 		svc, svcErr := a.buildService(opts.Name, kind, mappings)
 		if svcErr != nil {
 			return "", nil, fmt.Errorf("unable to build service: %w", svcErr)
 		}
 		if _, svcErr = a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{}); svcErr != nil {
-			// Roll back the Deployment so we don't leave an orphan.
+			// Roll back the Deployment and ClusterIP service so we don't leave orphans.
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
 			return "", nil, fmt.Errorf("unable to create service for %q: %w", opts.Name, svcErr)
 		}
 	}
@@ -142,7 +186,16 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 }
 
 // StopContainer implements docker stop: scales the Deployment to 0 replicas.
+// Returns an error if the Deployment is managed by the Swarm layer.
 func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string) error {
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return err
+	}
+	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+		return fmt.Errorf("cannot stop a container that is managed by swarm: use docker service scale instead")
+	}
 	return a.scaleDeployment(ctx, name, 0)
 }
 
@@ -152,21 +205,27 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 }
 
 // RemoveContainer implements docker rm: deletes the Deployment and its associated Service (if any).
+// Returns an error if the Deployment is managed by the Swarm layer — use docker service rm instead.
 func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name string) error {
 	resolved, err := a.resolveDeploymentName(ctx, name)
 	if err != nil {
 		return err
 	}
 
+	// Refuse to remove containers that back a swarm service — the same guard
+	// Docker Swarm applies: "cannot remove a running container that is managed by swarm".
+	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+		return fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead")
+	}
+
 	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
 	}
 
-	// Best-effort Service deletion — try both the plain name and the svc- prefixed name.
-	svcErr := a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
-	if svcErr != nil && !errors.IsNotFound(svcErr) {
-		a.logger.Warnw("unable to delete service", "name", resolved, "error", svcErr)
-	}
+	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
+	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{})
+	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
 
 	return nil
 }

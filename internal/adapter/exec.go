@@ -51,12 +51,7 @@ func (a *KubernetesDockerAdapter) ExecContainer(ctx context.Context, opts ExecOp
 			TTY:       opts.Tty,
 		}, scheme.ParameterCodec)
 
-	restCfg, err := buildRestConfig("")
-	if err != nil {
-		return fmt.Errorf("unable to build REST config for exec: %w", err)
-	}
-
-	executor, err := remotecommand.NewSPDYExecutor(restCfg, "POST", req.URL())
+	executor, err := remotecommand.NewSPDYExecutor(a.restConfig, "POST", req.URL())
 	if err != nil {
 		return fmt.Errorf("unable to create SPDY executor: %w", err)
 	}

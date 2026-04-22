@@ -125,8 +125,11 @@ mux.HandleFunc("GET /exec/", e.Inspect)
 			rest := r.URL.Path[1:] // strip leading /
 			if idx := strings.Index(rest, "/"); idx != -1 {
 				r2 := r.Clone(r.Context())
-				r2.URL = r.URL
-				r2.URL.Path = rest[idx:] // /containers/json etc.
+				// Clone the URL to avoid mutating the original request's URL,
+				// which would corrupt logging and any subsequent middleware reads.
+				urlCopy := *r.URL
+				urlCopy.Path = rest[idx:] // /containers/json etc.
+				r2.URL = &urlCopy
 				mux.ServeHTTP(w, r2)
 				return
 			}
