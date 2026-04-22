@@ -167,7 +167,7 @@ spec:
             optional: true
       containers:
         - name: d2k
-          image: neilcresswell/d2k:latest   # replace with your image
+          image: portainer/d2k:latest   # replace with your image
           imagePullPolicy: Always
           ports:
             - containerPort: 2375
