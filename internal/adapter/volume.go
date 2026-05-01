@@ -129,7 +129,11 @@ func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts Crea
 	// and survives across service creates within the same deploy sequence.
 	labels := managedLabels(opts.Name)
 	for k, v := range opts.Labels {
-		labels[k] = v
+		// Kubernetes label values must be ≤63 characters. Skip any that are longer
+		// (e.g. image digest hashes passed through from docker stack deploy).
+		if len(v) <= 63 {
+			labels[k] = v
+		}
 	}
 	labels["d2k.portainer.io/volume-type"] = "nfs"
 
