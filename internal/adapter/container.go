@@ -461,10 +461,20 @@ func (a *KubernetesDockerAdapter) resolveDeploymentName(ctx context.Context, nam
 		return "", fmt.Errorf("unable to list deployments: %w", err)
 	}
 	for _, d := range list.Items {
-		if string(d.UID) == nameOrID {
+		uid := string(d.UID)
+		if uid == nameOrID {
 			return d.Name, nil
 		}
 		if strings.HasSuffix(d.Name, "-"+nameOrID) {
+			return d.Name, nil
+		}
+		// Match the truncated UID format returned by docker ps (e.g. "2665dc61-cb7").
+		// docker ps shows the first 8 chars of the UID, a hyphen, then chars 9-11.
+		// Reconstruct and compare against the full UID with hyphens stripped to be safe,
+		// or do a simple prefix match on the normalised form.
+		normID := strings.ReplaceAll(nameOrID, "-", "")
+		normUID := strings.ReplaceAll(uid, "-", "")
+		if strings.HasPrefix(normUID, normID) && len(normID) >= 8 {
 			return d.Name, nil
 		}
 	}
@@ -506,8 +516,8 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 	if d.Spec.Replicas != nil && *d.Spec.Replicas > 0 {
 		if d.Status.ReadyReplicas > 0 {
 			state = "running"
-			uptime := time.Since(d.CreationTimestamp.Time).Round(time.Second)
-			status = fmt.Sprintf("Up %s", uptime)
+			uptime := time.Since(d.CreationTimestamp.Time)
+			status = fmt.Sprintf("Up %s", humanizeDuration(uptime))
 		} else {
 			state = "starting"
 			status = "Starting"
@@ -618,6 +628,37 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 			},
 		},
 	}
+}
+
+// humanizeDuration formats a duration the way Docker does in docker ps STATUS:
+// seconds, minutes, hours up to 47h, then days, weeks, months, years.
+func humanizeDuration(d time.Duration) string {
+	seconds := int(d.Seconds())
+	if seconds < 60 {
+		return fmt.Sprintf("%d seconds", seconds)
+	}
+	minutes := seconds / 60
+	if minutes < 60 {
+		return fmt.Sprintf("%d minutes", minutes)
+	}
+	hours := minutes / 60
+	if hours < 48 {
+		return fmt.Sprintf("%d hours", hours)
+	}
+	days := hours / 24
+	if days < 14 {
+		return fmt.Sprintf("%d days", days)
+	}
+	weeks := days / 7
+	if weeks < 8 {
+		return fmt.Sprintf("%d weeks", weeks)
+	}
+	months := days / 30
+	if months < 24 {
+		return fmt.Sprintf("%d months", months)
+	}
+	years := days / 365
+	return fmt.Sprintf("%d years", years)
 }
 
 // encodePortMappings serialises the raw port binding strings into a JSON label value.
