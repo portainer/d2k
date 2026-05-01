@@ -90,7 +90,7 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 
 	vol, err := h.adapter.InspectVolume(r.Context(), name)
 	if err != nil {
-		h.logger.Errorw("InspectVolume failed", "name", name, "error", err)
+		h.logger.Debugw("InspectVolume not found", "name", name, "error", err)
 		httputils.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
