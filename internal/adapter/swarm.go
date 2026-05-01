@@ -241,6 +241,20 @@ type swarmServiceSpec struct {
 				ConfigID   string `json:"ConfigID"`
 				ConfigName string `json:"ConfigName"`
 			} `json:"Configs"`
+			// Mounts: volume, bind, and tmpfs mounts from the compose volumes: key.
+			Mounts []struct {
+				Type        string `json:"Type"`   // volume | bind | tmpfs
+				Source      string `json:"Source"` // volume name or host path
+				Target      string `json:"Target"` // container path
+				ReadOnly    bool   `json:"ReadOnly"`
+				BindOptions *struct {
+					Propagation string `json:"Propagation"`
+				} `json:"BindOptions"`
+				VolumeOptions *struct {
+					NoCopy bool              `json:"NoCopy"`
+					Labels map[string]string `json:"Labels"`
+				} `json:"VolumeOptions"`
+			} `json:"Mounts"`
 		} `json:"ContainerSpec"`
 		Resources struct {
 			Limits struct {
@@ -298,6 +312,8 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		return nil, fmt.Errorf("service Name is required")
 	}
 
+	var warnings []string
+
 	cs := spec.TaskTemplate.ContainerSpec
 
 	// --- replicas ---
@@ -306,7 +322,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		// Global mode = DaemonSet. We don't translate DaemonSets - warn and
 		// treat as replicated with 1 replica so the service still comes up.
 		a.logger.Warnw("global mode service requested; d2k does not support DaemonSet translation, deploying as replicated with 1 replica", "service", name)
-	} else if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
+	} else if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas > 0 {
 		replicas = int32(spec.Mode.Replicated.Replicas)
 	}
 
@@ -422,23 +438,26 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	var volumes []corev1.Volume
 	var volumeMounts []corev1.VolumeMount
 	for _, s := range cs.Secrets {
+		// The secret was stored under the sanitised name (underscores → hyphens).
+		// Use the same sanitisation here so the volume reference matches.
+		k8sSecretName := sanitiseResourceName(s.SecretName)
 		targetName := s.File.Name
 		if targetName == "" {
-			targetName = s.SecretName
+			targetName = s.SecretName // keep original as the mount filename
 		}
 		volumes = append(volumes, corev1.Volume{
-			Name: "secret-" + s.SecretName,
+			Name: "secret-" + k8sSecretName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: s.SecretName,
+					SecretName: k8sSecretName,
 					Items: []corev1.KeyToPath{
-						{Key: s.SecretName, Path: targetName},
+						{Key: k8sSecretName, Path: targetName},
 					},
 				},
 			},
 		})
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "secret-" + s.SecretName,
+			Name:      "secret-" + k8sSecretName,
 			MountPath: "/run/secrets/" + targetName,
 			SubPath:   targetName,
 			ReadOnly:  true,
@@ -447,17 +466,18 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 
 	// --- configs as volume mounts ---
 	for _, c := range cs.Configs {
+		k8sConfigName := sanitiseResourceName(c.ConfigName)
 		targetName := c.File.Name
 		if targetName == "" {
-			targetName = c.ConfigName
+			targetName = c.ConfigName // keep original as the mount filename
 		}
 		volumes = append(volumes, corev1.Volume{
-			Name: "config-" + c.ConfigName,
+			Name: "config-" + k8sConfigName,
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: c.ConfigName},
+					LocalObjectReference: corev1.LocalObjectReference{Name: k8sConfigName},
 					Items: []corev1.KeyToPath{
-						{Key: c.ConfigName, Path: targetName},
+						{Key: k8sConfigName, Path: targetName},
 					},
 				},
 			},
@@ -465,10 +485,114 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		// Ensure mount path is absolute without double-slash if targetName already has a leading slash.
 		configMountPath := "/" + strings.TrimPrefix(targetName, "/")
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "config-" + c.ConfigName,
+			Name:      "config-" + k8sConfigName,
 			MountPath: configMountPath,
 			SubPath:   targetName,
 			ReadOnly:  true,
+		})
+	}
+
+	// --- Mounts: volume, bind, tmpfs ---
+	// Swarm sends compose volumes: entries as Mounts in the service spec.
+	// We translate each type to the closest Kubernetes equivalent:
+	//   volume  -> PVC (must already exist from the stack deploy volume create step)
+	//   bind    -> hostPath
+	//   tmpfs   -> emptyDir with medium=Memory
+	for _, m := range cs.Mounts {
+		mountName := sanitiseResourceName(m.Source)
+		if mountName == "" {
+			mountName = sanitiseResourceName(strings.TrimPrefix(m.Target, "/"))
+		}
+		// Ensure volume name is unique if source is empty (e.g. anonymous tmpfs).
+		if mountName == "" {
+			mountName = fmt.Sprintf("mount-%d", len(volumes))
+		}
+
+		switch strings.ToLower(m.Type) {
+		case "volume", "":
+			if m.Source == "" {
+				volumes = append(volumes, corev1.Volume{
+					Name:         mountName,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				})
+			} else {
+				pvcName := sanitiseResourceName(m.Source)
+
+				// Check if this is an NFS volume — if so inject inline NFS source
+				// directly into the pod spec. No PV or StorageClass needed, and no
+				// cluster-scoped RBAC required.
+				if nfsCfg, isNFS := a.nfsConfigForVolume(ctx, pvcName); isNFS {
+					volumes = append(volumes, corev1.Volume{
+						Name: mountName,
+						VolumeSource: corev1.VolumeSource{
+							NFS: &corev1.NFSVolumeSource{
+								Server:   nfsCfg.Server,
+								Path:     nfsCfg.Path,
+								ReadOnly: m.ReadOnly,
+							},
+						},
+					})
+				} else {
+					// Standard named volume — reference the PVC.
+					// Create a fallback PVC if it doesn't exist yet.
+					if _, pvcErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, pvcName, metav1.GetOptions{}); pvcErr != nil {
+						if errors.IsNotFound(pvcErr) {
+							a.logger.Warnw("PVC not found for volume mount; creating fallback PVC", "pvc", pvcName, "service", name)
+							qty := resource.MustParse("1Gi")
+							fallbackPVC := &corev1.PersistentVolumeClaim{
+								ObjectMeta: metav1.ObjectMeta{
+									Name:      pvcName,
+									Namespace: a.namespace,
+									Labels: map[string]string{
+										types.LabelManagedBy:      types.LabelManagedByValue,
+										types.LabelSwarmManagedBy: types.LabelSwarmManagedByValue,
+									},
+								},
+								Spec: corev1.PersistentVolumeClaimSpec{
+									AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+									Resources: corev1.VolumeResourceRequirements{
+										Requests: corev1.ResourceList{corev1.ResourceStorage: qty},
+									},
+								},
+							}
+							if _, createErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, fallbackPVC, metav1.CreateOptions{}); createErr != nil && !errors.IsAlreadyExists(createErr) {
+								warnings = append(warnings, fmt.Sprintf("d2k: unable to create fallback PVC for volume %q: %s", pvcName, createErr))
+							}
+						}
+					}
+					volumes = append(volumes, corev1.Volume{
+						Name: mountName,
+						VolumeSource: corev1.VolumeSource{
+							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+								ClaimName: pvcName,
+								ReadOnly:  m.ReadOnly,
+							},
+						},
+					})
+				}
+			}
+		case "bind":
+			volumes = append(volumes, corev1.Volume{
+				Name: mountName,
+				VolumeSource: corev1.VolumeSource{
+					HostPath: &corev1.HostPathVolumeSource{Path: m.Source},
+				},
+			})
+		case "tmpfs":
+			volumes = append(volumes, corev1.Volume{
+				Name:         mountName,
+				VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}},
+			})
+		default:
+			// Unknown type — skip rather than fail the whole deploy.
+			a.logger.Warnw("unsupported mount type; skipping", "type", m.Type, "source", m.Source, "target", m.Target)
+			continue
+		}
+
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      mountName,
+			MountPath: m.Target,
+			ReadOnly:  m.ReadOnly,
 		})
 	}
 
@@ -599,8 +723,6 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// the same namespace without needing a FQDN.
 	// If ports are also published, a LoadBalancer Service is created separately
 	// for external access (using a -lb suffix to avoid name collision).
-	var warnings []string
-
 	// Build ClusterIP ports from whichever port spec is available.
 	// If no ports are declared at all we still create a headless-style ClusterIP
 	// with no ports — enough to register the DNS name.
@@ -738,7 +860,7 @@ func (a *KubernetesDockerAdapter) SwarmInspectService(ctx context.Context, id st
 		return nil, fmt.Errorf("unable to list deployments: %w", err)
 	}
 	for _, d := range deps.Items {
-		if d.Annotations[types.AnnotationSwarmServiceID] == id || d.Name == id {
+		if matchesServiceID(d, id) {
 			return a.deploymentToSwarmService(ctx, d), nil
 		}
 	}
@@ -764,7 +886,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 
 	var target *appsv1.Deployment
 	for i, d := range deps.Items {
-		if d.Annotations[types.AnnotationSwarmServiceID] == id || d.Name == id {
+		if matchesServiceID(d, id) {
 			target = &deps.Items[i]
 			break
 		}
@@ -791,7 +913,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		target.Spec.Template.Spec.Containers[0].Env = envVars
 	}
 
-	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
+	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas > 0 {
 		r := int32(spec.Mode.Replicated.Replicas)
 		target.Spec.Replicas = &r
 		// Cache desired replica count in annotation so ServiceInspect returns
@@ -836,7 +958,7 @@ func (a *KubernetesDockerAdapter) SwarmDeleteService(ctx context.Context, id str
 		return fmt.Errorf("unable to list deployments: %w", err)
 	}
 	for _, d := range deps.Items {
-		if d.Annotations[types.AnnotationSwarmServiceID] == id || d.Name == id {
+		if matchesServiceID(d, id) {
 			// Delete the Deployment.
 			if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{}); err != nil {
 				return err
@@ -871,7 +993,7 @@ func (a *KubernetesDockerAdapter) SwarmServiceLogs(ctx context.Context, w io.Wri
 	var deploymentName string
 	var svcID string
 	for _, d := range deps.Items {
-		if d.Annotations[types.AnnotationSwarmServiceID] == id || d.Name == id {
+		if matchesServiceID(d, id) {
 			deploymentName = d.Name
 			svcID = d.Annotations[types.AnnotationSwarmServiceID]
 			if svcID == "" {
@@ -1149,17 +1271,44 @@ func (a *KubernetesDockerAdapter) SwarmCreateSecret(ctx context.Context, body io
 		decodedData = []byte(req.Data)
 	}
 
+	// Kubernetes secret names must be RFC 1123 subdomains: lowercase alphanumeric,
+	// hyphens and dots only. Swarm allows underscores (e.g. "example-app_postgres_pw")
+	// so sanitise before creating the resource.
+	k8sName := sanitiseResourceName(req.Name)
+	if k8sName == "" {
+		return nil, fmt.Errorf("secret Name %q is invalid after sanitisation", req.Name)
+	}
+
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      req.Name,
+			Name:      k8sName,
 			Namespace: a.namespace,
 			Labels:    swarmLabels(req.Labels),
 		},
-		Data: map[string][]byte{req.Name: decodedData},
+		Data: map[string][]byte{k8sName: decodedData},
+	}
+
+	// Store the original Swarm name as an annotation so list/inspect can
+	// return the underscore form that the CLI and compose files expect.
+	secret.ObjectMeta.Annotations = map[string]string{
+		"d2k.portainer.io/swarm-name": req.Name,
 	}
 
 	created, err := a.client.CoreV1().Secrets(a.namespace).Create(ctx, secret, metav1.CreateOptions{})
 	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			// Be idempotent only for stack deploy, which re-creates secrets on
+			// every deploy. Stack secrets always carry com.docker.stack.namespace.
+			// A direct `docker secret create` should return an error as Swarm does.
+			if _, isStackSecret := req.Labels["com.docker.stack.namespace"]; isStackSecret {
+				existing, getErr := a.client.CoreV1().Secrets(a.namespace).Get(ctx, k8sName, metav1.GetOptions{})
+				if getErr != nil {
+					return nil, fmt.Errorf("secret %q already exists", k8sName)
+				}
+				return map[string]any{"ID": swarmID(string(existing.UID))}, nil
+			}
+			return nil, fmt.Errorf("secret %q already exists", req.Name)
+		}
 		return nil, fmt.Errorf("unable to create secret: %w", err)
 	}
 	return map[string]any{"ID": swarmID(string(created.UID))}, nil
@@ -1190,7 +1339,9 @@ func (a *KubernetesDockerAdapter) SwarmInspectSecret(ctx context.Context, id str
 		return nil, fmt.Errorf("unable to list secrets: %w", err)
 	}
 	for _, s := range secrets.Items {
-		if swarmID(string(s.UID)) == id || s.Name == id {
+		if swarmID(string(s.UID)) == id || s.Name == id ||
+			s.Annotations["d2k.portainer.io/swarm-name"] == id ||
+			sanitiseResourceName(id) == s.Name {
 			return kubeSecretToSwarm(s), nil
 		}
 	}
@@ -1206,7 +1357,9 @@ func (a *KubernetesDockerAdapter) SwarmDeleteSecret(ctx context.Context, id stri
 		return fmt.Errorf("unable to list secrets: %w", err)
 	}
 	for _, s := range secrets.Items {
-		if swarmID(string(s.UID)) == id || s.Name == id {
+		if swarmID(string(s.UID)) == id || s.Name == id ||
+			s.Annotations["d2k.portainer.io/swarm-name"] == id ||
+			sanitiseResourceName(id) == s.Name {
 			return a.client.CoreV1().Secrets(a.namespace).Delete(ctx, s.Name, metav1.DeleteOptions{})
 		}
 	}
@@ -1224,17 +1377,38 @@ func (a *KubernetesDockerAdapter) SwarmCreateConfig(ctx context.Context, body io
 		return nil, fmt.Errorf("invalid config request: %w", err)
 	}
 
+	// Kubernetes ConfigMap names must be RFC 1123 subdomains. Sanitise for the
+	// same reason as secrets — Swarm allows underscores, Kubernetes does not.
+	k8sName := sanitiseResourceName(req.Name)
+	if k8sName == "" {
+		return nil, fmt.Errorf("config Name %q is invalid after sanitisation", req.Name)
+	}
+
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      req.Name,
+			Name:      k8sName,
 			Namespace: a.namespace,
 			Labels:    swarmLabels(req.Labels),
 		},
-		Data: map[string]string{req.Name: req.Data},
+		Data: map[string]string{k8sName: req.Data},
+	}
+
+	cm.ObjectMeta.Annotations = map[string]string{
+		"d2k.portainer.io/swarm-name": req.Name,
 	}
 
 	created, err := a.client.CoreV1().ConfigMaps(a.namespace).Create(ctx, cm, metav1.CreateOptions{})
 	if err != nil {
+		if errors.IsAlreadyExists(err) {
+			if _, isStackConfig := req.Labels["com.docker.stack.namespace"]; isStackConfig {
+				existing, getErr := a.client.CoreV1().ConfigMaps(a.namespace).Get(ctx, k8sName, metav1.GetOptions{})
+				if getErr != nil {
+					return nil, fmt.Errorf("config %q already exists", k8sName)
+				}
+				return map[string]any{"ID": swarmID(string(existing.UID))}, nil
+			}
+			return nil, fmt.Errorf("config %q already exists", req.Name)
+		}
 		return nil, fmt.Errorf("unable to create config: %w", err)
 	}
 	return map[string]any{"ID": swarmID(string(created.UID))}, nil
@@ -1269,7 +1443,9 @@ func (a *KubernetesDockerAdapter) SwarmInspectConfig(ctx context.Context, id str
 		return nil, fmt.Errorf("unable to list configs: %w", err)
 	}
 	for _, c := range cms.Items {
-		if swarmID(string(c.UID)) == id || c.Name == id {
+		if swarmID(string(c.UID)) == id || c.Name == id ||
+			c.Annotations["d2k.portainer.io/swarm-name"] == id ||
+			sanitiseResourceName(id) == c.Name {
 			return kubeConfigMapToSwarm(c), nil
 		}
 	}
@@ -1285,7 +1461,9 @@ func (a *KubernetesDockerAdapter) SwarmDeleteConfig(ctx context.Context, id stri
 		return fmt.Errorf("unable to list configs: %w", err)
 	}
 	for _, c := range cms.Items {
-		if swarmID(string(c.UID)) == id || c.Name == id {
+		if swarmID(string(c.UID)) == id || c.Name == id ||
+			c.Annotations["d2k.portainer.io/swarm-name"] == id ||
+			sanitiseResourceName(id) == c.Name {
 			return a.client.CoreV1().ConfigMaps(a.namespace).Delete(ctx, c.Name, metav1.DeleteOptions{})
 		}
 	}
@@ -1371,10 +1549,19 @@ func (a *KubernetesDockerAdapter) SwarmDeleteStack(ctx context.Context, stackNam
 		}
 	}
 
+	// Delete in-memory networks belonging to this stack.
+	// Stack networks follow the "<stack>_<network>" naming convention.
+	// We match by the com.docker.compose.project label stored at create time.
+	a.networksMu.Lock()
+	for netName, net := range a.networks {
+		if net.Labels["com.docker.compose.project"] == stackName {
+			delete(a.networks, netName)
+		}
+	}
+	a.networksMu.Unlock()
+
 	return nil
 }
-
-// --- translation helpers ---
 
 func kubeNodeToSwarm(n corev1.Node, apiServerHost string) map[string]any {
 	role := "worker"
@@ -1822,32 +2009,56 @@ func podImage(p corev1.Pod) string {
 }
 
 func kubeSecretToSwarm(s corev1.Secret) map[string]any {
+	// Return the original Swarm name (which may contain underscores) so the
+	// Docker CLI can match it against the name in the compose file.
+	// We stored it in an annotation at create time; fall back to k8s name.
+	name := s.Name
+	if swarmName, ok := s.Annotations["d2k.portainer.io/swarm-name"]; ok && swarmName != "" {
+		name = swarmName
+	}
 	return map[string]any{
 		"ID": swarmID(string(s.UID)),
 		"Version": map[string]any{"Index": uint64(1)},
 		"CreatedAt": s.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		"UpdatedAt": s.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		"Spec": map[string]any{
-			"Name":   s.Name,
+			"Name":   name,
 			"Labels": s.Labels,
 		},
 	}
 }
 
 func kubeConfigMapToSwarm(c corev1.ConfigMap) map[string]any {
+	name := c.Name
+	if swarmName, ok := c.Annotations["d2k.portainer.io/swarm-name"]; ok && swarmName != "" {
+		name = swarmName
+	}
 	return map[string]any{
 		"ID": swarmID(string(c.UID)),
 		"Version": map[string]any{"Index": uint64(1)},
 		"CreatedAt": c.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		"UpdatedAt": c.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 		"Spec": map[string]any{
-			"Name":   c.Name,
+			"Name":   name,
 			"Labels": c.Labels,
 		},
 	}
 }
 
 // swarmLabels merges caller-supplied labels with the d2k managed-by label.
+// matchesServiceID returns true if id matches a deployment's swarm service ID,
+// name, or is a prefix of either. The Docker CLI truncates IDs to 12 chars in
+// tabular output; users copy that prefix and pass it to inspect/update/delete.
+func matchesServiceID(d appsv1.Deployment, id string) bool {
+	annotationID := d.Annotations[types.AnnotationSwarmServiceID]
+	uidID := swarmID(string(d.UID))
+	return annotationID == id ||
+		d.Name == id ||
+		uidID == id ||
+		(len(id) >= 4 && strings.HasPrefix(annotationID, id)) ||
+		(len(id) >= 4 && strings.HasPrefix(uidID, id))
+}
+
 func swarmLabels(extra map[string]string) map[string]string {
 	labels := map[string]string{
 		types.LabelManagedBy:      types.LabelManagedByValue,
