@@ -53,6 +53,10 @@ type KubernetesDockerAdapter struct {
 	prevCPUMu sync.RWMutex
 	networks   map[string]*NetworkSummary
 	networksMu sync.RWMutex
+	// nfsVolumes stores NFS driver opts keyed by sanitised volume name so
+	// SwarmCreateService can inject inline NFS pod volumes without needing a PV.
+	nfsVolumes   map[string]nfsVolumeConfig
+	nfsVolumesMu sync.RWMutex
 }
 
 // Options configures a new KubernetesDockerAdapter.
@@ -102,6 +106,7 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		logger:           opts.Logger,
 		prevCPU:          map[string]int64{},
 		networks:         map[string]*NetworkSummary{},
+		nfsVolumes:       map[string]nfsVolumeConfig{},
 	}, nil
 }
 
