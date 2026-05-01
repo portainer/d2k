@@ -69,10 +69,11 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vol, err := h.adapter.CreateVolume(r.Context(), adapter.CreateVolumeOptions{
-		Name:      body.Name,
-		Driver:    body.Driver,
-		Labels:    body.Labels,
-		SizeLimit: size,
+		Name:       body.Name,
+		Driver:     body.Driver,
+		Labels:     body.Labels,
+		SizeLimit:  size,
+		DriverOpts: body.DriverOpts,
 	})
 	if err != nil {
 		h.logger.Errorw("CreateVolume failed", "name", body.Name, "error", err)
