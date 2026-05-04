@@ -57,6 +57,8 @@ func main() {
 
 	logger.Infow("connected to Kubernetes namespace", "namespace", cfg.Namespace)
 
+	a.LogNFSStorageClasses(context.Background())
+
 	handler := router.New(a, cfg.Namespace, cfg.SwarmMode, logger)
 
 	// Detect TLS: if both cert and key files exist, listen on TLSPort with TLS.
