@@ -313,7 +313,7 @@ func (a *KubernetesDockerAdapter) serviceNetworkDetail(ctx context.Context, netw
 	}, nil
 }
 
-// RemoveNetwork is a no-op for d2k-managed networks since they are synthetic.
+// RemoveNetwork removes a d2k-managed network by name or ID.
 // Built-in networks (bridge, host, none) return an error matching Docker behaviour.
 func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID string) error {
 	switch nameOrID {
@@ -322,9 +322,24 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 	}
 
 	a.networksMu.Lock()
-	delete(a.networks, nameOrID)
-	a.networksMu.Unlock()
+	defer a.networksMu.Unlock()
 
+	// Try direct name match first.
+	if _, ok := a.networks[nameOrID]; ok {
+		delete(a.networks, nameOrID)
+		return nil
+	}
+
+	// Fall back to ID match — the Docker CLI sends the synthetic ID
+	// (e.g. "d2k-d2k-example-app_backend") rather than the name.
+	for netName, net := range a.networks {
+		if net.ID == nameOrID {
+			delete(a.networks, netName)
+			return nil
+		}
+	}
+
+	// Not found — return nil to match Docker behaviour (idempotent remove).
 	return nil
 }
 

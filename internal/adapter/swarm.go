@@ -517,59 +517,51 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 				})
 			} else {
 				pvcName := sanitiseResourceName(m.Source)
-
-				// Check if this is an NFS volume — if so inject inline NFS source
-				// directly into the pod spec. No PV or StorageClass needed, and no
-				// cluster-scoped RBAC required.
-				if nfsCfg, isNFS := a.nfsConfigForVolume(ctx, pvcName); isNFS {
-					volumes = append(volumes, corev1.Volume{
-						Name: mountName,
-						VolumeSource: corev1.VolumeSource{
-							NFS: &corev1.NFSVolumeSource{
-								Server:   nfsCfg.Server,
-								Path:     nfsCfg.Path,
-								ReadOnly: m.ReadOnly,
+				// Create a fallback PVC if it doesn't exist yet.
+				if _, pvcErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, pvcName, metav1.GetOptions{}); pvcErr != nil {
+					if errors.IsNotFound(pvcErr) {
+						qty := resource.MustParse("1Gi")
+						pvcLabels := map[string]string{
+							types.LabelManagedBy:      types.LabelManagedByValue,
+							types.LabelSwarmManagedBy: types.LabelSwarmManagedByValue,
+						}
+						pvcSpec := corev1.PersistentVolumeClaimSpec{
+							Resources: corev1.VolumeResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceStorage: qty},
 							},
-						},
-					})
-				} else {
-					// Standard named volume — reference the PVC.
-					// Create a fallback PVC if it doesn't exist yet.
-					if _, pvcErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, pvcName, metav1.GetOptions{}); pvcErr != nil {
-						if errors.IsNotFound(pvcErr) {
+						}
+						// If an NFS StorageClass is available, use it with RWX access.
+						// This handles docker stack deploy which never calls POST /volumes/create.
+						if nfsSC, hasNFS := a.anyNFSStorageClass(); hasNFS {
+							a.logger.Infow("creating NFS PVC for volume mount via stack deploy", "pvc", pvcName, "storageClass", nfsSC, "service", name)
+							pvcSpec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
+							pvcSpec.StorageClassName = &nfsSC
+						} else {
 							a.logger.Warnw("PVC not found for volume mount; creating fallback PVC", "pvc", pvcName, "service", name)
-							qty := resource.MustParse("1Gi")
-							fallbackPVC := &corev1.PersistentVolumeClaim{
-								ObjectMeta: metav1.ObjectMeta{
-									Name:      pvcName,
-									Namespace: a.namespace,
-									Labels: map[string]string{
-										types.LabelManagedBy:      types.LabelManagedByValue,
-										types.LabelSwarmManagedBy: types.LabelSwarmManagedByValue,
-									},
-								},
-								Spec: corev1.PersistentVolumeClaimSpec{
-									AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-									Resources: corev1.VolumeResourceRequirements{
-										Requests: corev1.ResourceList{corev1.ResourceStorage: qty},
-									},
-								},
-							}
-							if _, createErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, fallbackPVC, metav1.CreateOptions{}); createErr != nil && !errors.IsAlreadyExists(createErr) {
-								warnings = append(warnings, fmt.Sprintf("d2k: unable to create fallback PVC for volume %q: %s", pvcName, createErr))
-							}
+							pvcSpec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+						}
+						fallbackPVC := &corev1.PersistentVolumeClaim{
+							ObjectMeta: metav1.ObjectMeta{
+								Name:      pvcName,
+								Namespace: a.namespace,
+								Labels:    pvcLabels,
+							},
+							Spec: pvcSpec,
+						}
+						if _, createErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, fallbackPVC, metav1.CreateOptions{}); createErr != nil && !errors.IsAlreadyExists(createErr) {
+							warnings = append(warnings, fmt.Sprintf("d2k: unable to create PVC for volume %q: %s", pvcName, createErr))
 						}
 					}
-					volumes = append(volumes, corev1.Volume{
-						Name: mountName,
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-								ClaimName: pvcName,
-								ReadOnly:  m.ReadOnly,
-							},
-						},
-					})
 				}
+				volumes = append(volumes, corev1.Volume{
+					Name: mountName,
+					VolumeSource: corev1.VolumeSource{
+						PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+							ClaimName: pvcName,
+							ReadOnly:  m.ReadOnly,
+						},
+					},
+				})
 			}
 		case "bind":
 			volumes = append(volumes, corev1.Volume{
