@@ -219,7 +219,7 @@ Note: only `nfs.csi.k8s.io` is supported for automatic matching. Other NFS provi
 
 ### Volume lifecycle
 
-Volumes (PVCs) are not deleted when a stack is removed with `docker stack rm`. This matches Docker Swarm behaviour — named volumes are intentionally preserved across stack teardown to prevent accidental data loss. Data persists and reattaches automatically if the stack is redeployed. To remove a volume explicitly, use `docker volume rm <name>`.
+Volumes (PVCs) are not deleted when a stack is removed with `docker stack rm`. This matches Docker Swarm behaviour; named volumes are intentionally preserved across stack teardown to prevent accidental data loss. Data persists and reattaches automatically if the stack is redeployed. To remove a volume explicitly, use `docker volume rm <name>`.
 
 The NFS subdirectory created by the CSI provisioner is named after the PVC UID (e.g. `pvc-92f50b38-...`), not the pod. This means pod rescheduling, rolling updates, and replica scaling all reattach to the same data automatically without any intervention.
 
@@ -235,7 +235,7 @@ d2k runs inside the target cluster namespace using a ServiceAccount bound to a n
 kubectl apply -f deploy/kubernetes.yaml
 ```
 
-For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. The single manifest covers both modes — the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included.
+For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included.
 
 Connect Portainer or the Docker CLI to the d2k Service:
 
