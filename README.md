@@ -325,10 +325,10 @@ Swarm mode adds a ClusterRole for node and StorageClass access:
 
 | Resource | Verbs | Scope |
 |---|---|---|
-| nodes | get, list, watch, update, patch | ClusterRole |
+| nodes | get, list, watch | ClusterRole |
 | storageclasses | get, list, watch | ClusterRole |
 
-Node update/patch is required for `docker node update` (drain/active/pause), which cordon-annotates the Kubernetes node. StorageClass read access is required for NFS volume matching.
+Node StorageClass read access is required for NFS volume matching.
 
 ---
 
