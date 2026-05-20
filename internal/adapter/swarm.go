@@ -372,13 +372,11 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	}
 
 	// --- restart policy ---
+	// Kubernetes Deployments only support RestartPolicy "Always" on pod templates.
+	// "OnFailure" and "Never" are only valid on Jobs/CronJobs. Map all Swarm
+	// restart conditions to "Always" — for long-running services (including
+	// Jenkins agents) this is the correct behaviour regardless of Swarm condition.
 	restartPolicy := corev1.RestartPolicyAlways
-	switch spec.TaskTemplate.RestartPolicy.Condition {
-	case "none":
-		restartPolicy = corev1.RestartPolicyNever
-	case "on-failure":
-		restartPolicy = corev1.RestartPolicyOnFailure
-	}
 
 	// --- placement constraints -> nodeSelector + nodeAffinity ---
 	// Swarm constraint format: "node.role == worker", "node.hostname == mynode",
