@@ -690,7 +690,30 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("service %q already exists", name)
+			// docker stack deploy is idempotent — if the deployment already exists,
+			// update it in place rather than failing. This matches real Swarm
+			// behaviour where re-deploying a stack updates existing services.
+			existing, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, name, metav1.GetOptions{})
+			if getErr != nil {
+				return nil, fmt.Errorf("service %q already exists and could not be retrieved: %w", name, getErr)
+			}
+			deployment.ResourceVersion = existing.ResourceVersion
+			// Preserve the stable swarm service ID annotation from the existing deployment.
+			if existing.Annotations[types.AnnotationSwarmServiceID] != "" {
+				deployment.Annotations[types.AnnotationSwarmServiceID] = existing.Annotations[types.AnnotationSwarmServiceID]
+			}
+			updated, updateErr := a.client.AppsV1().Deployments(a.namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+			if updateErr != nil {
+				return nil, fmt.Errorf("unable to update existing service %q: %w", name, updateErr)
+			}
+			serviceID := updated.Annotations[types.AnnotationSwarmServiceID]
+			if serviceID == "" {
+				serviceID = swarmID(string(updated.UID))
+			}
+			return map[string]any{
+				"ID":       serviceID,
+				"Warnings": warnings,
+			}, nil
 		}
 		if errors.IsForbidden(err) {
 			// Surface quota / RBAC rejections directly so the Docker CLI sees the
