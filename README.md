@@ -48,6 +48,8 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | Secret | Kubernetes Secret |
 | Config | Kubernetes ConfigMap |
 | Node | Kubernetes Node |
+| VIP endpoint mode | LoadBalancer Service (default) |
+| dnsrr endpoint mode | hostPort on container + node IPs returned per running pod |
 | Manager node | Control-plane node (`node-role.kubernetes.io/control-plane` or `master`) |
 | Worker node | Non-control-plane node |
 | Swarm leader | Control-plane node serving the Kubernetes API (matched by IP) |
@@ -73,6 +75,8 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 **Ports** — `ports` mappings create a LoadBalancer Service. Both `<host>:<container>` and short-form syntax are supported.
 
+**dnsrr / host-port mode** — services using `--endpoint-mode dnsrr` or any port with `mode: host` are translated to hostPort bindings on the pod spec rather than a LoadBalancer Service. Pods bind directly on the node's network interface at the published port, and the service endpoint returns the individual node IPs of running pods rather than a VIP. This allows an external load balancer to target cluster nodes directly, bypassing the Kubernetes service routing layer. The endpoint node IP list updates automatically as pods are scheduled or rescheduled.
+
 **Secrets** — secrets defined in the `secrets:` block and referenced by services are created as Kubernetes Secrets and mounted into containers at `/run/secrets/<name>`. Secret names containing underscores (e.g. `my_secret`) are automatically sanitised to hyphen form for Kubernetes compatibility (`my-secret`) and resolved back transparently when the Docker CLI references them by the original name. `docker stack deploy` is idempotent for secrets — re-deploying a stack does not error if the secret already exists. `docker secret create` on an already-existing secret returns an error as expected.
 
 **Configs** — configs defined in the `configs:` block and referenced by services are created as Kubernetes ConfigMaps and mounted into containers. The same name sanitisation and idempotency behaviour as secrets applies.
@@ -95,7 +99,7 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 **Health checks** — `healthcheck:` in a service spec is not translated to a Kubernetes readiness or liveness probe.
 
-**Resource limits** — `deploy.resources.limits` and `deploy.resources.reservations` are not currently translated to Kubernetes resource requests and limits.
+**Resource limits** — `deploy.resources.limits` and `deploy.resources.reservations` are translated to Kubernetes resource limits and requests.
 
 **Dependencies** — `depends_on:` has no Kubernetes equivalent and is ignored. Kubernetes does not guarantee pod start order; use readiness probes in your application instead.
 
@@ -155,6 +159,8 @@ Global mode services (`--mode global`) are deployed as replicated with a warning
 ## Port mapping rules
 
 No `-p` flag means no Service is created. `-P` (publish all) creates a NodePort Service. Explicit `-p host:container` creates a LoadBalancer Service. If a host IP is included (e.g. `-p 127.0.0.1:8080:80`), it is ignored with a warning.
+
+For Swarm services, `--endpoint-mode dnsrr` or any port with `mode: host` bypasses LoadBalancer Service creation entirely. Ports are bound directly on each node via `hostPort`, and the service endpoint returns the node IPs of running pods. Use this when integrating with an external load balancer that needs to target individual nodes directly.
 
 ---
 
