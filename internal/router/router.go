@@ -43,14 +43,14 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 	mux.HandleFunc("GET /containers/json", c.List)
 	mux.HandleFunc("POST /containers/create", c.Create)
 	mux.HandleFunc("POST /containers/", func(w http.ResponseWriter, r *http.Request) {
-    if strings.HasSuffix(r.URL.Path, "/exec") {
-        e.Create(w, r)
-        return
-    }
-    c.DispatchAction(w, r)
-})
-mux.HandleFunc("POST /exec/", e.Start)
-mux.HandleFunc("GET /exec/", e.Inspect)
+		if strings.HasSuffix(r.URL.Path, "/exec") {
+			e.Create(w, r)
+			return
+		}
+		c.DispatchAction(w, r)
+	})
+	mux.HandleFunc("POST /exec/", e.Start)
+	mux.HandleFunc("GET /exec/", e.Inspect)
 	mux.HandleFunc("DELETE /containers/", c.Remove)
 	mux.HandleFunc("GET /containers/", c.DispatchGet) // /containers/{id}/json|logs
 
@@ -71,7 +71,6 @@ mux.HandleFunc("GET /exec/", e.Inspect)
 	mux.HandleFunc("POST /networks/create", n.Create)
 	mux.HandleFunc("GET /networks/", n.Inspect)
 	mux.HandleFunc("DELETE /networks/", n.Remove)
-	
 
 	// Events
 	mux.HandleFunc("GET /events", ev.Stream)
@@ -101,11 +100,13 @@ mux.HandleFunc("GET /exec/", e.Inspect)
 		mux.HandleFunc("POST /secrets/create", sw.CreateSecret)
 		mux.HandleFunc("GET /secrets", sw.ListSecrets)
 		mux.HandleFunc("GET /secrets/", sw.DispatchSecret)
+		mux.HandleFunc("POST /secrets/", sw.DispatchSecret)
 		mux.HandleFunc("DELETE /secrets/", sw.DispatchSecret)
 
 		mux.HandleFunc("POST /configs/create", sw.CreateConfig)
 		mux.HandleFunc("GET /configs", sw.ListConfigs)
 		mux.HandleFunc("GET /configs/", sw.DispatchConfig)
+		mux.HandleFunc("POST /configs/", sw.DispatchConfig)
 		mux.HandleFunc("DELETE /configs/", sw.DispatchConfig)
 
 		mux.HandleFunc("GET /distribution/", sw.DistributionInspect)
@@ -119,7 +120,6 @@ mux.HandleFunc("GET /exec/", e.Inspect)
 
 	// Versioned path prefix stripping - Docker CLI sends /v1.41/containers/json etc.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-
 		if strings.HasPrefix(r.URL.Path, "/v") {
 			// Find the end of the version segment, e.g. /v1.41/...
 			rest := r.URL.Path[1:] // strip leading /
