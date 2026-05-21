@@ -1997,16 +1997,7 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointDNSRR(ctx context.Context,
 			if p.Status.Phase != corev1.PodRunning {
 				continue
 			}
-			nodeIP := ""
-			for _, addr := range []corev1.PodHostIP{{IP: p.Status.HostIP}} {
-				if addr.IP != "" {
-					nodeIP = addr.IP
-					break
-				}
-			}
-			if nodeIP == "" {
-				nodeIP = p.Status.HostIP
-			}
+			nodeIP := p.Status.HostIP
 			if nodeIP == "" || seen[nodeIP] {
 				continue
 			}
