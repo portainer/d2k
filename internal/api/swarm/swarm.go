@@ -23,10 +23,12 @@
 //	POST /secrets/create         -> create Kubernetes Secret
 //	GET  /secrets                -> list d2k Secrets
 //	GET  /secrets/{id}           -> inspect Secret
+//	POST /secrets/{id}/update    -> accept label updates (data unchanged)
 //	DELETE /secrets/{id}         -> delete Secret
 //	POST /configs/create         -> create Kubernetes ConfigMap
 //	GET  /configs                -> list d2k ConfigMaps
 //	GET  /configs/{id}           -> inspect ConfigMap
+//	POST /configs/{id}/update    -> accept label updates (data unchanged)
 //	DELETE /configs/{id}         -> delete ConfigMap
 //	GET  /distribution/{name}/json -> stub for stack deploy clients
 package swarm
@@ -99,7 +101,6 @@ func (h *Handler) ListNodes(w http.ResponseWriter, r *http.Request) {
 
 // DispatchNode routes /nodes/{id} and /nodes/{id}/update.
 func (h *Handler) DispatchNode(w http.ResponseWriter, r *http.Request) {
-	// Path is /nodes/{id} or /nodes/{id}/update
 	path := r.URL.Path
 	path = strings.TrimPrefix(path, "/nodes/")
 
@@ -338,9 +339,10 @@ func (m *muxWriter) Write(p []byte) (int, error) {
 
 // ListTasks handles GET /tasks.
 // Supports filters:
-//   {"service":{"<id>":true}}           -- docker service ps
-//   {"_up-to-date":{"true":true},...}    -- progress polling (service filter included)
-//   {"label":{"com.docker.stack.namespace=<stack>":true}} -- docker stack ps
+//
+//	{"service":{"<id>":true}}           -- docker service ps
+//	{"_up-to-date":{"true":true},...}    -- progress polling (service filter included)
+//	{"label":{"com.docker.stack.namespace=<stack>":true}} -- docker stack ps
 func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
 	rawFilters := r.URL.Query().Get("filters")
 	serviceFilter, stackFilter := parseTaskFilters(rawFilters)
@@ -412,9 +414,20 @@ func (h *Handler) ListSecrets(w http.ResponseWriter, r *http.Request) {
 	httputils.WriteJSON(w, http.StatusOK, secrets)
 }
 
-// DispatchSecret routes /secrets/{id} GET and DELETE.
+// DispatchSecret routes GET /secrets/{id}, POST /secrets/{id}/update,
+// and DELETE /secrets/{id}.
 func (h *Handler) DispatchSecret(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/secrets/")
+	path := strings.TrimPrefix(r.URL.Path, "/secrets/")
+
+	// POST /secrets/{id}/update — Docker sends this on stack redeploy to update
+	// secret labels. Secret data cannot be updated in Swarm either; accept and
+	// return 200 so the deploy is not blocked.
+	if r.Method == http.MethodPost && strings.HasSuffix(path, "/update") {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	id := path
 	switch r.Method {
 	case http.MethodGet:
 		secret, err := h.adapter.SwarmInspectSecret(r.Context(), id)
@@ -458,9 +471,18 @@ func (h *Handler) ListConfigs(w http.ResponseWriter, r *http.Request) {
 	httputils.WriteJSON(w, http.StatusOK, configs)
 }
 
-// DispatchConfig routes /configs/{id} GET and DELETE.
+// DispatchConfig routes GET /configs/{id}, POST /configs/{id}/update,
+// and DELETE /configs/{id}.
 func (h *Handler) DispatchConfig(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/configs/")
+	path := strings.TrimPrefix(r.URL.Path, "/configs/")
+
+	// POST /configs/{id}/update — same pattern as secrets; accept label updates.
+	if r.Method == http.MethodPost && strings.HasSuffix(path, "/update") {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	id := path
 	switch r.Method {
 	case http.MethodGet:
 		cfg, err := h.adapter.SwarmInspectConfig(r.Context(), id)
