@@ -63,8 +63,7 @@ const (
 	// derived from the Kubernetes node UID.
 	AnnotationSwarmNodeID = LabelPrefix + "/swarm-node-id"
 
-	// ConfigMapSwarmIdentity is the name of the ConfigMap in the namespace that
-	// stores the stable Swarm cluster identity (swarm ID, manager node ID, etc.)
-	// derived once from the cluster UID and persisted across d2k restarts.
-	ConfigMapSwarmIdentity = "d2k-identity"
+	// AnnotationEndpointMode stores the Swarm endpoint mode for a service.
+	// Values: "vip" (default) or "dnsrr" (host-port / direct node IP mode).
+	AnnotationEndpointMode = LabelPrefix + "/endpoint-mode"
 )
