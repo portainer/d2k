@@ -737,6 +737,52 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// If ports are also published, a LoadBalancer Service is created separately
 	// for external access (using a -lb suffix to avoid name collision).
 	// Build ClusterIP ports from whichever port spec is available.
+	// --- detect dnsrr / host-port mode ---
+	// Triggered by either:
+	//   EndpointSpec.Mode == "dnsrr"
+	//   Any port with PublishMode == "host"
+	// In this mode pods expose ports directly on the node via hostPort, and
+	// the service endpoint returns the individual node IPs rather than a VIP.
+	// No LoadBalancer Service is created — an external LB targets node IPs directly.
+	isDNSRR := spec.EndpointSpec.Mode == "dnsrr"
+	if !isDNSRR {
+		for _, p := range spec.EndpointSpec.Ports {
+			if strings.ToLower(p.PublishMode) == "host" {
+				isDNSRR = true
+				break
+			}
+		}
+	}
+
+	// Store endpoint mode as an annotation so inspect/endpoint functions can
+	// read it later without re-parsing the spec.
+	if isDNSRR {
+		deployment.Annotations[types.AnnotationEndpointMode] = "dnsrr"
+	}
+
+	// For dnsrr/host-port mode, inject hostPort entries on the container spec.
+	// This binds the container port directly on the node's network interface.
+	if isDNSRR && len(spec.EndpointSpec.Ports) > 0 {
+		var containerPorts []corev1.ContainerPort
+		for _, p := range spec.EndpointSpec.Ports {
+			if p.PublishedPort == 0 {
+				continue
+			}
+			proto := corev1.ProtocolTCP
+			if strings.ToUpper(p.Protocol) == "UDP" {
+				proto = corev1.ProtocolUDP
+			}
+			containerPorts = append(containerPorts, corev1.ContainerPort{
+				ContainerPort: int32(p.TargetPort),
+				HostPort:      int32(p.PublishedPort),
+				Protocol:      proto,
+			})
+		}
+		if len(containerPorts) > 0 {
+			deployment.Spec.Template.Spec.Containers[0].Ports = containerPorts
+		}
+	}
+
 	// If no ports are declared at all we still create a headless-style ClusterIP
 	// with no ports — enough to register the DNS name.
 	var clusterIPPorts []corev1.ServicePort
@@ -802,11 +848,10 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		}
 	}
 
-	// Create a LoadBalancer Service for externally published ports.
-	if len(spec.EndpointSpec.Ports) > 0 {
-		if spec.EndpointSpec.Mode == "dnsrr" {
-			warnings = append(warnings, "d2k: dnsrr endpoint mode is not supported; a ClusterIP Service will be used for DNS")
-		}
+	// Create a LoadBalancer Service for externally published ports — but only
+	// in VIP mode. In dnsrr/host-port mode pods bind directly via hostPort and
+	// an external LB targets node IPs; no LB Service is needed or appropriate.
+	if !isDNSRR && len(spec.EndpointSpec.Ports) > 0 {
 		var lbPorts []corev1.ServicePort
 		for i, p := range spec.EndpointSpec.Ports {
 			if p.PublishedPort == 0 {
@@ -1819,7 +1864,12 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 			"DesiredTasks":   replicas,
 			"CompletedTasks": 0,
 		},
-		"Endpoint": a.swarmServiceEndpoint(ctx, d.Name),
+		"Endpoint": func() map[string]any {
+			if d.Annotations[types.AnnotationEndpointMode] == "dnsrr" {
+				return a.swarmServiceEndpointDNSRR(ctx, d)
+			}
+			return a.swarmServiceEndpoint(ctx, d.Name)
+		}(),
 		"UpdateStatus": updateStatus, // nil on new services - CLI polls tasks instead
 	}
 }
@@ -1907,10 +1957,120 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpoint(ctx context.Context, name
 }
 
 
+// swarmServiceEndpointDNSRR builds the Endpoint response for dnsrr/host-port
+// services. Returns the individual node IPs where pods are running, with no
+// VirtualIPs — matching Docker Swarm dnsrr behaviour where an external LB
+// targets node IPs directly rather than a routing mesh VIP.
+func (a *KubernetesDockerAdapter) swarmServiceEndpointDNSRR(ctx context.Context, d appsv1.Deployment) map[string]any {
+	// Build published ports from hostPort entries on the container spec.
+	var ports []any
+	if len(d.Spec.Template.Spec.Containers) > 0 {
+		for _, cp := range d.Spec.Template.Spec.Containers[0].Ports {
+			proto := "tcp"
+			if cp.Protocol == corev1.ProtocolUDP {
+				proto = "udp"
+			}
+			ports = append(ports, map[string]any{
+				"Protocol":      proto,
+				"TargetPort":    int(cp.ContainerPort),
+				"PublishedPort": int(cp.HostPort),
+				"PublishMode":   "host",
+			})
+		}
+	}
+	if ports == nil {
+		ports = []any{}
+	}
+
+	// Look up pods to get the node IPs where this service is actually running.
+	// These are the IPs an external LB should target.
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("app=%s,%s=%s", d.Name, types.LabelSwarmManagedBy, types.LabelSwarmManagedByValue),
+	})
+
+	// Build per-node IP list — deduplicated since multiple pods may run on
+	// the same node (though hostPort prevents that in practice).
+	seen := map[string]bool{}
+	var nodeIPs []any
+	if err == nil {
+		for _, p := range pods.Items {
+			if p.Status.Phase != corev1.PodRunning {
+				continue
+			}
+			nodeIP := ""
+			for _, addr := range []corev1.PodHostIP{{IP: p.Status.HostIP}} {
+				if addr.IP != "" {
+					nodeIP = addr.IP
+					break
+				}
+			}
+			if nodeIP == "" {
+				nodeIP = p.Status.HostIP
+			}
+			if nodeIP == "" || seen[nodeIP] {
+				continue
+			}
+			seen[nodeIP] = true
+			// Return as CIDR notation to match VirtualIPs[].Addr format.
+			cidr := nodeIP + "/32"
+			if strings.Contains(nodeIP, ":") {
+				cidr = nodeIP + "/128"
+			}
+			nodeIPs = append(nodeIPs, map[string]any{
+				"NetworkID": networkIDForName(d.Name, a.namespace),
+				"Addr":      cidr,
+			})
+		}
+	}
+	if nodeIPs == nil {
+		nodeIPs = []any{}
+	}
+
+	return map[string]any{
+		"Spec": map[string]any{
+			"Mode":  "dnsrr",
+			"Ports": ports,
+		},
+		"Ports":      ports,
+		"VirtualIPs": nodeIPs,
+	}
+}
+
 // swarmServiceEndpointSpec returns the EndpointSpec block for the Spec field
 // of a service inspect response. Portainer reads Spec.EndpointSpec.Ports to
 // render the "Published ports" panel in the service detail view.
 func (a *KubernetesDockerAdapter) swarmServiceEndpointSpec(ctx context.Context, name string) map[string]any {
+	// Check if this is a dnsrr service by looking up the deployment annotation.
+	deps, _ := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app=" + name,
+	})
+	if deps != nil {
+		for _, d := range deps.Items {
+			if d.Annotations[types.AnnotationEndpointMode] == "dnsrr" {
+				// Build ports from hostPort entries on the container spec.
+				var ports []any
+				if len(d.Spec.Template.Spec.Containers) > 0 {
+					for _, cp := range d.Spec.Template.Spec.Containers[0].Ports {
+						proto := "tcp"
+						if cp.Protocol == corev1.ProtocolUDP {
+							proto = "udp"
+						}
+						ports = append(ports, map[string]any{
+							"Protocol":      proto,
+							"TargetPort":    int(cp.ContainerPort),
+							"PublishedPort": int(cp.HostPort),
+							"PublishMode":   "host",
+						})
+					}
+				}
+				if ports == nil {
+					ports = []any{}
+				}
+				return map[string]any{"Mode": "dnsrr", "Ports": ports}
+			}
+		}
+	}
+
 	lbName := serviceName(name) + "-lb"
 	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, lbName, metav1.GetOptions{})
 	if err != nil {
