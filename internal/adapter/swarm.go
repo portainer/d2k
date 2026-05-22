@@ -302,15 +302,8 @@ type swarmServiceSpec struct {
 // SwarmCreateService translates a Swarm ServiceSpec into a Kubernetes Deployment
 // plus a LoadBalancer Service if ports are published.
 func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body io.Reader) (map[string]any, error) {
-	// Read body into buffer so we can log it and still decode it.
-	rawBody, readErr := io.ReadAll(body)
-	if readErr != nil {
-		return nil, fmt.Errorf("unable to read request body: %w", readErr)
-	}
-	a.logger.Infow("SwarmCreateService raw body", "body", string(rawBody))
-
 	var spec swarmServiceSpec
-	if err := json.Unmarshal(rawBody, &spec); err != nil {
+	if err := json.NewDecoder(body).Decode(&spec); err != nil {
 		return nil, fmt.Errorf("invalid service spec: %w", err)
 	}
 
@@ -628,6 +621,42 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		}
 	}
 
+	// --- detect dnsrr / host-port mode ---
+	// Triggered by either:
+	//   EndpointSpec.Mode == "dnsrr"
+	//   Any port with PublishMode == "host"
+	// In this mode pods expose ports directly on the node via hostPort, and
+	// the service endpoint returns the individual node IPs rather than a VIP.
+	// No LoadBalancer Service is created — an external LB targets node IPs directly.
+	isDNSRR := spec.EndpointSpec.Mode == "dnsrr"
+	if !isDNSRR {
+		for _, p := range spec.EndpointSpec.Ports {
+			if strings.ToLower(p.PublishMode) == "host" {
+				isDNSRR = true
+				break
+			}
+		}
+	}
+
+	// Build hostPort container ports for dnsrr/host-port mode.
+	var hostPorts []corev1.ContainerPort
+	if isDNSRR && len(spec.EndpointSpec.Ports) > 0 {
+		for _, p := range spec.EndpointSpec.Ports {
+			if p.PublishedPort == 0 {
+				continue
+			}
+			proto := corev1.ProtocolTCP
+			if strings.ToUpper(p.Protocol) == "UDP" {
+				proto = corev1.ProtocolUDP
+			}
+			hostPorts = append(hostPorts, corev1.ContainerPort{
+				ContainerPort: int32(p.TargetPort),
+				HostPort:      int32(p.PublishedPort),
+				Protocol:      proto,
+			})
+		}
+	}
+
 	// --- command / args ---
 	// Swarm Command = entrypoint override, Args = cmd override.
 	var cmd, args []string
@@ -638,14 +667,19 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		args = cs.Args
 	}
 
+	deploymentAnnotations := map[string]string{
+		types.AnnotationImageRef: cs.Image,
+	}
+	if isDNSRR {
+		deploymentAnnotations[types.AnnotationEndpointMode] = "dnsrr"
+	}
+
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: a.namespace,
-			Labels:    baseLabels,
-			Annotations: map[string]string{
-				types.AnnotationImageRef: cs.Image,
-			},
+			Name:        name,
+			Namespace:   a.namespace,
+			Labels:      baseLabels,
+			Annotations: deploymentAnnotations,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
@@ -681,6 +715,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 							Env:             envVars,
 							Resources:       resourceReqs,
 							VolumeMounts:    volumeMounts,
+							Ports:           hostPorts,
 							ImagePullPolicy: corev1.PullAlways,
 						},
 					},
@@ -733,7 +768,6 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// Annotate the Deployment with its stable Swarm service ID.
 	serviceID := swarmID(string(created.UID))
 	created.Annotations[types.AnnotationSwarmServiceID] = serviceID
-	a.logger.Infow("post-create annotations", "service", name, "annotations", created.Annotations)
 	_, _ = a.client.AppsV1().Deployments(a.namespace).Update(ctx, created, metav1.UpdateOptions{})
 
 	// --- Kubernetes Services ---
@@ -745,52 +779,6 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// If ports are also published, a LoadBalancer Service is created separately
 	// for external access (using a -lb suffix to avoid name collision).
 	// Build ClusterIP ports from whichever port spec is available.
-	// --- detect dnsrr / host-port mode ---
-	// Triggered by either:
-	//   EndpointSpec.Mode == "dnsrr"
-	//   Any port with PublishMode == "host"
-	// In this mode pods expose ports directly on the node via hostPort, and
-	// the service endpoint returns the individual node IPs rather than a VIP.
-	// No LoadBalancer Service is created — an external LB targets node IPs directly.
-	isDNSRR := spec.EndpointSpec.Mode == "dnsrr"
-	if !isDNSRR {
-		for _, p := range spec.EndpointSpec.Ports {
-			if strings.ToLower(p.PublishMode) == "host" {
-				isDNSRR = true
-				break
-			}
-		}
-	}
-
-	// Store endpoint mode as an annotation so inspect/endpoint functions can
-	// read it later without re-parsing the spec.
-	if isDNSRR {
-		deployment.Annotations[types.AnnotationEndpointMode] = "dnsrr"
-	}
-
-	// For dnsrr/host-port mode, inject hostPort entries on the container spec.
-	// This binds the container port directly on the node's network interface.
-	if isDNSRR && len(spec.EndpointSpec.Ports) > 0 {
-		var containerPorts []corev1.ContainerPort
-		for _, p := range spec.EndpointSpec.Ports {
-			if p.PublishedPort == 0 {
-				continue
-			}
-			proto := corev1.ProtocolTCP
-			if strings.ToUpper(p.Protocol) == "UDP" {
-				proto = corev1.ProtocolUDP
-			}
-			containerPorts = append(containerPorts, corev1.ContainerPort{
-				ContainerPort: int32(p.TargetPort),
-				HostPort:      int32(p.PublishedPort),
-				Protocol:      proto,
-			})
-		}
-		if len(containerPorts) > 0 {
-			deployment.Spec.Template.Spec.Containers[0].Ports = containerPorts
-		}
-	}
-
 	// If no ports are declared at all we still create a headless-style ClusterIP
 	// with no ports — enough to register the DNS name.
 	var clusterIPPorts []corev1.ServicePort
