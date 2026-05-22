@@ -733,6 +733,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// Annotate the Deployment with its stable Swarm service ID.
 	serviceID := swarmID(string(created.UID))
 	created.Annotations[types.AnnotationSwarmServiceID] = serviceID
+	a.logger.Infow("post-create annotations", "service", name, "annotations", created.Annotations)
 	_, _ = a.client.AppsV1().Deployments(a.namespace).Update(ctx, created, metav1.UpdateOptions{})
 
 	// --- Kubernetes Services ---
