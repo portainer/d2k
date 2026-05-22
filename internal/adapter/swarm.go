@@ -302,8 +302,15 @@ type swarmServiceSpec struct {
 // SwarmCreateService translates a Swarm ServiceSpec into a Kubernetes Deployment
 // plus a LoadBalancer Service if ports are published.
 func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body io.Reader) (map[string]any, error) {
+	// Read body into buffer so we can log it and still decode it.
+	rawBody, readErr := io.ReadAll(body)
+	if readErr != nil {
+		return nil, fmt.Errorf("unable to read request body: %w", readErr)
+	}
+	a.logger.Infow("SwarmCreateService raw body", "body", string(rawBody))
+
 	var spec swarmServiceSpec
-	if err := json.NewDecoder(body).Decode(&spec); err != nil {
+	if err := json.Unmarshal(rawBody, &spec); err != nil {
 		return nil, fmt.Errorf("invalid service spec: %w", err)
 	}
 
