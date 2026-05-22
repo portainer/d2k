@@ -6,6 +6,10 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: d2k   # change to your target namespace
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
 ---
 # ServiceAccount that d2k runs as. Bound to the namespace Role below for
 # workload management, and to the ClusterRole below for read-only node access.
