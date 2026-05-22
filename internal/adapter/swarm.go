@@ -1998,7 +1998,6 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointDNSRR(ctx context.Context,
 				continue
 			}
 			seen[nodeIP] = true
-			// Return as CIDR notation to match VirtualIPs[].Addr format.
 			cidr := nodeIP + "/32"
 			if strings.Contains(nodeIP, ":") {
 				cidr = nodeIP + "/128"
@@ -2019,7 +2018,7 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointDNSRR(ctx context.Context,
 			"Ports": ports,
 		},
 		"Ports":      ports,
-		"VirtualIPs": nodeIPs,
+		"VirtualIPs": []any{},
 	}
 }
 
@@ -2154,7 +2153,30 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 			"Err":             statusErr,
 			"Timestamp":       p.CreationTimestamp.UTC().Format("2006-01-02T15:04:05.000000000Z"),
 			"ContainerStatus": containerStatus,
-			"PortStatus":      map[string]any{"Ports": []any{}},
+			"PortStatus": func() map[string]any {
+				var taskPorts []any
+				for _, c := range p.Spec.Containers {
+					for _, cp := range c.Ports {
+						if cp.HostPort == 0 {
+							continue
+						}
+						proto := "tcp"
+						if cp.Protocol == corev1.ProtocolUDP {
+							proto = "udp"
+						}
+						taskPorts = append(taskPorts, map[string]any{
+							"Protocol":      proto,
+							"TargetPort":    int(cp.ContainerPort),
+							"PublishedPort": int(cp.HostPort),
+							"PublishMode":   "host",
+						})
+					}
+				}
+				if taskPorts == nil {
+					taskPorts = []any{}
+				}
+				return map[string]any{"Ports": taskPorts}
+			}(),
 		},
 		"DesiredState":        "running",
 		"NetworksAttachments": []any{},
