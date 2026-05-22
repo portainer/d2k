@@ -967,11 +967,12 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		target.Spec.Template.Spec.Containers[0].Env = envVars
 	}
 
-	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas > 0 {
+	if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas >= 0 {
 		r := int32(spec.Mode.Replicated.Replicas)
 		target.Spec.Replicas = &r
 		// Cache desired replica count in annotation so ServiceInspect returns
 		// the correct value immediately, before Kubernetes propagates the update.
+		// Note: 0 is valid here — scale-to-zero is an explicit user action.
 		target.Annotations["d2k.portainer.io/desired-replicas"] = fmt.Sprintf("%d", r)
 	}
 
@@ -1763,9 +1764,11 @@ func (a *KubernetesDockerAdapter) deploymentToSwarmService(ctx context.Context, 
 	// If a scale/update annotation is present, use it as the authoritative
 	// replica count. This ensures ServiceInspect returns the correct value
 	// immediately after an update, before Kubernetes propagates the change.
+	// The annotation is only set by SwarmUpdateService so its presence always
+	// represents an explicit user action — including scale-to-zero.
 	if v := d.Annotations["d2k.portainer.io/desired-replicas"]; v != "" {
 		var parsed int64
-		if _, err := fmt.Sscan(v, &parsed); err == nil && parsed > replicas {
+		if _, err := fmt.Sscan(v, &parsed); err == nil {
 			replicas = parsed
 		}
 	}
