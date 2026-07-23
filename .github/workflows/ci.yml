@@ -17,6 +17,7 @@ env:
 
 jobs:
   tag:
+    name: tag
     runs-on: ubuntu-latest
     outputs:
       value: ${{ steps.resolve.outputs.value }}
@@ -31,6 +32,7 @@ jobs:
           fi
 
   build:
+    name: build
     runs-on: ubuntu-latest
     needs: tag
     steps:
@@ -49,13 +51,13 @@ jobs:
             echo "::warning::go.mod or go.sum is out of date — please run 'go mod tidy' locally and commit the changes"
           fi
 
-      - name: "[preparation] set up QEMU"
+      - name: "[preparation] set up qemu"
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
 
-      - name: "[preparation] set up Docker Buildx"
+      - name: "[preparation] set up docker buildx"
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
-      - name: "[execution] build multi-arch image and export as OCI tarball"
+      - name: "[execution] build multi-arch image and export as oci tarball"
         if: github.event_name == 'pull_request'
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
