@@ -19,7 +19,8 @@ env:
   IMAGE_NAME: d2k
 
 jobs:
-  publish:
+  publish-images:
+    name: publish-images
     # Only run when the triggering ci workflow succeeded and was itself triggered
     # by a pull_request event (not a push or workflow_dispatch).
     if: >
@@ -59,14 +60,14 @@ jobs:
           PR_NUMBER="${RAW_TAG#pr-}"
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
 
-      - name: "[preparation] set up Docker Buildx"
+      - name: "[preparation] set up docker buildx"
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: "[preparation] log in to registry"
         uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_PASSWORD }}
 
       - name: "[execution] push image to registry"
         # Extract the pre-built OCI tarball and push via imagetools create.
@@ -85,7 +86,7 @@ jobs:
             --tag ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }} \
             "oci-layout:///tmp/image-oci:${{ steps.tag.outputs.value }}"
 
-      - name: "[execution] post PR comment"
+      - name: "[post] post pr comment"
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
