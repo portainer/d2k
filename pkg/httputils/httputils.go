@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/errdefs"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // WriteJSON writes v as a JSON response with the given status code.
@@ -17,6 +19,33 @@ func WriteJSON(w http.ResponseWriter, status int, v any) {
 // WriteError writes a Docker-compatible error response body.
 func WriteError(w http.ResponseWriter, status int, message string) {
 	WriteJSON(w, status, map[string]string{"message": message})
+}
+
+// WriteErrorFrom writes err as a Docker error response, with the status the
+// Docker daemon uses for its kind: errdefs types first, then Kubernetes API
+// errors passed through from the cluster, and 500 for anything else.
+func WriteErrorFrom(w http.ResponseWriter, err error) {
+	WriteError(w, StatusFor(err), err.Error())
+}
+
+// StatusFor returns the HTTP status for err.
+func StatusFor(err error) int {
+	switch {
+	case errdefs.IsInvalidParameter(err), apierrors.IsBadRequest(err), apierrors.IsInvalid(err):
+		return http.StatusBadRequest
+	case errdefs.IsForbidden(err), apierrors.IsForbidden(err):
+		return http.StatusForbidden
+	case errdefs.IsNotFound(err), apierrors.IsNotFound(err):
+		return http.StatusNotFound
+	case errdefs.IsConflict(err), apierrors.IsAlreadyExists(err), apierrors.IsConflict(err):
+		return http.StatusConflict
+	case errdefs.IsNotImplemented(err):
+		return http.StatusNotImplemented
+	case errdefs.IsUnavailable(err), apierrors.IsServiceUnavailable(err):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // ParseJSON decodes the request body into v.

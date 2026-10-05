@@ -106,7 +106,7 @@ func conforms(doc *openapi3.T, method, path string, status int, body []byte) err
 }
 
 // newTestRouter returns the d2k router backed by a fake cluster.
-func newTestRouter() http.Handler {
+func newTestRouter() (http.Handler, *fake.Clientset) {
 	client := fake.NewClientset()
 	// Assign UIDs on create, as the API server does; container IDs derive from them.
 	client.PrependReactor("create", "*", func(action k8stesting.Action) (bool, runtime.Object, error) {
@@ -116,7 +116,7 @@ func newTestRouter() http.Handler {
 		return false, nil, nil
 	})
 	logger := zap.NewNop().Sugar()
-	return New(adapter.NewWithClient(client, "d2k", logger), "d2k", false, logger)
+	return New(adapter.NewWithClient(client, "d2k", logger), "d2k", false, logger), client
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
@@ -133,7 +133,7 @@ func do(t *testing.T, h http.Handler, method, path, body string) *httptest.Respo
 // known violation is fixed, so the case can be promoted.
 func TestContract(t *testing.T) {
 	doc := loadSpec(t)
-	h := newTestRouter()
+	h, _ := newTestRouter()
 
 	create := do(t, h, "POST", "/containers/create?name=web", `{"Image":"nginx","Labels":{"app.tier":"web"}}`)
 	var created struct{ ID string }
@@ -181,7 +181,7 @@ func TestContract(t *testing.T) {
 // TestUnsupportedOperations checks that Docker Engine API operations d2k does
 // not implement answer 501, and that other paths answer 404.
 func TestUnsupportedOperations(t *testing.T) {
-	h := newTestRouter()
+	h, _ := newTestRouter()
 	for _, tt := range []struct {
 		method, path string
 		status       int

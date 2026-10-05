@@ -39,7 +39,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	networks, err := h.adapter.ListNetworks(r.Context())
 	if err != nil {
 		h.logger.Errorw("ListNetworks failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -124,7 +124,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.logger.Errorw("CreateNetwork failed", "name", body.Name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -154,7 +154,7 @@ func (h *Handler) Connect(w http.ResponseWriter, r *http.Request) {
 	connect := strings.HasSuffix(r.URL.Path, "/connect")
 	if err := h.adapter.ConnectNetwork(r.Context(), r.PathValue("id"), body.Container, connect); err != nil {
 		h.logger.Errorw("ConnectNetwork failed", "network", r.PathValue("id"), "container", body.Container, "error", err)
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -167,7 +167,7 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 	network, err := h.adapter.InspectNetworkDetail(r.Context(), nameOrID)
 	if err != nil {
 		h.logger.Errorw("InspectNetwork failed", "id", nameOrID, "error", err)
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -180,7 +180,7 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.adapter.RemoveNetwork(r.Context(), nameOrID); err != nil {
 		h.logger.Errorw("RemoveNetwork failed", "id", nameOrID, "error", err)
-		httputils.WriteError(w, http.StatusForbidden, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 

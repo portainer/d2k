@@ -163,7 +163,7 @@ func (a *KubernetesDockerAdapter) SwarmInspectNode(ctx context.Context, id strin
 			return kubeNodeToSwarm(n, a.apiServerHost), nil
 		}
 	}
-	return nil, fmt.Errorf("node %q not found", id)
+	return nil, errdefs.NotFound(fmt.Errorf("node %q not found", id))
 }
 
 // SwarmUpdateNode handles node availability changes (drain / active / pause).
@@ -172,7 +172,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateNode(ctx context.Context, id string
 		Availability string `json:"Availability"`
 	}
 	if err := json.NewDecoder(body).Decode(&req); err != nil {
-		return fmt.Errorf("invalid node update request: %w", err)
+		return errdefs.InvalidParameter(fmt.Errorf("invalid node update request: %w", err))
 	}
 
 	// Resolve by name first, then by swarm ID derived from UID.
@@ -180,7 +180,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateNode(ctx context.Context, id string
 	if err != nil {
 		nodeList, listErr := a.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 		if listErr != nil {
-			return fmt.Errorf("node %q not found", id)
+			return errdefs.NotFound(fmt.Errorf("node %q not found", id))
 		}
 		for _, n := range nodeList.Items {
 			if swarmID(string(n.UID)) == id {
@@ -189,7 +189,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateNode(ctx context.Context, id string
 			}
 		}
 		if node == nil {
-			return fmt.Errorf("node %q not found", id)
+			return errdefs.NotFound(fmt.Errorf("node %q not found", id))
 		}
 	}
 
@@ -307,12 +307,12 @@ type swarmServiceSpec struct {
 func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body io.Reader) (map[string]any, error) {
 	var spec swarmServiceSpec
 	if err := json.NewDecoder(body).Decode(&spec); err != nil {
-		return nil, fmt.Errorf("invalid service spec: %w", err)
+		return nil, errdefs.InvalidParameter(fmt.Errorf("invalid service spec: %w", err))
 	}
 
 	name := sanitiseResourceName(spec.Name)
 	if name == "" {
-		return nil, fmt.Errorf("service Name is required")
+		return nil, errdefs.InvalidParameter(fmt.Errorf("service Name is required"))
 	}
 
 	var warnings []string
@@ -974,7 +974,7 @@ func (a *KubernetesDockerAdapter) SwarmInspectService(ctx context.Context, id st
 			return a.deploymentToSwarmService(ctx, d), nil
 		}
 	}
-	return nil, fmt.Errorf("service %q not found", id)
+	return nil, errdefs.NotFound(fmt.Errorf("service %q not found", id))
 }
 
 // SwarmUpdateService handles scale / image / env updates via a full service spec replace.
@@ -983,7 +983,7 @@ func (a *KubernetesDockerAdapter) SwarmInspectService(ctx context.Context, id st
 func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id string, body io.Reader) error {
 	var spec swarmServiceSpec
 	if err := json.NewDecoder(body).Decode(&spec); err != nil {
-		return fmt.Errorf("invalid service update spec: %w", err)
+		return errdefs.InvalidParameter(fmt.Errorf("invalid service update spec: %w", err))
 	}
 
 	// Resolve the Deployment by swarm service ID or name.
@@ -1002,7 +1002,7 @@ func (a *KubernetesDockerAdapter) SwarmUpdateService(ctx context.Context, id str
 		}
 	}
 	if target == nil {
-		return fmt.Errorf("service %q not found", id)
+		return errdefs.NotFound(fmt.Errorf("service %q not found", id))
 	}
 
 	// Apply updates - only patch the fields the spec carries.
@@ -1088,7 +1088,7 @@ func (a *KubernetesDockerAdapter) SwarmDeleteService(ctx context.Context, id str
 			return nil
 		}
 	}
-	return fmt.Errorf("service %q not found", id)
+	return errdefs.NotFound(fmt.Errorf("service %q not found", id))
 }
 
 // SwarmServiceLogs fans out to all Pods for a service and multiplexes their log
@@ -1116,7 +1116,7 @@ func (a *KubernetesDockerAdapter) SwarmServiceLogs(ctx context.Context, w io.Wri
 		}
 	}
 	if deploymentName == "" {
-		return fmt.Errorf("service %q not found", id)
+		return errdefs.NotFound(fmt.Errorf("service %q not found", id))
 	}
 
 	follow := query.Get("follow") == "1" || query.Get("follow") == "true"
@@ -1361,7 +1361,7 @@ func (a *KubernetesDockerAdapter) SwarmInspectTask(ctx context.Context, id strin
 			return kubePodToSwarmTask(p, "", "", 0), nil
 		}
 	}
-	return nil, fmt.Errorf("task %q not found", id)
+	return nil, errdefs.NotFound(fmt.Errorf("task %q not found", id))
 }
 
 // SwarmCreateSecret creates a Kubernetes Secret tagged for d2k.
@@ -1372,7 +1372,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateSecret(ctx context.Context, body io
 		Data   string            `json:"Data"` // base64-encoded
 	}
 	if err := json.NewDecoder(body).Decode(&req); err != nil {
-		return nil, fmt.Errorf("invalid secret request: %w", err)
+		return nil, errdefs.InvalidParameter(fmt.Errorf("invalid secret request: %w", err))
 	}
 
 	// Docker sends secret Data as a base64-encoded string — decode before storing
@@ -1388,7 +1388,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateSecret(ctx context.Context, body io
 	// so sanitise before creating the resource.
 	k8sName := sanitiseResourceName(req.Name)
 	if k8sName == "" {
-		return nil, fmt.Errorf("secret Name %q is invalid after sanitisation", req.Name)
+		return nil, errdefs.InvalidParameter(fmt.Errorf("secret Name %q is invalid after sanitisation", req.Name))
 	}
 
 	secret := &corev1.Secret{
@@ -1415,11 +1415,11 @@ func (a *KubernetesDockerAdapter) SwarmCreateSecret(ctx context.Context, body io
 			if _, isStackSecret := req.Labels["com.docker.stack.namespace"]; isStackSecret {
 				existing, getErr := a.client.CoreV1().Secrets(a.namespace).Get(ctx, k8sName, metav1.GetOptions{})
 				if getErr != nil {
-					return nil, fmt.Errorf("secret %q already exists", k8sName)
+					return nil, errdefs.Conflict(fmt.Errorf("secret %q already exists", k8sName))
 				}
 				return map[string]any{"ID": swarmID(string(existing.UID))}, nil
 			}
-			return nil, fmt.Errorf("secret %q already exists", req.Name)
+			return nil, errdefs.Conflict(fmt.Errorf("secret %q already exists", req.Name))
 		}
 		return nil, fmt.Errorf("unable to create secret: %w", err)
 	}
@@ -1460,7 +1460,7 @@ func (a *KubernetesDockerAdapter) SwarmInspectSecret(ctx context.Context, id str
 			return kubeSecretToSwarm(s), nil
 		}
 	}
-	return nil, fmt.Errorf("secret %q not found", id)
+	return nil, errdefs.NotFound(fmt.Errorf("secret %q not found", id))
 }
 
 // SwarmDeleteSecret deletes a Secret.
@@ -1478,7 +1478,7 @@ func (a *KubernetesDockerAdapter) SwarmDeleteSecret(ctx context.Context, id stri
 			return a.client.CoreV1().Secrets(a.namespace).Delete(ctx, s.Name, metav1.DeleteOptions{})
 		}
 	}
-	return fmt.Errorf("secret %q not found", id)
+	return errdefs.NotFound(fmt.Errorf("secret %q not found", id))
 }
 
 // SwarmCreateConfig creates a Kubernetes ConfigMap tagged for d2k.
@@ -1489,14 +1489,14 @@ func (a *KubernetesDockerAdapter) SwarmCreateConfig(ctx context.Context, body io
 		Data   string            `json:"Data"`
 	}
 	if err := json.NewDecoder(body).Decode(&req); err != nil {
-		return nil, fmt.Errorf("invalid config request: %w", err)
+		return nil, errdefs.InvalidParameter(fmt.Errorf("invalid config request: %w", err))
 	}
 
 	// Kubernetes ConfigMap names must be RFC 1123 subdomains. Sanitise for the
 	// same reason as secrets — Swarm allows underscores, Kubernetes does not.
 	k8sName := sanitiseResourceName(req.Name)
 	if k8sName == "" {
-		return nil, fmt.Errorf("config Name %q is invalid after sanitisation", req.Name)
+		return nil, errdefs.InvalidParameter(fmt.Errorf("config Name %q is invalid after sanitisation", req.Name))
 	}
 
 	cm := &corev1.ConfigMap{
@@ -1518,11 +1518,11 @@ func (a *KubernetesDockerAdapter) SwarmCreateConfig(ctx context.Context, body io
 			if _, isStackConfig := req.Labels["com.docker.stack.namespace"]; isStackConfig {
 				existing, getErr := a.client.CoreV1().ConfigMaps(a.namespace).Get(ctx, k8sName, metav1.GetOptions{})
 				if getErr != nil {
-					return nil, fmt.Errorf("config %q already exists", k8sName)
+					return nil, errdefs.Conflict(fmt.Errorf("config %q already exists", k8sName))
 				}
 				return map[string]any{"ID": swarmID(string(existing.UID))}, nil
 			}
-			return nil, fmt.Errorf("config %q already exists", req.Name)
+			return nil, errdefs.Conflict(fmt.Errorf("config %q already exists", req.Name))
 		}
 		return nil, fmt.Errorf("unable to create config: %w", err)
 	}
@@ -1567,7 +1567,7 @@ func (a *KubernetesDockerAdapter) SwarmInspectConfig(ctx context.Context, id str
 			return kubeConfigMapToSwarm(c), nil
 		}
 	}
-	return nil, fmt.Errorf("config %q not found", id)
+	return nil, errdefs.NotFound(fmt.Errorf("config %q not found", id))
 }
 
 // SwarmDeleteConfig deletes a ConfigMap.
@@ -1585,7 +1585,7 @@ func (a *KubernetesDockerAdapter) SwarmDeleteConfig(ctx context.Context, id stri
 			return a.client.CoreV1().ConfigMaps(a.namespace).Delete(ctx, c.Name, metav1.DeleteOptions{})
 		}
 	}
-	return fmt.Errorf("config %q not found", id)
+	return errdefs.NotFound(fmt.Errorf("config %q not found", id))
 }
 
 // SwarmListStacks returns all stacks derived from d2k-managed Deployments.

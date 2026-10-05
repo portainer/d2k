@@ -51,7 +51,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	ctrs, err := h.adapter.ListContainers(r.Context(), true)
 	if err != nil {
 		h.logger.Errorw("ListContainers for image list failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 

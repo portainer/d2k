@@ -25,7 +25,6 @@ import (
 
 	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/apispec"
@@ -70,11 +69,7 @@ func (h *Handler) Rename(w http.ResponseWriter, r *http.Request) {
 	newName := r.URL.Query().Get("name")
 	if err := h.adapter.RenameContainer(r.Context(), name, newName); err != nil {
 		h.logger.Errorw("RenameContainer failed", "name", name, "newName", newName, "error", err)
-		status := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "already in use") {
-			status = http.StatusConflict
-		}
-		httputils.WriteError(w, status, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -109,7 +104,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	ctrs, err := h.adapter.ListContainers(r.Context(), all)
 	if err != nil {
 		h.logger.Errorw("ListContainers failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	ctrs = filterContainers(ctrs, args)
@@ -296,14 +291,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	id, warnings, err := h.adapter.CreateContainer(r.Context(), opts)
 	if err != nil {
 		h.logger.Errorw("CreateContainer failed", "name", name, "error", err)
-		status := http.StatusInternalServerError
-		switch {
-		case strings.Contains(err.Error(), "already in use"), errdefs.IsConflict(err):
-			status = http.StatusConflict
-		case errdefs.IsInvalidParameter(err):
-			status = http.StatusBadRequest
-		}
-		httputils.WriteError(w, status, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -326,7 +314,7 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/start")
 	if err := h.adapter.StartContainer(r.Context(), name); err != nil {
 		h.logger.Errorw("StartContainer failed", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -337,7 +325,7 @@ func (h *Handler) Stop(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/stop")
 	if err := h.adapter.StopContainer(r.Context(), name); err != nil {
 		h.logger.Errorw("StopContainer failed", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -348,12 +336,12 @@ func (h *Handler) Restart(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/restart")
 	if err := h.adapter.StopContainer(r.Context(), name); err != nil {
 		h.logger.Errorw("Restart/stop failed", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	if err := h.adapter.StartContainer(r.Context(), name); err != nil {
 		h.logger.Errorw("Restart/start failed", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -364,7 +352,7 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "")
 	if err := h.adapter.RemoveContainer(r.Context(), name); err != nil {
 		h.logger.Errorw("RemoveContainer failed", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -376,7 +364,7 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 	result, err := h.adapter.InspectContainer(r.Context(), name)
 	if err != nil {
 		h.logger.Errorw("InspectContainer failed", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	httputils.WriteJSON(w, http.StatusOK, result)
@@ -396,7 +384,7 @@ func (h *Handler) Logs(w http.ResponseWriter, r *http.Request) {
 	logs, err := h.adapter.GetContainerLogs(r.Context(), name, opts)
 	if err != nil {
 		h.logger.Errorw("GetContainerLogs failed", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	defer func() { _ = logs.Close() }()
@@ -446,7 +434,7 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 
 	resolved, err := h.adapter.ResolveContainerName(r.Context(), name)
 	if err != nil {
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 

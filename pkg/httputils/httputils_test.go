@@ -1,9 +1,16 @@
 package httputils
 
 import (
+	"errors"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+
+	"github.com/docker/docker/errdefs"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 func TestParseFilters(t *testing.T) {
@@ -39,5 +46,33 @@ func TestParseFilters(t *testing.T) {
 				t.Fatalf("label filter = %v, want %v", got, tt.wantLabel)
 			}
 		})
+	}
+}
+
+func TestStatusFor(t *testing.T) {
+	gr := schema.GroupResource{Group: "apps", Resource: "deployments"}
+	tests := []struct {
+		err  error
+		want int
+	}{
+		{errdefs.NotFound(errors.New("container x not found")), http.StatusNotFound},
+		{fmt.Errorf("inspect: %w", errdefs.NotFound(errors.New("x"))), http.StatusNotFound},
+		{errdefs.Conflict(errors.New("name in use")), http.StatusConflict},
+		{errdefs.InvalidParameter(errors.New("bad spec")), http.StatusBadRequest},
+		{errdefs.Forbidden(errors.New("pre-defined network")), http.StatusForbidden},
+		{errdefs.NotImplemented(errors.New("no")), http.StatusNotImplemented},
+		// Kubernetes API errors passed through from the cluster.
+		{fmt.Errorf("get: %w", apierrors.NewNotFound(gr, "web")), http.StatusNotFound},
+		{apierrors.NewAlreadyExists(gr, "web"), http.StatusConflict},
+		{apierrors.NewConflict(gr, "web", errors.New("modified")), http.StatusConflict},
+		{apierrors.NewForbidden(gr, "web", errors.New("exceeded quota")), http.StatusForbidden},
+		{apierrors.NewInvalid(schema.GroupKind{Kind: "Service"}, "1web", nil), http.StatusBadRequest},
+		{apierrors.NewServiceUnavailable("etcd"), http.StatusServiceUnavailable},
+		{errors.New("connection refused"), http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		if got := StatusFor(tt.err); got != tt.want {
+			t.Errorf("StatusFor(%v) = %d, want %d", tt.err, got, tt.want)
+		}
 	}
 }

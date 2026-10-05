@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/docker/docker/errdefs"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/portainer/d2k/internal/types"
@@ -45,7 +46,7 @@ type CreateNetworkOptions struct {
 // network backed by the target namespace.
 func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts CreateNetworkOptions) (*NetworkSummary, []string, error) {
 	if opts.Name == "" {
-		return nil, nil, fmt.Errorf("network name is required")
+		return nil, nil, errdefs.InvalidParameter(fmt.Errorf("network name is required"))
 	}
 
 	var warnings []string
@@ -314,7 +315,7 @@ func (a *KubernetesDockerAdapter) serviceNetworkDetail(ctx context.Context, netw
 func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID string) error {
 	switch nameOrID {
 	case "bridge", "host", "none":
-		return fmt.Errorf("network %q is a pre-defined network and cannot be removed", nameOrID)
+		return errdefs.Forbidden(fmt.Errorf("network %q is a pre-defined network and cannot be removed", nameOrID))
 	}
 
 	a.networksMu.Lock()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/docker/docker/errdefs"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -39,12 +40,12 @@ type CreateVolumeOptions struct {
 // If no matching StorageClass is found, it returns an error that blocks the deploy.
 func (a *KubernetesDockerAdapter) CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*VolumeSummary, error) {
 	if opts.Name == "" {
-		return nil, fmt.Errorf("volume name is required")
+		return nil, errdefs.InvalidParameter(fmt.Errorf("volume name is required"))
 	}
 
 	opts.Name = sanitiseResourceName(opts.Name)
 	if opts.Name == "" {
-		return nil, fmt.Errorf("volume name is invalid after sanitisation")
+		return nil, errdefs.InvalidParameter(fmt.Errorf("volume name is invalid after sanitisation"))
 	}
 
 	if opts.DriverOpts["type"] == "nfs" {
@@ -101,7 +102,7 @@ func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts Crea
 	}
 	qty, err := resource.ParseQuantity(size)
 	if err != nil {
-		return nil, fmt.Errorf("invalid size %q: %w", size, err)
+		return nil, errdefs.InvalidParameter(fmt.Errorf("invalid size %q: %w", size, err))
 	}
 
 	labels := managedLabels(opts.Name)
@@ -136,7 +137,7 @@ func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts Crea
 			// Idempotent for stack redeploy.
 			existing, getErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, opts.Name, metav1.GetOptions{})
 			if getErr != nil {
-				return nil, fmt.Errorf("NFS volume %q already exists", opts.Name)
+				return nil, errdefs.Conflict(fmt.Errorf("NFS volume %q already exists", opts.Name))
 			}
 			return pvcToVolumeSummary(*existing), nil
 		}
@@ -155,7 +156,7 @@ func (a *KubernetesDockerAdapter) createPVCVolume(ctx context.Context, opts Crea
 
 	qty, err := resource.ParseQuantity(size)
 	if err != nil {
-		return nil, fmt.Errorf("invalid size %q: %w", size, err)
+		return nil, errdefs.InvalidParameter(fmt.Errorf("invalid size %q: %w", size, err))
 	}
 
 	labels := managedLabels(opts.Name)
@@ -182,7 +183,7 @@ func (a *KubernetesDockerAdapter) createPVCVolume(ctx context.Context, opts Crea
 	created, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, pvc, metav1.CreateOptions{})
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			return nil, fmt.Errorf("volume %q already exists", opts.Name)
+			return nil, errdefs.Conflict(fmt.Errorf("volume %q already exists", opts.Name))
 		}
 		return nil, fmt.Errorf("unable to create PVC %q: %w", opts.Name, err)
 	}
@@ -212,13 +213,13 @@ func (a *KubernetesDockerAdapter) InspectVolume(ctx context.Context, name string
 	pvc, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return nil, fmt.Errorf("volume %q not found", name)
+			return nil, errdefs.NotFound(fmt.Errorf("volume %q not found", name))
 		}
 		return nil, fmt.Errorf("unable to get PVC %q: %w", name, err)
 	}
 
 	if pvc.Labels[types.LabelManagedBy] != types.LabelManagedByValue {
-		return nil, fmt.Errorf("volume %q not found", name)
+		return nil, errdefs.NotFound(fmt.Errorf("volume %q not found", name))
 	}
 
 	return pvcToVolumeSummary(*pvc), nil

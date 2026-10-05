@@ -72,7 +72,7 @@ type ContainerSummary struct {
 // required, a Service in the target namespace.
 func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunOptions) (string, []string, error) {
 	if opts.Name == "" {
-		return "", nil, fmt.Errorf("container name is required")
+		return "", nil, errdefs.InvalidParameter(fmt.Errorf("container name is required"))
 	}
 
 	dockerName := strings.TrimPrefix(opts.Name, "/")
@@ -81,7 +81,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, err
 	}
 	if inUse {
-		return "", nil, fmt.Errorf("container name %q is already in use", dockerName)
+		return "", nil, errdefs.Conflict(fmt.Errorf("container name %q is already in use", dockerName))
 	}
 
 	// Sanitise the name for Kubernetes: lowercase, underscores to hyphens, max 63 chars.
@@ -151,7 +151,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			return "", nil, fmt.Errorf("container name %q is already in use", opts.Name)
+			return "", nil, errdefs.Conflict(fmt.Errorf("container name %q is already in use", opts.Name))
 		}
 		if errors.IsForbidden(err) {
 			return "", nil, fmt.Errorf("deployment rejected by Kubernetes: %w", err)
@@ -268,7 +268,7 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 	}
 	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
 	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
-		return fmt.Errorf("cannot stop a container that is managed by swarm: use docker service scale instead")
+		return errdefs.Conflict(fmt.Errorf("cannot stop a container that is managed by swarm: use docker service scale instead"))
 	}
 	return a.scaleDeployment(ctx, name, 0)
 }
@@ -290,7 +290,7 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	// Docker Swarm applies: "cannot remove a running container that is managed by swarm".
 	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
 	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
-		return fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead")
+		return errdefs.Conflict(fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead"))
 	}
 
 	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
@@ -318,7 +318,7 @@ func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID,
 		return err
 	}
 	if inUse {
-		return fmt.Errorf("container name %q is already in use", newName)
+		return errdefs.Conflict(fmt.Errorf("container name %q is already in use", newName))
 	}
 
 	patch, err := json.Marshal(map[string]any{
@@ -544,7 +544,7 @@ func (a *KubernetesDockerAdapter) resolveDeploymentName(ctx context.Context, nam
 			return d.Name, nil
 		}
 	}
-	return "", fmt.Errorf("container %q not found", nameOrID)
+	return "", errdefs.NotFound(fmt.Errorf("container %q not found", nameOrID))
 }
 
 // --- scale helper ---

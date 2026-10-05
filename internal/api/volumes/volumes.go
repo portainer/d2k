@@ -42,7 +42,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	vols, err := h.adapter.ListVolumes(r.Context())
 	if err != nil {
 		h.logger.Errorw("ListVolumes failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	vols = filterVolumes(vols, args)
@@ -99,7 +99,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.logger.Errorw("CreateVolume failed", "name", body.Name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -113,7 +113,7 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 	vol, err := h.adapter.InspectVolume(r.Context(), name)
 	if err != nil {
 		h.logger.Debugw("InspectVolume not found", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -126,7 +126,7 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.adapter.RemoveVolume(r.Context(), name); err != nil {
 		h.logger.Errorw("RemoveVolume failed", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
