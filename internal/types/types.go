@@ -1,9 +1,11 @@
 package types
 
-const (
-	// Version is the d2k server version, reported in Docker API version responses.
-	Version = "0.1.0"
+// Version is the d2k server version, reported in Docker API version
+// responses. Release builds set it with
+// -ldflags "-X github.com/portainer/d2k/internal/types.Version=<version>".
+var Version = "dev"
 
+const (
 	// DockerAPIVersion is the Docker API version we claim to implement.
 	DockerAPIVersion = "1.41"
 

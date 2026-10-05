@@ -37,20 +37,30 @@ func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode 
 func (h *Handler) Ping(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("API-Version", types.DockerAPIVersion)
 	w.Header().Set("Docker-Experimental", "false")
+	w.Header().Set("OSType", "linux")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("OK"))
 }
 
 // Version handles GET /version.
 func (h *Handler) Version(w http.ResponseWriter, r *http.Request) {
-	httputils.WriteJSON(w, http.StatusOK, map[string]any{
-		"Version":       types.Version,
+	details := map[string]string{
 		"ApiVersion":    types.DockerAPIVersion,
 		"MinAPIVersion": "1.24",
 		"Os":            runtime.GOOS,
 		"Arch":          runtime.GOARCH,
+		"GoVersion":     runtime.Version(),
 		"KernelVersion": "d2k",
-	})
+	}
+	body := map[string]any{
+		"Version": types.Version,
+		// Recent Docker CLIs read the server details from its components.
+		"Components": []map[string]any{{"Name": "Engine", "Version": types.Version, "Details": details}},
+	}
+	for k, v := range details {
+		body[k] = v
+	}
+	httputils.WriteJSON(w, http.StatusOK, body)
 }
 
 // swarmInfo returns the Swarm section of the /info response.
@@ -126,8 +136,35 @@ func (h *Handler) swarmInfo(ctx context.Context) map[string]any {
 
 // Info handles GET /info.
 func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	// Docker clients call /info constantly; report what can be read rather
+	// than fail it.
+	id, err := h.adapter.HostID(ctx)
+	if err != nil {
+		h.logger.Warnw("info: unable to read the host ID", "error", err)
+		id = h.namespace
+	}
+	ncpu, memory, err := h.adapter.HostResources(ctx)
+	if err != nil {
+		h.logger.Warnw("info: unable to read host resources", "error", err)
+	}
+	ctrs, err := h.adapter.ListContainers(ctx, true)
+	if err != nil {
+		h.logger.Warnw("info: unable to count containers", "error", err)
+	}
+	running := 0
+	for _, c := range ctrs {
+		if c.State == "running" {
+			running++
+		}
+	}
+
 	httputils.WriteJSON(w, http.StatusOK, map[string]any{
-		"ID":                "d2k",
+		"ID":                id,
+		"Containers":        len(ctrs),
+		"ContainersRunning": running,
+		"ContainersPaused":  0,
+		"ContainersStopped": len(ctrs) - running,
 		"Name":              "Portainer d2k translator",
 		"ServerVersion":     types.Version,
 		"OperatingSystem":   "Kubernetes/" + h.namespace,
@@ -152,10 +189,10 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 		"BridgeNfIp6tables": true,
 		"OomKillDisable":    true,
 		"NGoroutines":       10,
-		"NCPU":              1,
-		"MemTotal":          int64(2 * 1024 * 1024 * 1024),
+		"NCPU":              ncpu,
+		"MemTotal":          memory,
 		"SecurityOptions":   []string{},
-		"Swarm":             h.swarmInfo(r.Context()),
+		"Swarm":             h.swarmInfo(ctx),
 		"Labels": []string{
 			"d2k.portainer.io/translator=true",
 			"d2k.portainer.io/namespace=" + h.namespace,

@@ -75,6 +75,8 @@ standalone_cases() {
   echo "== standalone ($STANDALONE)"
 
   check "version negotiates" docker version
+  check "info identifies the namespace" bash -c "[ \"\$(docker info -f {{.ID}})\" = \"\$(kubectl --context $CONTEXT get ns d2k -o jsonpath={.metadata.uid})\" ]"
+  check "info reports cluster CPUs" bash -c '[ "$(docker info -f {{.NCPU}})" -gt 0 ]'
   # Mutual TLS is required.
   check "plaintext is refused" bash -c '! curl -sf -m 5 http://localhost:31112/_ping'
   check "TLS without a client certificate is refused" bash -c "! curl -q -sf -m 5 --cacert $PKI/ca.pem https://localhost:31112/_ping"
