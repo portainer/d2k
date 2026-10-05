@@ -96,7 +96,7 @@ standalone_cases() {
   mkdir -p "$WORKDIR/compose" && printf 'services:\n  web:\n    image: nginx:alpine\n' >"$WORKDIR/compose/compose.yaml"
   check "compose up" bash -c "cd $WORKDIR/compose && to() { perl -e 'alarm shift; exec @ARGV' \"\$@\"; } && to 120 docker compose -p e2ea up -d && to 120 docker compose -p e2eb up -d"
   check "compose down leaves other projects alone" bash -c "cd $WORKDIR/compose && perl -e 'alarm 60; exec @ARGV' docker compose -p e2ea down && docker inspect e2eb-web-1 >/dev/null"
-  known "Phase 3" "compose down removes its own project" bash -c "cd $WORKDIR/compose && perl -e 'alarm 60; exec @ARGV' docker compose -p e2eb down && ! docker inspect e2eb-web-1 >/dev/null 2>&1"
+  check "compose down removes its own project" bash -c "cd $WORKDIR/compose && perl -e 'alarm 60; exec @ARGV' docker compose -p e2eb down && ! docker container inspect e2eb-web-1 >/dev/null 2>&1"
 
   # Volumes, including unversioned paths (Portainer UI).
   check "volume create and label filter" bash -c 'docker volume create --label e2e=1 e2e-vol >/dev/null && [ "$(docker volume ls -q --filter label=e2e=1)" = e2e-vol ]'
@@ -106,6 +106,103 @@ standalone_cases() {
 
   check "rm deletes the Deployment" bash -c "docker rm -f e2e-web >/dev/null && ! kubectl --context $CONTEXT -n d2k get deploy e2e-web >/dev/null 2>&1"
 }
+
+# ------------------------------------------------------------------- compose
+
+# compose_cases runs a realistic project through its whole lifecycle: a
+# published port, a named volume, two networks and a command override.
+compose_cases() {
+  export DOCKER_HOST=$STANDALONE
+  echo "== compose lifecycle ($STANDALONE)"
+  COMPOSE_DIR=$WORKDIR/lifecycle
+  mkdir -p "$COMPOSE_DIR"
+  cat >"$COMPOSE_DIR/compose.yaml" <<'YAML'
+services:
+  web:
+    image: nginx:alpine
+    ports: ["18080:80"]
+    environment: [MODE=one]
+    volumes: [data:/data]
+    networks: [front, back]
+  cache:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", ""]
+    networks: [back]
+volumes:
+  data:
+networks:
+  front:
+  back:
+YAML
+
+  check "compose up (port, volume, networks)" dc up -d
+  eventually 120 running e2ec-web-1
+  eventually 120 running e2ec-cache-1
+  check "compose ps lists the project" compose_count_is 2
+  check "compose up again changes nothing" up_keeps_ids
+  check "command keeps the image entrypoint" cache_keeps_entrypoint
+  check "services resolve each other by service name" in_service web getent hosts cache
+  check "service names stay within their project" names_stay_in_project
+  check "published port gets a Service" published_port_exists 18080
+  check "named volume is mounted" in_service web sh -c 'echo kept > /data/marker'
+  check "compose logs" logs_show_ready
+
+  sed -i.bak 's/MODE=one/MODE=two/' "$COMPOSE_DIR/compose.yaml"
+  check "compose up recreates a changed service" up_recreates_web
+  eventually 120 running e2ec-web-1
+  check "volume data survives recreate" marker_kept
+  check "compose stop" stop_all
+  check "compose start" start_all
+  check "compose down -v removes everything" down_removes_everything
+}
+
+# dc <args...>: docker compose for the e2ec lifecycle project, with a timeout.
+dc() { (cd "$COMPOSE_DIR" && to 180 docker compose -p e2ec "$@"); }
+running() { [ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" = running ]; }
+compose_count_is() { [ "$(dc ps -q | wc -l | tr -d ' ')" = "$1" ]; }
+# in_service <compose service> <cmd...>: run cmd in the service's pod via kubectl.
+in_service() {
+  local deploy
+  deploy=$(k -n d2k get deploy -l "com.docker.compose.project=e2ec,com.docker.compose.service=$1" -o jsonpath='{.items[0].metadata.name}')
+  k -n d2k exec "deploy/$deploy" -- "${@:2}"
+}
+up_keeps_ids() {
+  local before
+  before=$(docker inspect -f '{{.Id}}' e2ec-web-1 e2ec-cache-1) && dc up -d &&
+    [ "$before" = "$(docker inspect -f '{{.Id}}' e2ec-web-1 e2ec-cache-1)" ]
+}
+up_recreates_web() {
+  local before
+  before=$(docker inspect -f '{{.Id}}' e2ec-web-1) && dc up -d &&
+    [ "$before" != "$(docker inspect -f '{{.Id}}' e2ec-web-1)" ] &&
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' e2ec-web-1 | grep -qx MODE=two
+}
+cache_keeps_entrypoint() {
+  local c=".items[0].spec.template.spec.containers[0]"
+  [ -z "$(k -n d2k get deploy -l com.docker.compose.service=cache -o jsonpath="{$c.command}")" ] &&
+    k -n d2k get deploy -l com.docker.compose.service=cache -o jsonpath="{$c.args}" | grep -q redis-server
+}
+logs_show_ready() { dc logs cache 2>&1 | grep -q 'Ready to accept connections'; }
+marker_kept() { [ "$(in_service web cat /data/marker)" = kept ]; }
+stop_all() { dc stop && compose_count_is 0; }
+start_all() { dc start && eventually 120 compose_count_is 2; }
+# names_stay_in_project deploys a second project with the same service names
+# and checks that "cache" still resolves to the first project's container.
+names_stay_in_project() {
+  local other=$WORKDIR/other ip
+  mkdir -p "$other" && sed 's/18080:80/18081:80/' "$COMPOSE_DIR/compose.yaml" >"$other/compose.yaml"
+  (cd "$other" && to 180 docker compose -p e2ed up -d) || return 1
+  eventually 120 running e2ed-cache-1
+  local deploy resolved
+  deploy=$(k -n d2k get deploy -l com.docker.compose.project=e2ec,com.docker.compose.service=cache -o jsonpath='{.items[0].metadata.name}')
+  ip=$(k -n d2k get pod -l "app=$deploy" -o jsonpath='{.items[0].status.podIP}')
+  resolved=$(in_service web getent hosts cache | awk '{print $1}')
+  (cd "$other" && to 120 docker compose -p e2ed down -v) >/dev/null
+  [ -n "$ip" ] && [ "$resolved" = "$ip" ]
+}
+published_port_exists() { k -n d2k get svc -o jsonpath='{.items[*].spec.ports[*].port}' | grep -qw "$1"; }
+no_project_objects() { ! k -n d2k get deploy,svc,pvc -o name | grep -q e2ec; }
+down_removes_everything() { dc down -v && eventually 120 no_project_objects; }
 
 # --------------------------------------------------------------------- swarm
 
@@ -162,6 +259,7 @@ YAML
 
 reset
 standalone_cases
+compose_cases
 swarm_cases
 reset
 

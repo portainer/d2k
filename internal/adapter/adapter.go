@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 
 	"go.uber.org/zap"
@@ -57,6 +59,12 @@ type KubernetesDockerAdapter struct {
 	// startup, keyed by NFS server address. Used by SwarmCreateService to create
 	// NFS-backed PVCs inline when docker stack deploy doesn't call volume create.
 	nfsStorageClasses map[string]string // server -> storageClassName
+
+	// clusterDNS and clusterDomain are the cluster DNS server and domain, read
+	// from d2k's own resolv.conf. Pods of compose projects use them to resolve
+	// service names within their project first. Empty outside a cluster.
+	clusterDNS    string
+	clusterDomain string
 }
 
 // Options configures a new KubernetesDockerAdapter.
@@ -95,6 +103,11 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		}
 	}
 
+	clusterDNS, clusterDomain := readClusterDNS("/etc/resolv.conf")
+	if clusterDNS == "" || clusterDomain == "" {
+		opts.Logger.Warnw("cluster DNS not found in /etc/resolv.conf — compose service names will not be scoped to their project")
+	}
+
 	return &KubernetesDockerAdapter{
 		client:           client,
 		metricsClient:    mc,
@@ -107,7 +120,37 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		prevCPU:           map[string]int64{},
 		networks:          map[string]*NetworkSummary{},
 		nfsStorageClasses: map[string]string{},
+		clusterDNS:        clusterDNS,
+		clusterDomain:     clusterDomain,
 	}, nil
+}
+
+// readClusterDNS returns the nameserver and cluster domain from a pod's
+// resolv.conf, whose search list contains "svc.<cluster domain>".
+func readClusterDNS(path string) (nameserver, domain string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "nameserver":
+			if nameserver == "" {
+				nameserver = fields[1]
+			}
+		case "search":
+			for _, s := range fields[1:] {
+				if d, ok := strings.CutPrefix(s, "svc."); ok && domain == "" {
+					domain = d
+				}
+			}
+		}
+	}
+	return nameserver, domain
 }
 
 // apiServerHost extracts the bare hostname or IP from a Kubernetes API server

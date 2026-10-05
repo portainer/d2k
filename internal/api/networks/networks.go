@@ -13,6 +13,7 @@ package networks
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -137,6 +138,26 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		"Id":      network.ID,
 		"Warning": strings.Join(warnings, "; "),
 	})
+}
+
+// Connect handles POST /networks/{id}/connect and /disconnect. The namespace
+// network is flat, so every container already reaches every other; only the
+// container's reported network attachments change.
+func (h *Handler) Connect(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Container string `json:"Container"`
+	}
+	if err := httputils.ParseJSON(r, &body); err != nil {
+		httputils.WriteError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
+		return
+	}
+	connect := strings.HasSuffix(r.URL.Path, "/connect")
+	if err := h.adapter.ConnectNetwork(r.Context(), r.PathValue("id"), body.Container, connect); err != nil {
+		h.logger.Errorw("ConnectNetwork failed", "network", r.PathValue("id"), "container", body.Container, "error", err)
+		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // Inspect handles GET /networks/{id}.

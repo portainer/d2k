@@ -23,7 +23,9 @@ import (
 
 	"go.uber.org/zap"
 
+	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/pkg/httputils"
@@ -67,7 +69,11 @@ func (h *Handler) Rename(w http.ResponseWriter, r *http.Request) {
 	newName := r.URL.Query().Get("name")
 	if err := h.adapter.RenameContainer(r.Context(), name, newName); err != nil {
 		h.logger.Errorw("RenameContainer failed", "name", name, "newName", newName, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "already in use") {
+			status = http.StatusConflict
+		}
+		httputils.WriteError(w, status, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -114,6 +120,9 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		Type        string `json:"Type"`
 	}
 
+	type endpoint struct {
+		NetworkID string `json:"NetworkID"`
+	}
 	type item struct {
 		ID        string            `json:"Id"`
 		Names     []string          `json:"Names"`
@@ -124,6 +133,11 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		Ports     []portBinding     `json:"Ports"`
 		Labels    map[string]string `json:"Labels"`
 		IPAddress string            `json:"IPAddress"`
+
+		NetworkSettings struct {
+			Networks map[string]endpoint `json:"Networks"`
+		} `json:"NetworkSettings"`
+		Mounts []dockertypes.MountPoint `json:"Mounts"`
 	}
 
 	result := make([]item, 0, len(ctrs))
@@ -137,7 +151,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 				Type:        p.Type,
 			})
 		}
-		result = append(result, item{
+		it := item{
 			ID:        c.ID,
 			Names:     c.Names,
 			Image:     c.Image,
@@ -147,7 +161,13 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			Labels:    c.Labels,
 			IPAddress: c.IPAddress,
 			Ports:     ports,
-		})
+			Mounts:    c.Mounts,
+		}
+		it.NetworkSettings.Networks = map[string]endpoint{}
+		for name, id := range c.Networks {
+			it.NetworkSettings.Networks[name] = endpoint{NetworkID: id}
+		}
+		result = append(result, it)
 	}
 
 	httputils.WriteJSON(w, http.StatusOK, result)
@@ -176,6 +196,7 @@ func filterContainers(ctrs []adapter.ContainerSummary, args filters.Args) []adap
 // createBody mirrors the subset of the Docker create request body that d2k uses.
 type createBody struct {
 	Image        string              `json:"Image"`
+	Entrypoint   []string            `json:"Entrypoint"`
 	Cmd          []string            `json:"Cmd"`
 	Env          []string            `json:"Env"`
 	Labels       map[string]string   `json:"Labels"`
@@ -185,12 +206,19 @@ type createBody struct {
 			HostIP   string `json:"HostIp"`
 			HostPort string `json:"HostPort"`
 		} `json:"PortBindings"`
-		PublishAllPorts bool `json:"PublishAllPorts"`
+		PublishAllPorts bool     `json:"PublishAllPorts"`
+		Binds           []string `json:"Binds"`
+		NetworkMode     string   `json:"NetworkMode"`
 		DeviceRequests  []struct {
 			Count        int        `json:"Count"`
 			Capabilities [][]string `json:"Capabilities"`
 		} `json:"DeviceRequests"`
 	} `json:"HostConfig"`
+	NetworkingConfig struct {
+		EndpointsConfig map[string]struct {
+			Aliases []string `json:"Aliases"`
+		} `json:"EndpointsConfig"`
+	} `json:"NetworkingConfig"`
 }
 
 // Create handles POST /containers/create (docker run — create phase).
@@ -237,9 +265,21 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var aliases, networks []string
+	if mode := body.HostConfig.NetworkMode; mode != "" && mode != "default" && !strings.Contains(mode, ":") {
+		networks = append(networks, mode)
+	}
+	for name, endpoint := range body.NetworkingConfig.EndpointsConfig {
+		aliases = append(aliases, endpoint.Aliases...)
+		if !slices.Contains(networks, name) {
+			networks = append(networks, name)
+		}
+	}
+
 	opts := adapter.RunOptions{
 		Name:         name,
 		Image:        body.Image,
+		Entrypoint:   body.Entrypoint,
 		Cmd:          body.Cmd,
 		Env:          body.Env,
 		Labels:       body.Labels,
@@ -247,14 +287,20 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		PortBindings: portBindings,
 		PublishAll:   body.HostConfig.PublishAllPorts,
 		GPUCount:     gpuCount,
+		Binds:        body.HostConfig.Binds,
+		Aliases:      aliases,
+		Networks:     networks,
 	}
 
 	id, warnings, err := h.adapter.CreateContainer(r.Context(), opts)
 	if err != nil {
 		h.logger.Errorw("CreateContainer failed", "name", name, "error", err)
 		status := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "already in use") {
+		switch {
+		case strings.Contains(err.Error(), "already in use"), errdefs.IsConflict(err):
 			status = http.StatusConflict
+		case errdefs.IsInvalidParameter(err):
+			status = http.StatusBadRequest
 		}
 		httputils.WriteError(w, status, err.Error())
 		return

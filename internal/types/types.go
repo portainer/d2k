@@ -31,6 +31,23 @@ const (
 	// LabelImageRef stores the original image reference as supplied by the Docker client.
 	AnnotationImageRef = LabelPrefix + "/image-ref"
 
+	// AnnotationDockerName stores the Docker container name. It differs from the
+	// Deployment name after a rename, since Kubernetes object names are immutable.
+	AnnotationDockerName = LabelPrefix + "/docker-name"
+
+	// AnnotationDockerLabels stores the Docker labels verbatim as JSON. Kubernetes
+	// label values are limited to 63 characters from a restricted charset, so
+	// labels such as com.docker.compose.config-hash cannot round-trip as labels.
+	AnnotationDockerLabels = LabelPrefix + "/docker-labels"
+
+	// AnnotationNetworks stores the names of the Docker networks a container is
+	// attached to, as JSON. Compose compares them on every `up`.
+	AnnotationNetworks = LabelPrefix + "/networks"
+
+	// LabelComposeProject marks the pods of a compose project, selected by the
+	// project's DNS Service so service names resolve within the project only.
+	LabelComposeProject = LabelPrefix + "/compose-project"
+
 	// ServiceTypeLB is the value for LabelServiceType when a LoadBalancer Service was created.
 	ServiceTypeLB = "loadbalancer"
 
