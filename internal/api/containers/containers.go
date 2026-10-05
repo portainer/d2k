@@ -200,6 +200,9 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts, ignored := adapter.RunOptionsFromRequest(name, req)
+	if platform := r.URL.Query().Get("platform"); platform != "" {
+		ignored = append(ignored, fmt.Sprintf("platform %q ignored: the node's container runtime picks the image platform", platform))
+	}
 
 	id, warnings, err := h.adapter.CreateContainer(r.Context(), opts)
 	if err != nil {

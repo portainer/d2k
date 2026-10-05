@@ -32,6 +32,10 @@ import (
 // finishedRetention is how long a finished exec instance stays inspectable.
 const finishedRetention = 10 * time.Minute
 
+// startingTimeout bounds how long exec waits for a started container's pod
+// to run.
+const startingTimeout = 2 * time.Minute
+
 // Handler holds the exec instances, which live in memory as in the daemon.
 type Handler struct {
 	adapter   *adapter.KubernetesDockerAdapter
@@ -89,7 +93,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/containers/"), "/exec")
-	ctr, err := h.adapter.InspectContainer(r.Context(), name)
+	ctr, err := h.runningContainer(r.Context(), name)
 	if err != nil {
 		httputils.WriteErrorFrom(w, err)
 		return
@@ -128,6 +132,31 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 
 	httputils.WriteJSON(w, http.StatusCreated, map[string]string{"Id": inst.id})
+}
+
+// runningContainer inspects the container, waiting while it is starting:
+// Docker's start returns once the container runs, so clients exec right
+// after it, while d2k's start returns before the pod runs.
+func (h *Handler) runningContainer(ctx context.Context, name string) (*container.InspectResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, startingTimeout)
+	defer cancel()
+	for {
+		ctr, err := h.adapter.InspectContainer(ctx, name)
+		if err != nil || !isStarting(ctr.State) {
+			return ctr, err
+		}
+		select {
+		case <-ctx.Done():
+			return ctr, nil
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// isStarting reports whether a container was started and its pod is not
+// running yet, nor failing.
+func isStarting(s *container.State) bool {
+	return s != nil && s.Status == container.StateCreated && s.StartedAt != "" && s.Error == ""
 }
 
 // Start handles POST /exec/{id}/start.

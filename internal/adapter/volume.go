@@ -38,6 +38,9 @@ func (a *KubernetesDockerAdapter) CreateVolume(ctx context.Context, opts CreateV
 		return nil, errdefs.InvalidParameter(fmt.Errorf("volume name is required"))
 	}
 
+	if opts.Driver != "" && opts.Driver != "local" {
+		return nil, errdefs.InvalidParameter(fmt.Errorf("volume driver %q is not supported by d2k: volumes are PersistentVolumeClaims of the default StorageClass", opts.Driver))
+	}
 	if sanitiseResourceName(opts.Name) == "" {
 		return nil, errdefs.InvalidParameter(fmt.Errorf("invalid volume name %q", opts.Name))
 	}

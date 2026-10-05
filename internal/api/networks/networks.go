@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/moby/moby/api/types/network"
 	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
@@ -101,25 +102,23 @@ func filterNetworksByLabel(networks []adapter.NetworkSummary, rawFilters string)
 	return result
 }
 
-// createBody mirrors the Docker network create request body.
-type createBody struct {
-	Name   string            `json:"Name"`
-	Driver string            `json:"Driver"`
-	Labels map[string]string `json:"Labels"`
-}
-
 // Create handles POST /networks/create.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	var body createBody
+	var body network.CreateRequest
 	if err := httputils.ParseJSON(r, &body); err != nil {
 		httputils.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	network, warnings, err := h.adapter.CreateNetwork(r.Context(), adapter.CreateNetworkOptions{
-		Name:   body.Name,
-		Driver: body.Driver,
-		Labels: body.Labels,
+		Name:           body.Name,
+		Driver:         body.Driver,
+		Labels:         body.Labels,
+		Internal:       body.Internal,
+		EnableIPv6:     body.EnableIPv6 != nil && *body.EnableIPv6,
+		DisableIPv4:    body.EnableIPv4 != nil && !*body.EnableIPv4,
+		IPAMConfigured: body.IPAM != nil && len(body.IPAM.Config) > 0,
+		Options:        body.Options,
 	})
 	if err != nil {
 		log.Error().Str("context", "NetworksAPI").Any("name", body.Name).Err(err).Msg("CreateNetwork failed")

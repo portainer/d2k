@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,13 +34,22 @@ type NetworkSummary struct {
 	Attachable bool              `json:"Attachable"`
 	IPAM       NetworkIPAM       `json:"IPAM"`
 	Labels     map[string]string `json:"Labels"`
+
+	// warnings name the options the network was created with that d2k
+	// cannot honour, reported to the containers that join it.
+	warnings []string
 }
 
 // CreateNetworkOptions mirrors docker network create flags.
 type CreateNetworkOptions struct {
-	Name   string
-	Driver string
-	Labels map[string]string
+	Name           string
+	Driver         string
+	Labels         map[string]string
+	Internal       bool
+	EnableIPv6     bool
+	DisableIPv4    bool
+	IPAMConfigured bool
+	Options        map[string]string
 }
 
 // CreateNetwork accepts a docker network create call and returns a synthetic
@@ -49,7 +59,27 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 		return nil, nil, errdefs.InvalidParameter(fmt.Errorf("network name is required"))
 	}
 
-	var warnings []string
+	if opts.Driver == "macvlan" || opts.Driver == "ipvlan" {
+		return nil, nil, errdefs.InvalidParameter(fmt.Errorf("network driver %q is not supported by d2k: Kubernetes pod networking has no Layer 2 attachment", opts.Driver))
+	}
+
+	var optionWarnings []string
+	if opts.Internal {
+		optionWarnings = append(optionWarnings, "internal is not enforced: containers can reach outside the cluster")
+	}
+	if opts.IPAMConfigured {
+		optionWarnings = append(optionWarnings, "IPAM settings are ignored: the cluster assigns pod addresses")
+	}
+	if opts.EnableIPv6 {
+		optionWarnings = append(optionWarnings, "IPv6 is not configured by d2k: pods get the cluster's address families")
+	}
+	if opts.DisableIPv4 {
+		optionWarnings = append(optionWarnings, "IPv4 cannot be disabled: pods get the cluster's address families")
+	}
+	if len(opts.Options) > 0 {
+		optionWarnings = append(optionWarnings, "driver options are ignored")
+	}
+	warnings := slices.Clone(optionWarnings)
 
 	if opts.Name != a.namespace && opts.Name != "bridge" && opts.Name != "host" {
 		warnings = append(warnings, fmt.Sprintf(
@@ -79,6 +109,8 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 		Scope:  "swarm",
 		IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
 		Labels: labels,
+
+		warnings: optionWarnings,
 	}
 
 	a.networksMu.Lock()
@@ -203,7 +235,17 @@ func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID s
 		}
 	}
 
-	// Synthesise a response for unknown networks, with Compose labels if applicable.
+	// Networks live in memory; those that containers joined are known after
+	// a restart. Other names do not exist, as compose expects before creating.
+	joined, err := a.joinedNetwork(ctx, nameOrID)
+	if err != nil {
+		return nil, err
+	}
+	if !joined {
+		return nil, errdefs.NotFound(fmt.Errorf("network %s not found", nameOrID))
+	}
+
+	// Synthesise the network, with Compose labels if applicable.
 	syntheticLabels := map[string]string{}
 	if idx := strings.LastIndex(nameOrID, "_"); idx != -1 {
 		syntheticLabels["com.docker.compose.network"] = nameOrID[idx+1:]
@@ -218,6 +260,20 @@ func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID s
 		IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
 		Labels: syntheticLabels,
 	}, nil
+}
+
+// joinedNetwork reports whether a container joined the named network.
+func (a *KubernetesDockerAdapter) joinedNetwork(ctx context.Context, name string) (bool, error) {
+	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return false, fmt.Errorf("unable to list deployments: %w", err)
+	}
+	for _, d := range deps.Items {
+		if slices.Contains(containerNetworks(d), name) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // InspectNetworkDetail returns a full Docker network inspect response suitable
@@ -342,6 +398,22 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 
 // networkIDForName produces a deterministic synthetic network ID from a name
 // and namespace, giving Docker clients a stable ID to reference across calls.
+// networkWarnings returns the warnings of the named networks' options, for
+// a container that joins them.
+func (a *KubernetesDockerAdapter) networkWarnings(names []string) []string {
+	a.networksMu.Lock()
+	defer a.networksMu.Unlock()
+	var warnings []string
+	for _, name := range names {
+		if n, ok := a.networks[name]; ok {
+			for _, w := range n.warnings {
+				warnings = append(warnings, fmt.Sprintf("network %q: %s", name, w))
+			}
+		}
+	}
+	return warnings
+}
+
 func networkIDForName(name, namespace string) string {
 	return fmt.Sprintf("d2k-%s-%s", namespace, name)
 }

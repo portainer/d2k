@@ -71,7 +71,9 @@ Node count, manager count, and the Swarm leader are derived from the live Kubern
 
 ## Docker Compose and docker stack deploy
 
-d2k supports `docker stack deploy` using a standard Compose file. The following documents what is supported, what is partially supported, and what is not.
+**`docker compose`**: every attribute of the Compose Specification, and what d2k does with it, is listed in [docs/compose-support.md](docs/compose-support.md). Each row is checked against a cluster by `test/e2e/compose_spec.py`.
+
+**`docker stack deploy`** (Swarm mode) supports a standard Compose file. The following documents what is supported, what is partially supported, and what is not.
 
 ### Supported
 

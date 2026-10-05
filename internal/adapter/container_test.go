@@ -394,3 +394,59 @@ func TestListContainersUsesConstantAPICalls(t *testing.T) {
 		t.Fatalf("ListContainers made %d API calls for 20 containers, want at most 3 (deployments, pods, services)", n)
 	}
 }
+
+func TestCreateContainerWarnsWithoutGPUs(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	_, warnings, err := a.CreateContainer(context.Background(), RunOptions{Name: "ml", Image: "app", GPUCount: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "GPU") {
+		t.Fatalf("warnings = %q, want one about GPUs the cluster does not offer", warnings)
+	}
+}
+
+// Compose discards network create warnings, so network options d2k cannot
+// honour are reported on the containers that join the network.
+func TestUnsupportedNetworkOptionsWarnOnJoin(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+	if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "p_back", Internal: true, IPAMConfigured: true, EnableIPv6: true, DisableIPv4: true}); err != nil {
+		t.Fatal(err)
+	}
+	_, warnings, err := a.CreateContainer(ctx, RunOptions{Name: "db", Image: "redis", Networks: []string{"p_back"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(warnings, "\n")
+	for _, want := range []string{"internal", "IPAM", "IPv6", "IPv4"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("warnings = %q, want one about %s", warnings, want)
+		}
+	}
+
+	for _, driver := range []string{"macvlan", "ipvlan"} {
+		if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "lan", Driver: driver}); !errdefs.IsInvalidParameter(err) {
+			t.Errorf("create %s network = %v, want invalid parameter", driver, err)
+		}
+	}
+}
+
+// Compose creates a network when inspecting it fails, so unknown networks
+// must not exist. Networks live in memory: those that containers joined stay
+// known after d2k restarts.
+func TestInspectNetwork(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	if _, err := a.InspectNetwork(ctx, "p_unknown"); !errdefs.IsNotFound(err) {
+		t.Fatalf("inspect of an unknown network = %v, want not found", err)
+	}
+	if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "web", Image: "nginx", Networks: []string{"p_front"}}); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewWithClient(client, testNamespace)
+	n, err := restarted.InspectNetwork(ctx, "p_front")
+	if err != nil || n.Labels["com.docker.compose.project"] != "p" {
+		t.Fatalf("inspect of a joined network after restart = %+v, %v", n, err)
+	}
+}

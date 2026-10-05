@@ -131,6 +131,10 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, err
 	}
 	warnings = append(warnings, volumeWarnings...)
+	warnings = append(warnings, a.networkWarnings(opts.Networks)...)
+	if opts.GPUCount > 0 && a.gpuResourceName == "" {
+		warnings = append(warnings, "GPU request ignored: no node in the cluster offers a GPU resource")
+	}
 
 	// Build and create the Deployment.
 	deployment, err := a.buildDeployment(ctx, opts, kind, mappings)

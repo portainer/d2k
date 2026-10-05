@@ -65,3 +65,15 @@ func TestVolumeNamesSharingAPVCName(t *testing.T) {
 		t.Fatalf("create of another name for the PVC = %v, want conflict", err)
 	}
 }
+
+func TestCreateVolumeRefusesOtherDrivers(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	if _, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data", Driver: "rexray"}); !errdefs.IsInvalidParameter(err) {
+		t.Fatalf("create with driver rexray = %v, want invalid parameter", err)
+	}
+	for _, driver := range []string{"", "local"} {
+		if _, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data" + driver, Driver: driver}); err != nil {
+			t.Fatalf("create with driver %q = %v", driver, err)
+		}
+	}
+}

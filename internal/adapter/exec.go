@@ -47,6 +47,12 @@ func (a *KubernetesDockerAdapter) ExecContainer(ctx context.Context, opts ExecOp
 		return 0, errdefs.Conflict(fmt.Errorf("container %s is not running", opts.Name))
 	}
 
+	// Kubernetes needs at least one stream; Docker runs execs with none, as
+	// compose does for its hooks.
+	if streams.Stdin == nil && streams.Stdout == nil && streams.Stderr == nil {
+		streams.Stdout = io.Discard
+	}
+
 	req := a.client.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(pod.Name).

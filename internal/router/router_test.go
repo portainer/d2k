@@ -52,3 +52,11 @@ func TestAPIVersionRange(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateWarnsAboutPlatform(t *testing.T) {
+	h, _ := newTestRouter()
+	rec := do(t, h, "POST", "/containers/create?name=web&platform=linux/arm64", `{"Image":"nginx"}`)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `platform \"linux/arm64\"`) {
+		t.Fatalf("create = %d %s, want a warning about the platform", rec.Code, rec.Body)
+	}
+}

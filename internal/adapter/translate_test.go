@@ -148,3 +148,42 @@ func TestHealthcheckBecomesReadinessProbe(t *testing.T) {
 		t.Errorf("default probe timing = %+v, want Docker's 30s/30s/3", p)
 	}
 }
+
+// Settings compose sends that d2k used to drop without a word.
+func TestSilentlyDroppedSettingsWarn(t *testing.T) {
+	tests := []struct {
+		name, body  string
+		wantWarning string
+	}{
+		{"network_mode host", `{"Image":"app","HostConfig":{"NetworkMode":"host"}}`, `network mode "host"`},
+		{"network_mode none", `{"Image":"app","HostConfig":{"NetworkMode":"none"}}`, `network mode "none"`},
+		{"network_mode service", `{"Image":"app","HostConfig":{"NetworkMode":"container:0123abcd"}}`, `network mode "container:0123abcd"`},
+		{"ipv4_address", `{"Image":"app","NetworkingConfig":{"EndpointsConfig":{"p_front":{"IPAMConfig":{"IPv4Address":"172.30.0.10"}}}}}`, "IPAMConfig"},
+		{"network mac_address", `{"Image":"app","NetworkingConfig":{"EndpointsConfig":{"p_front":{"MacAddress":"02:42:ac:11:00:02"}}}}`, "MacAddress"},
+		{"network driver_opts", `{"Image":"app","NetworkingConfig":{"EndpointsConfig":{"p_front":{"DriverOpts":{"a":"b"}}}}}`, "DriverOpts"},
+		{"network priority", `{"Image":"app","NetworkingConfig":{"EndpointsConfig":{"p_front":{"GwPriority":5}}}}`, "GwPriority"},
+		{"mem_swappiness", `{"Image":"app","HostConfig":{"MemorySwappiness":10}}`, "MemorySwappiness"},
+		{"logging options", `{"Image":"app","HostConfig":{"LogConfig":{"Type":"json-file","Config":{"max-size":"10m"}}}}`, "log options"},
+		{"volume driver", `{"Image":"app","HostConfig":{"Mounts":[{"Type":"volume","Source":"data","Target":"/data","VolumeOptions":{"DriverConfig":{"Name":"rexray"}}}]}}`, `volume driver "rexray"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, warnings := RunOptionsFromRequest("web", request(t, tt.body))
+			if !strings.Contains(strings.Join(warnings, "\n"), tt.wantWarning) {
+				t.Fatalf("warnings = %q, want one about %s", warnings, tt.wantWarning)
+			}
+			for _, n := range opts.Networks {
+				if n == "host" || n == "none" {
+					t.Fatalf("networks = %q: a network mode is not a network", opts.Networks)
+				}
+			}
+		})
+	}
+
+	// The defaults compose sends for a plain service are not settings.
+	_, warnings := RunOptionsFromRequest("web", request(t, `{"Image":"app","HostConfig":{"NetworkMode":"p_default","LogConfig":{"Type":"json-file","Config":{}}},
+		"NetworkingConfig":{"EndpointsConfig":{"p_default":{"Aliases":["p-web-1","web"],"IPAMConfig":{},"DriverOpts":{}}}}}`))
+	if len(warnings) != 0 {
+		t.Fatalf("warnings for a plain compose service = %q", warnings)
+	}
+}

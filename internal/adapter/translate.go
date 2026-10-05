@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
 	"slices"
 	"strconv"
@@ -29,9 +30,11 @@ var (
 		"Binds": true, "Mounts": true, "NetworkMode": true, "PortBindings": true, "PublishAllPorts": true,
 		"RestartPolicy": true, "ConsoleSize": true, "LogConfig": true, "ExtraHosts": true,
 		"CapAdd": true, "CapDrop": true, "Privileged": true, "ReadonlyRootfs": true,
-		"Memory": true, "MemoryReservation": true, "MemorySwappiness": true, "NanoCPUs": true,
+		"Memory": true, "MemoryReservation": true, "NanoCPUs": true,
 		"CPUShares": true, "CPUQuota": true, "CPUPeriod": true, "DeviceRequests": true,
 	}
+	// Links are reported with HostConfig.Links, where compose also sets them.
+	endpointHandled = map[string]bool{"Aliases": true, "Links": true}
 )
 
 // RunOptionsFromRequest translates a Docker container create request into
@@ -116,14 +119,22 @@ func RunOptionsFromRequest(name string, req container.CreateRequest) (RunOptions
 	if t := host.LogConfig.Type; t != "" && t != "json-file" {
 		warnings = append(warnings, fmt.Sprintf("log driver %q is not supported by d2k: logs are read from Kubernetes", t))
 	}
+	if len(host.LogConfig.Config) > 0 {
+		warnings = append(warnings, fmt.Sprintf("log options %s ignored: the kubelet rotates container logs", strings.Join(slices.Sorted(maps.Keys(host.LogConfig.Config)), ", ")))
+	}
 
-	if mode := string(host.NetworkMode); mode != "" && mode != "default" && !strings.Contains(mode, ":") {
+	switch mode := string(host.NetworkMode); {
+	case mode == "host" || mode == "none" || strings.HasPrefix(mode, "container:"):
+		warnings = append(warnings, fmt.Sprintf("network mode %q is not supported by d2k: the container joins the namespace network", mode))
+	case mode != "" && mode != "default" && mode != "bridge":
 		opts.Networks = append(opts.Networks, mode)
 	}
 	if req.NetworkingConfig != nil {
-		for network, endpoint := range req.NetworkingConfig.EndpointsConfig {
+		for _, network := range slices.Sorted(maps.Keys(req.NetworkingConfig.EndpointsConfig)) {
+			endpoint := req.NetworkingConfig.EndpointsConfig[network]
 			if endpoint != nil {
 				opts.Aliases = append(opts.Aliases, endpoint.Aliases...)
+				warnings = append(warnings, unhandledFields("NetworkingConfig.EndpointsConfig."+network+".", reflect.ValueOf(*endpoint), endpointHandled)...)
 			}
 			if !slices.Contains(opts.Networks, network) {
 				opts.Networks = append(opts.Networks, network)
@@ -139,23 +150,23 @@ func ignoredSettings(cfg container.Config, host container.HostConfig) []string {
 	if host.MemorySwappiness != nil && *host.MemorySwappiness == -1 {
 		host.MemorySwappiness = nil
 	}
+	return append(unhandledFields("", reflect.ValueOf(cfg), configHandled), unhandledFields("HostConfig.", reflect.ValueOf(host), hostConfigHandled)...)
+}
+
+// unhandledFields names the fields of struct v that are set and not handled.
+func unhandledFields(prefix string, v reflect.Value, handled map[string]bool) []string {
 	var ignored []string
-	var visit func(prefix string, v reflect.Value, handled map[string]bool)
-	visit = func(prefix string, v reflect.Value, handled map[string]bool) {
-		for i := range v.NumField() {
-			field, value := v.Type().Field(i), v.Field(i)
-			if field.Anonymous {
-				visit(prefix, value, handled)
-				continue
-			}
-			if !field.IsExported() || handled[field.Name] || isUnset(value) {
-				continue
-			}
-			ignored = append(ignored, fmt.Sprintf("%s%s is not supported by d2k and was ignored", prefix, jsonName(field)))
+	for i := range v.NumField() {
+		field, value := v.Type().Field(i), v.Field(i)
+		if field.Anonymous {
+			ignored = append(ignored, unhandledFields(prefix, value, handled)...)
+			continue
 		}
+		if !field.IsExported() || handled[field.Name] || isUnset(value) {
+			continue
+		}
+		ignored = append(ignored, fmt.Sprintf("%s%s is not supported by d2k and was ignored", prefix, jsonName(field)))
 	}
-	visit("", reflect.ValueOf(cfg), configHandled)
-	visit("HostConfig.", reflect.ValueOf(host), hostConfigHandled)
 	return ignored
 }
 
@@ -168,6 +179,13 @@ func isUnset(v reflect.Value) bool {
 		return v.Len() == 0
 	case reflect.Pointer:
 		return v.IsNil() || isUnset(v.Elem())
+	case reflect.Struct:
+		for i := range v.NumField() {
+			if !isUnset(v.Field(i)) {
+				return false
+			}
+		}
+		return true
 	default:
 		return v.IsZero()
 	}
@@ -221,6 +239,10 @@ func mountWarningsFor(mounts []mount.Mount) []string {
 	for _, m := range mounts {
 		if m.Type != mount.TypeVolume {
 			warnings = append(warnings, fmt.Sprintf("%s mount at %q ignored: only named volumes are supported by d2k", m.Type, m.Target))
+			continue
+		}
+		if o := m.VolumeOptions; o != nil && o.DriverConfig != nil && o.DriverConfig.Name != "" && o.DriverConfig.Name != "local" {
+			warnings = append(warnings, fmt.Sprintf("volume driver %q ignored at %q: d2k volumes are PersistentVolumeClaims", o.DriverConfig.Name, m.Target))
 		}
 	}
 	return warnings
