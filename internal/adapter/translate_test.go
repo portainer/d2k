@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"encoding/json"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -21,11 +22,13 @@ func request(t *testing.T, body string) container.CreateRequest {
 }
 
 func TestPlainDockerRunHasNoWarnings(t *testing.T) {
-	// The body `docker create nginx:alpine` sends (Docker CLI 29.4).
-	req := request(t, `{"AttachStdout":true,"AttachStderr":true,"Image":"nginx:alpine",
-		"HostConfig":{"NetworkMode":"default","RestartPolicy":{"Name":"no"},"ConsoleSize":[0,0],"MemorySwappiness":-1},
-		"NetworkingConfig":{"EndpointsConfig":{"default":{}}}}`)
-	opts, warnings := RunOptionsFromRequest("web", req)
+	// The exact body `docker create nginx:alpine` sends (Docker CLI 29.4),
+	// including its empty arrays, empty maps and false pointers.
+	body, err := os.ReadFile("testdata/docker-create-plain.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, warnings := RunOptionsFromRequest("web", request(t, string(body)))
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %q, want none", warnings)
 	}

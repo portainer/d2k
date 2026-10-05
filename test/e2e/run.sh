@@ -109,6 +109,8 @@ standalone_cases() {
     for _ in \$(seq 60); do [ \"\$(docker inspect -f {{.State.Status}} e2e-settings)\" = running ] && break; sleep 2; done &&
     [ \"\$(kubectl --context $CONTEXT -n d2k exec deploy/e2e-settings -- sh -c 'pwd; id -u; grep db /etc/hosts' | tr -s ' \t\n' ' ')\" = '/tmp 101 10.0.0.5 db ' ] &&
     [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-settings -o jsonpath='{.spec.template.spec.containers[0].resources.limits}')\" = '{\"cpu\":\"500m\",\"memory\":\"64Mi\"}' ]"
+  check "plain create reports no warnings" bash -c '[ -z "$(docker create --name e2e-quiet nginx:alpine 2>&1 >/dev/null)" ]'
+  docker rm e2e-quiet >/dev/null 2>&1
   check "unsupported settings are reported" bash -c 'docker create --name e2e-warn --dns 1.1.1.1 nginx:alpine 2>&1 >/dev/null | grep -q "Dns is not supported by d2k"'
   docker rm -f e2e-settings e2e-warn >/dev/null 2>&1
 

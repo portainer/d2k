@@ -8,6 +8,10 @@
 # in test/e2e/.pki; run.sh uses the client certificate from there.
 set -euo pipefail
 
+# Build and load with the local Docker daemon, even when the caller's
+# environment points the Docker CLI at d2k.
+unset DOCKER_HOST DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_CONTEXT
+
 CLUSTER=${CLUSTER:-d2k}
 CONTEXT=kind-$CLUSTER
 IMAGE=${IMAGE:-d2k:dev}

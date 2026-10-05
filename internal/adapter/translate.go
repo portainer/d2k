@@ -148,7 +148,7 @@ func ignoredSettings(cfg container.Config, host container.HostConfig) []string {
 				visit(prefix, value, handled)
 				continue
 			}
-			if !field.IsExported() || handled[field.Name] || value.IsZero() {
+			if !field.IsExported() || handled[field.Name] || isUnset(value) {
 				continue
 			}
 			ignored = append(ignored, fmt.Sprintf("%s%s is not supported by d2k and was ignored", prefix, jsonName(field)))
@@ -157,6 +157,20 @@ func ignoredSettings(cfg container.Config, host container.HostConfig) []string {
 	visit("", reflect.ValueOf(cfg), configHandled)
 	visit("HostConfig.", reflect.ValueOf(host), hostConfigHandled)
 	return ignored
+}
+
+// isUnset reports whether a client left a setting at its default. Clients
+// send empty lists and maps, and pointers to zero values, for settings they
+// do not use.
+func isUnset(v reflect.Value) bool {
+	switch v.Kind() {
+	case reflect.Slice, reflect.Map:
+		return v.Len() == 0
+	case reflect.Pointer:
+		return v.IsNil() || isUnset(v.Elem())
+	default:
+		return v.IsZero()
+	}
 }
 
 // jsonName returns the name a field has in the API, which clients know.
