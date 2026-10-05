@@ -50,8 +50,6 @@ type KubernetesDockerAdapter struct {
 	// (e.g. "nvidia.com/gpu" or "amd.com/gpu"). Empty means GPU support is disabled.
 	gpuResourceName string
 
-	prevCPU    map[string]int64
-	prevCPUMu  sync.RWMutex
 	networks   map[string]*NetworkSummary
 	networksMu sync.RWMutex
 	// nfsStorageClasses caches nfs.csi.k8s.io StorageClass names discovered at
@@ -97,16 +95,7 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		return nil, fmt.Errorf("unable to reach namespace %q in cluster: %w", opts.Config.Namespace, err)
 	}
 
-	// Probe metrics API — optional, failures are non-fatal.
 	mc := initMetricsClient(restCfg)
-	if mc != nil {
-		if probeMetricsAPI(context.Background(), mc, opts.Config.Namespace) {
-			log.Info().Str("context", "KubernetesAdapter").Msg("Metrics API available — stats will show real data")
-		} else {
-			log.Info().Str("context", "KubernetesAdapter").Msg("Metrics API not available — stats will return zeroes")
-			mc = nil
-		}
-	}
 
 	clusterDNS, clusterDomain := readClusterDNS("/etc/resolv.conf")
 	if clusterDNS == "" || clusterDomain == "" {
@@ -131,7 +120,6 @@ func NewWithClient(client kubernetes.Interface, namespace string) *KubernetesDoc
 	return &KubernetesDockerAdapter{
 		client:            client,
 		namespace:         namespace,
-		prevCPU:           map[string]int64{},
 		networks:          map[string]*NetworkSummary{},
 		nfsStorageClasses: map[string]string{},
 	}

@@ -813,11 +813,6 @@ func encodePortMappings(bindings []string, publishAll bool) (string, error) {
 	return string(b), err
 }
 
-// ResolveContainerName is the public wrapper around resolveDeploymentName.
-func (a *KubernetesDockerAdapter) ResolveContainerName(ctx context.Context, name string) (string, error) {
-	return a.resolveDeploymentName(ctx, name)
-}
-
 // containerSecurityContext translates the user, capabilities, privileged
 // and read-only root settings, or returns nil when none is set. Whether they
 // are allowed is decided by the namespace's Pod Security policy.

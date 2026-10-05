@@ -151,6 +151,18 @@ standalone_cases() {
     for _ in $(seq 20); do [ "$(cat '"$WORKDIR"'/wait.out)" = 0 ] && exit 0; sleep 1; done; exit 1'
   docker rm -f e2e-fg e2e-code e2e-in e2e-it e2e-wait >/dev/null 2>&1
 
+  # Stats come from metrics-server (installed by setup.sh); its first sample
+  # for a new pod takes up to a minute.
+  docker run -d --name e2e-busy -m 64m busybox:1.36 sh -c 'while true; do :; done' >/dev/null
+  check "stats report a busy container's CPU" bash -c '
+    for _ in $(seq 45); do
+      cpu=$(docker stats --no-stream --format "{{.CPUPerc}}" e2e-busy | tr -d "%" | cut -d. -f1)
+      [ "${cpu:-0}" -ge 50 ] && exit 0; sleep 4
+    done; exit 1'
+  check "stats report the memory limit" bash -c 'docker stats --no-stream --format "{{.MemUsage}}" e2e-busy | grep -q "/ 64MiB"'
+  check "stats stream one sample a second" bash -c '[ "$(perl -e "alarm 4; exec @ARGV" curl -s -N "https://localhost:31112/v1.52/containers/e2e-busy/stats" | wc -l | tr -d " ")" -ge 3 ]'
+  docker rm -f e2e-busy >/dev/null 2>&1
+
   # Phase 0: name resolution.
   docker run -d --name e2e-my-api nginx:alpine >/dev/null
   check "rm does not match by name suffix" bash -c '! docker rm api 2>/dev/null && docker container inspect e2e-my-api >/dev/null'

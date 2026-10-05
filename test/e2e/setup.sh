@@ -20,6 +20,15 @@ PKI=$ROOT/test/e2e/.pki
 
 [ -d "$PKI" ] || (cd "$ROOT" && go run ./cmd pki init --san localhost,127.0.0.1 --out "$PKI" >/dev/null)
 
+# metrics-server backs `docker stats`. kind's kubelets serve self-signed
+# certificates, hence --kubelet-insecure-tls (test clusters only).
+METRICS_SERVER=v0.9.0
+kubectl --context "$CONTEXT" apply -f "https://github.com/kubernetes-sigs/metrics-server/releases/download/$METRICS_SERVER/components.yaml"
+kubectl --context "$CONTEXT" -n kube-system get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q kubelet-insecure-tls ||
+  kubectl --context "$CONTEXT" -n kube-system patch deploy metrics-server --type=json \
+    -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
+kubectl --context "$CONTEXT" -n kube-system rollout status deploy/metrics-server --timeout=120s
+
 docker build -t "$IMAGE" --build-arg VERSION=dev "$ROOT"
 kind load docker-image "$IMAGE" --name "$CLUSTER"
 

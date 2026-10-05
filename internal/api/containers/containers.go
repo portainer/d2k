@@ -436,12 +436,12 @@ func containerName(path, suffix string) string {
 	return s
 }
 
-// Stats handles GET /containers/{id}/stats.
+// Stats handles GET /containers/{id}/stats: one sample, or one a second
+// while stream is set.
 func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/stats")
-	stream := r.URL.Query().Get("stream") != "false"
-
-	resolved, err := h.adapter.ResolveContainerName(r.Context(), name)
+	stream := r.URL.Query().Get("stream") != "0" && r.URL.Query().Get("stream") != "false"
+	ctr, err := h.adapter.InspectContainer(r.Context(), name)
 	if err != nil {
 		httputils.WriteErrorFrom(w, err)
 		return
@@ -449,72 +449,62 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-
+	flusher, _ := w.(http.Flusher)
+	enc := json.NewEncoder(w)
+	var clock cpuClock
 	for {
-		metrics, err := h.adapter.GetPodMetrics(r.Context(), resolved)
+		u, err := h.adapter.ContainerUsage(r.Context(), ctr.ID)
 		if err != nil {
+			log.Warn().Str("context", "ContainersAPI").Str("name", name).Err(err).Msg("Unable to read container usage")
 			return
 		}
-
-		now := time.Now().UTC().Format(time.RFC3339Nano)
-		stats := map[string]any{
-			"read":    now,
-			"preread": now,
-			"cpu_stats": map[string]any{
-				"cpu_usage": map[string]any{
-					"total_usage":         metrics.CPUUsageNanoCores,
-					"usage_in_kernelmode": int64(0),
-					"usage_in_usermode":   metrics.CPUUsageNanoCores,
-				},
-				"system_cpu_usage": int64(0),
-				"num_cpus":         1,
-				"throttling_data": map[string]any{
-					"throttled_periods": 0,
-					"throttled_time":    0,
-				},
-			},
-			"precpu_stats": map[string]any{
-				"cpu_usage": map[string]any{
-					"total_usage":         metrics.PrevCPUUsageNanoCores,
-					"usage_in_kernelmode": int64(0),
-					"usage_in_usermode":   metrics.PrevCPUUsageNanoCores,
-				},
-				"system_cpu_usage": int64(0),
-				"throttling_data": map[string]any{
-					"throttled_periods": 0,
-					"throttled_time":    0,
-				},
-			},
-			"memory_stats": map[string]any{
-				"usage":    metrics.MemoryUsageBytes,
-				"maxusage": metrics.MemoryUsageBytes,
-				"limit":    int64(1<<63 - 1),
-				"stats":    map[string]any{},
-			},
-			"networks": map[string]any{},
-			"blkio_stats": map[string]any{
-				"io_service_bytes_recursive": []any{},
-				"io_serviced_recursive":      []any{},
-			},
-			"pids_stats": map[string]any{
-				"current": 0,
-			},
+		s := clock.sample(u.CPUNanoCores, u.OnlineCPUs, time.Now())
+		s.ID, s.Name, s.OSType = ctr.ID, ctr.Name, "linux"
+		s.MemoryStats = container.MemoryStats{Usage: uint64(u.MemoryBytes), Limit: uint64(u.MemoryLimit)}
+		if err := enc.Encode(s); err != nil {
+			return
 		}
-
-		_, _ = fmt.Fprintln(w, mustJSON(stats))
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
+		if flusher != nil {
+			flusher.Flush()
 		}
-
 		if !stream {
 			return
 		}
-
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(1 * time.Second):
+		case <-time.After(time.Second):
 		}
+	}
+}
+
+// cpuClock turns Kubernetes' CPU rate into Docker's cumulative counters.
+// The Docker CLI computes CPU% as the change in a container's CPU time over
+// the change in the host's (CPU count x elapsed time), x CPUs x 100: with
+// both counters advanced from the rate, that gives back the rate.
+type cpuClock struct {
+	total, system uint64
+	at            time.Time
+}
+
+// sample advances the counters to now at nanoCores and returns them with the
+// previous sample. The first sample's previous one is a second earlier at
+// the same rate, as the daemon's two reads for a one-off sample are.
+func (c *cpuClock) sample(nanoCores int64, cpus int, now time.Time) container.StatsResponse {
+	if c.at.IsZero() {
+		c.at = now.Add(-time.Second)
+	}
+	prev := container.CPUStats{CPUUsage: container.CPUUsage{TotalUsage: c.total}, SystemUsage: c.system, OnlineCPUs: uint32(cpus)}
+	preRead := c.at
+	elapsed := now.Sub(c.at)
+	c.total += uint64(float64(nanoCores) * elapsed.Seconds())
+	c.system += uint64(elapsed.Nanoseconds()) * uint64(cpus)
+	c.at = now
+	return container.StatsResponse{
+		Read:        now,
+		PreRead:     preRead,
+		CPUStats:    container.CPUStats{CPUUsage: container.CPUUsage{TotalUsage: c.total}, SystemUsage: c.system, OnlineCPUs: uint32(cpus)},
+		PreCPUStats: prev,
 	}
 }
 
@@ -667,9 +657,4 @@ func (h *Handler) endAttachSession(id string, q *streams.SizeQueue) {
 	}
 	h.mu.Unlock()
 	q.Close()
-}
-
-func mustJSON(v any) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }
