@@ -86,6 +86,7 @@ standalone_cases() {
   check "run starts a container" bash -c '
     docker run -d --name e2e-web nginx:alpine >/dev/null &&
     for _ in $(seq 60); do [ "$(docker inspect -f {{.State.Status}} e2e-web)" = running ] && exit 0; sleep 2; done; exit 1'
+  check "container IDs are 64 hex characters" bash -c '[[ "$(docker ps -q --no-trunc --filter name=e2e-web)" =~ ^[0-9a-f]{64}$ ]]'
   check "ps lists the container" bash -c 'docker ps --format {{.Names}} | grep -qx e2e-web'
   check "logs returns output" bash -c 'docker logs e2e-web 2>&1 | grep -q "start worker"'
   check "stop scales to 0" bash -c "docker stop e2e-web >/dev/null && [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-web -o jsonpath={.spec.replicas})\" = 0 ]"

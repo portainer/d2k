@@ -2,22 +2,38 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
+
+	"github.com/portainer/d2k/internal/errdefs"
 )
 
+func TestContainerID(t *testing.T) {
+	id := containerID("2665dc61-cb7a-4c1e-9f00-000000000001")
+	if len(id) != 64 || strings.Trim(id, "0123456789abcdef") != "" {
+		t.Fatalf("containerID() = %q, want 64 lowercase hex characters", id)
+	}
+	if id != containerID("2665dc61-cb7a-4c1e-9f00-000000000001") || id == containerID("2665dc61-cb7a-4c1e-9f00-000000000002") {
+		t.Fatal("containerID() is not a stable, unique function of the UID")
+	}
+}
+
 func TestResolveDeploymentName(t *testing.T) {
+	const webUID, myWebUID = "2665dc61-cb7a-4c1e-9f00-000000000001", "7f3a9b20-1111-4c1e-9f00-000000000002"
 	a, _ := newTestAdapter(t,
-		deployment("web", "2665dc61-cb7a-4c1e-9f00-000000000001", managed()),
-		deployment("my-web", "7f3a9b20-1111-4c1e-9f00-000000000002", managed()),
+		deployment("web", webUID, managed()),
+		deployment("my-web", myWebUID, managed()),
 		deployment("my-api", "5b0c1d2e-3333-4c1e-9f00-000000000004", managed()),
 		// d2k's own Deployment carries no managed-by label.
 		deployment("d2k", "aaaaaaaa-2222-4c1e-9f00-000000000003", map[string]string{"app": "d2k"}),
 	)
+	webID, myWebID := containerID(webUID), containerID(myWebUID)
 
 	tests := []struct {
 		nameOrID string
@@ -25,15 +41,19 @@ func TestResolveDeploymentName(t *testing.T) {
 		wantErr  bool
 	}{
 		{nameOrID: "web", want: "web"},
+		{nameOrID: "/web", want: "web"},
 		{nameOrID: "my-web", want: "my-web"},
-		{nameOrID: "2665dc61-cb7a-4c1e-9f00-000000000001", want: "web"},
-		{nameOrID: "2665dc61-cb7", want: "web"},
-		{nameOrID: "7f3a9b20", want: "my-web"},
+		{nameOrID: webID, want: "web"},
+		{nameOrID: webID[:12], want: "web"},
+		{nameOrID: myWebID[:5], want: "my-web"},
+		// The Kubernetes UID is not a Docker ID.
+		{nameOrID: webUID, wantErr: true},
 		// Docker never resolves a name by suffix: "api" must not match "my-api".
 		{nameOrID: "api", wantErr: true},
+		{nameOrID: "", wantErr: true},
 		// Unmanaged Deployments, including d2k itself, are invisible.
 		{nameOrID: "d2k", wantErr: true},
-		{nameOrID: "aaaaaaaa-2222-4c1e-9f00-000000000003", wantErr: true},
+		{nameOrID: containerID("aaaaaaaa-2222-4c1e-9f00-000000000003"), wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.nameOrID, func(t *testing.T) {
@@ -51,6 +71,27 @@ func TestResolveDeploymentName(t *testing.T) {
 				t.Fatalf("resolveDeploymentName(%q) = %q, want %q", tt.nameOrID, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveAmbiguousIDPrefix(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	// Find two UIDs whose container IDs share a first character.
+	var uids []string
+	for i := 0; len(uids) < 2; i++ {
+		uid := fmt.Sprintf("00000000-0000-4000-8000-%012d", i)
+		if len(uids) == 0 || containerID(k8stypes.UID(uid))[0] == containerID(k8stypes.UID(uids[0]))[0] {
+			uids = append(uids, uid)
+		}
+	}
+	for i, uid := range uids {
+		if _, err := a.client.AppsV1().Deployments(testNamespace).Create(context.Background(), deployment(fmt.Sprintf("c%d", i), uid, managed()), metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := a.resolveDeploymentName(context.Background(), containerID(k8stypes.UID(uids[0]))[:1])
+	if !errdefs.IsInvalidParameter(err) {
+		t.Fatalf("ambiguous prefix error = %v, want invalid parameter", err)
 	}
 }
 

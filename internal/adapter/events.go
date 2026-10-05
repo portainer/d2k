@@ -191,9 +191,9 @@ func deploymentEvent(e watch.Event) *DockerEvent {
 		Time:     now.Unix(),
 		TimeNano: now.UnixNano(),
 		Actor: DockerEventActor{
-			ID: string(d.UID),
+			ID: containerID(d.UID),
 			Attributes: map[string]string{
-				"name":  d.Name,
+				"name":  dockerName(*d),
 				"image": d.Annotations["d2k.portainer.io/image-ref"],
 			},
 		},

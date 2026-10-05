@@ -2,6 +2,8 @@ package adapter
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/netip"
@@ -224,7 +226,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		}
 	}
 
-	return string(created.UID), warnings, nil
+	return containerID(created.UID), warnings, nil
 }
 
 // ListContainers implements docker ps.
@@ -524,24 +526,30 @@ func (a *KubernetesDockerAdapter) resolveDeploymentName(ctx context.Context, nam
 	if err != nil && !errors.IsNotFound(err) {
 		return "", fmt.Errorf("unable to look up container %q: %w", nameOrID, err)
 	}
+	if nameOrID == "" {
+		return "", errdefs.NotFound(fmt.Errorf("container name or ID is empty"))
+	}
 	list, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
 	if err != nil {
 		return "", fmt.Errorf("unable to list deployments: %w", err)
 	}
+	// As in Docker: a full ID or an exact name, else a unique ID prefix.
+	var byPrefix []string
 	for _, d := range list.Items {
-		uid := string(d.UID)
-		if uid == nameOrID || dockerName(d) == nameOrID {
+		id := containerID(d.UID)
+		if id == nameOrID || dockerName(d) == nameOrID {
 			return d.Name, nil
 		}
-		// Match the truncated UID format returned by docker ps (e.g. "2665dc61-cb7").
-		// docker ps shows the first 8 chars of the UID, a hyphen, then chars 9-11.
-		// Reconstruct and compare against the full UID with hyphens stripped to be safe,
-		// or do a simple prefix match on the normalised form.
-		normID := strings.ReplaceAll(nameOrID, "-", "")
-		normUID := strings.ReplaceAll(uid, "-", "")
-		if strings.HasPrefix(normUID, normID) && len(normID) >= 8 {
-			return d.Name, nil
+		if strings.HasPrefix(id, nameOrID) {
+			byPrefix = append(byPrefix, d.Name)
 		}
+	}
+	switch len(byPrefix) {
+	case 1:
+		return byPrefix[0], nil
+	case 0:
+	default:
+		return "", errdefs.InvalidParameter(fmt.Errorf("multiple IDs found with provided prefix: %s", nameOrID))
 	}
 	return "", errdefs.NotFound(fmt.Errorf("container %q not found", nameOrID))
 }
@@ -611,7 +619,7 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 	}
 
 	return ContainerSummary{
-		ID:      string(d.UID),
+		ID:      containerID(d.UID),
 		Names:   []string{"/" + dockerName(d)},
 		Image:   d.Annotations[types.AnnotationImageRef],
 		Status:  status,
@@ -686,7 +694,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) container.Inspe
 	}
 
 	return container.InspectResponse{
-		ID:         string(d.UID),
+		ID:         containerID(d.UID),
 		Name:       "/" + dockerName(d),
 		Image:      d.Annotations[types.AnnotationImageRef],
 		Created:    d.CreationTimestamp.Format(time.RFC3339),
@@ -759,6 +767,14 @@ func encodePortMappings(bindings []string, publishAll bool) (string, error) {
 // ResolveContainerName is the public wrapper around resolveDeploymentName.
 func (a *KubernetesDockerAdapter) ResolveContainerName(ctx context.Context, name string) (string, error) {
 	return a.resolveDeploymentName(ctx, name)
+}
+
+// containerID returns the Docker ID of the container a Deployment backs: 64
+// hex characters, as Docker IDs are, derived from the Deployment's UID so it
+// is stable for the container's lifetime and unique.
+func containerID(uid k8stypes.UID) string {
+	sum := sha256.Sum256([]byte(uid))
+	return hex.EncodeToString(sum[:])
 }
 
 // dockerName returns the Docker name of a container, falling back to the
