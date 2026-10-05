@@ -2,31 +2,67 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
+	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
-	"time"
 
 	"github.com/sethvargo/go-envconfig"
 
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/config"
 	"github.com/portainer/d2k/internal/logging"
+	"github.com/portainer/d2k/internal/pki"
 	"github.com/portainer/d2k/internal/router"
+	"github.com/portainer/d2k/internal/server"
 )
 
-// fileExists returns true if the file at path exists and is readable.
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
+const usage = `usage:
+  d2k                              serve the Docker API (configured by D2K_* environment variables)
+  d2k pki init --san NAME[,NAME] [--out DIR]
+                                   create a CA, a server certificate valid for each NAME (DNS name
+                                   or IP address clients use to reach d2k) and a client certificate`
 
 func main() {
-	ctx := context.Background()
+	if len(os.Args) > 1 {
+		if len(os.Args) > 2 && os.Args[1] == "pki" && os.Args[2] == "init" {
+			pkiInit(os.Args[3:])
+			return
+		}
+		log.Fatal(usage)
+	}
+	serve()
+}
+
+func pkiInit(args []string) {
+	fs := flag.NewFlagSet("pki init", flag.ExitOnError)
+	sans := fs.String("san", "", "comma-separated DNS names and IP addresses for the server certificate")
+	out := fs.String("out", "d2k-pki", "output directory")
+	_ = fs.Parse(args)
+	if *sans == "" {
+		log.Fatal(usage)
+	}
+	if err := pki.Init(*out, strings.Split(*sans, ",")); err != nil {
+		log.Fatalf("unable to create certificates: %s", err)
+	}
+	fmt.Printf(`Certificates written to %[1]s.
+
+Load the server certificate into Kubernetes:
+  kubectl -n <namespace> create secret generic d2k-tls --from-file=%[1]s/server
+
+Point Docker clients at the client certificate:
+  export DOCKER_HOST=tcp://<address>:2376 DOCKER_TLS_VERIFY=1 DOCKER_CERT_PATH=%[1]s/client
+
+Keep %[1]s/ca.key private; it can sign certificates d2k trusts.
+`, *out)
+}
+
+func serve() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 
 	var cfg config.Config
 	if err := envconfig.Process(ctx, &cfg); err != nil {
@@ -41,81 +77,30 @@ func main() {
 
 	logger.Infow("starting d2k",
 		"namespace", cfg.Namespace,
-		"port", cfg.Port,
 		"swarm_mode", cfg.SwarmMode,
 	)
 
-	adapterOpts := &adapter.Options{
-		Config: &cfg,
-		Logger: logger,
-	}
-
-	a, err := adapter.NewKubernetesDockerAdapter(adapterOpts)
+	a, err := adapter.NewKubernetesDockerAdapter(&adapter.Options{Config: &cfg, Logger: logger})
 	if err != nil {
 		logger.Fatalw("unable to create Kubernetes adapter", "error", err)
 	}
-
 	logger.Infow("connected to Kubernetes namespace", "namespace", cfg.Namespace)
 
-	a.LogNFSStorageClasses(context.Background())
+	a.LogNFSStorageClasses(ctx)
 
 	handler := router.New(a, cfg.Namespace, cfg.SwarmMode, logger)
-
-	// Detect TLS: if both cert and key files exist, listen on TLSPort with TLS.
-	// The files are typically mounted from a Kubernetes Secret named d2k-tls.
-	useTLS := fileExists(cfg.TLSCertFile) && fileExists(cfg.TLSKeyFile)
-
-	var listenAddr string
-	if useTLS {
-		listenAddr = fmt.Sprintf(":%d", cfg.TLSPort)
-	} else {
-		listenAddr = fmt.Sprintf(":%d", cfg.Port)
+	err = server.Run(ctx, server.Config{
+		Insecure:   cfg.Insecure,
+		Port:       cfg.Port,
+		TLSPort:    cfg.TLSPort,
+		CertFile:   cfg.TLSCertFile,
+		KeyFile:    cfg.TLSKeyFile,
+		CAFile:     cfg.TLSCAFile,
+		SocketPath: cfg.SocketPath,
+		HealthPort: cfg.HealthPort,
+	}, handler, logger)
+	if err != nil {
+		logger.Fatalw("server error", "error", err)
 	}
-
-	srv := &http.Server{
-		Addr:         listenAddr,
-		Handler:      handler,
-		ReadTimeout:  60 * time.Second,
-		WriteTimeout: 0, // 0 = no timeout; needed for streaming log endpoints
-		IdleTimeout:  120 * time.Second,
-	}
-
-	// Graceful shutdown on SIGTERM / SIGINT.
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
-
-	go func() {
-		if useTLS {
-			cert, tlsErr := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-			if tlsErr != nil {
-				logger.Fatalw("unable to load TLS certificate", "error", tlsErr)
-			}
-			srv.TLSConfig = &tls.Config{
-				Certificates: []tls.Certificate{cert},
-				MinVersion:   tls.VersionTLS12,
-			}
-			logger.Infow("d2k listening with TLS", "addr", srv.Addr, "cert", cfg.TLSCertFile)
-			if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				logger.Fatalw("server error", "error", err)
-			}
-		} else {
-			logger.Warnw("TLS not configured — listening without TLS", "addr", srv.Addr,
-				"hint", "mount a Kubernetes Secret named d2k-tls with tls.crt and tls.key to enable TLS")
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				logger.Fatalw("server error", "error", err)
-			}
-		}
-	}()
-
-	<-quit
-	logger.Info("shutting down...")
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Errorw("graceful shutdown failed", "error", err)
-	}
-
 	logger.Info("d2k stopped")
 }

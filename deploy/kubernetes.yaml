@@ -161,42 +161,59 @@ spec:
         app: d2k
     spec:
       serviceAccountName: d2k
+      # Kubernetes would inject D2K_PORT, D2K_SERVICE_HOST, ... for the d2k
+      # Service, which collide with d2k's own D2K_* settings.
+      enableServiceLinks: false
       volumes:
-        # TLS Secret mount — optional. If the d2k-tls Secret does not exist,
-        # the mount is silently skipped and d2k listens on port 2375 without TLS.
-        # To enable TLS:
-        #   kubectl create secret tls d2k-tls --cert=server.crt --key=server.key -n d2k
-        #   kubectl rollout restart deployment/d2k -n d2k
-        # d2k will then listen on port 2376 with TLS automatically.
+        # TLS Secret — required. d2k serves the Docker API over mutual TLS and
+        # does not start without it. Create the certificates and the Secret
+        # before applying this manifest, using every address clients use:
+        #   d2k pki init --san d2k.example.com,10.0.0.10 --out d2k-pki
+        #   kubectl create secret generic d2k-tls --from-file=d2k-pki/server -n d2k
+        # Clients (Docker CLI, Portainer "Docker API" with TLS) use the files in
+        # d2k-pki/client. cert-manager can issue the Secret instead: it must
+        # hold tls.crt, tls.key and ca.crt, and ca.crt must be the CA that
+        # signs client certificates.
         - name: tls
           secret:
             secretName: d2k-tls
-            optional: true
       containers:
         - name: d2k
           image: portainer/d2k:latest   # replace with your image
           imagePullPolicy: Always
           ports:
-            - containerPort: 2375
+            - name: docker-api
+              containerPort: 2376
+            - name: health
+              containerPort: 8081
           env:
             - name: D2K_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: D2K_PORT
-              value: "2375"
             - name: D2K_SWARM_MODE
               value: "true"   # set to "false" to run in Docker host mode instead
             - name: D2K_LOG_LEVEL
               value: "info"
             # D2K_KUBECONFIG is intentionally not set — in-cluster auth is used.
-            # D2K_TLS_CERT_FILE and D2K_TLS_KEY_FILE are not set here — they
-            # default to /etc/d2k/tls/tls.crt and /etc/d2k/tls/tls.key which
-            # are populated by the d2k-tls volume mount below if the Secret exists.
+            # D2K_TLS_CERT_FILE, D2K_TLS_KEY_FILE and D2K_TLS_CA_FILE default to
+            # tls.crt, tls.key and ca.crt in /etc/d2k/tls, the d2k-tls mount.
+            # D2K_INSECURE=true serves the API without TLS on port 2375 instead.
+            # Anyone who can reach it controls the namespace: never expose it.
           volumeMounts:
             - name: tls
               mountPath: /etc/d2k/tls
               readOnly: true
+          # The Docker API requires a client certificate, so probes use the
+          # plain health port, which serves /healthz only.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
           resources:
             requests:
               cpu: "50m"
@@ -209,8 +226,8 @@ spec:
 # OPTION A — LoadBalancer Service
 # Use this when your cluster has a cloud load balancer controller or a bare-metal
 # equivalent (e.g. MetalLB). The controller assigns an external IP automatically.
-# Connect Portainer to: tcp://<EXTERNAL-IP>:2375 (no TLS) or tcp://<EXTERNAL-IP>:2376 (TLS)
-# Update the port value below to 2376 if TLS is configured.
+# Connect Portainer to: tcp://<EXTERNAL-IP>:2376 with TLS, using the client
+# certificate from `d2k pki init`. The address must be one of its --san names.
 # Delete this section if you are using the NodePort option below.
 apiVersion: v1
 kind: Service
@@ -224,8 +241,8 @@ spec:
     app: d2k
   ports:
     - name: docker-api
-      port: 2375
-      targetPort: 2375
+      port: 2376
+      targetPort: 2376
   type: LoadBalancer
 
 ---
@@ -233,7 +250,7 @@ spec:
 # Use this when your cluster does not have a load balancer controller (e.g. bare
 # metal, on-prem, or single-node clusters). The Docker API is reachable on every
 # node at the assigned NodePort (30000-32767 range, assigned by Kubernetes).
-# Connect Portainer to: tcp://<ANY-NODE-IP>:<NODE-PORT>:2375
+# Connect Portainer to: tcp://<ANY-NODE-IP>:<NODE-PORT> with TLS (see Option A).
 # You can pin the NodePort to a specific value by uncommenting nodePort below.
 # Delete this section if you are using the LoadBalancer option above.
 #
@@ -249,7 +266,7 @@ spec:
 #     app: d2k
 #   ports:
 #     - name: docker-api
-#       port: 2375
-#       targetPort: 2375
-#       # nodePort: 32375   # uncomment to pin to a specific port
+#       port: 2376
+#       targetPort: 2376
+#       # nodePort: 32376   # uncomment to pin to a specific port
 #   type: NodePort

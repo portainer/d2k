@@ -1,6 +1,6 @@
 # d2k — Docker-to-Kubernetes Translator
 
-d2k lets Docker tooling manage a single Kubernetes namespace. It exposes the Docker Engine API on port 2375/2376 and translates every Docker call into Kubernetes operations scoped to one namespace. Portainer, the Docker CLI, or any Docker SDK client connects to d2k and gets a Kubernetes-backed execution environment without needing to know about Kubernetes.
+d2k lets Docker tooling manage a single Kubernetes namespace. It exposes the Docker Engine API over mutual TLS on port 2376 and translates every Docker call into Kubernetes operations scoped to one namespace. Portainer, the Docker CLI, or any Docker SDK client connects to d2k and gets a Kubernetes-backed execution environment without needing to know about Kubernetes.
 
 Enable `D2K_SWARM_MODE=true` and the same endpoint emulates a Docker Swarm cluster instead, translating Swarm API calls (services, stacks, tasks, secrets, configs) into Kubernetes Deployments and resources.
 
@@ -237,9 +237,16 @@ If your StorageClass has `reclaimPolicy: Delete`, the underlying NFS subdirector
 
 d2k runs inside the target cluster namespace using a ServiceAccount bound to a namespace-scoped Role for workload management and a ClusterRole for node and StorageClass read access.
 
+d2k serves the Docker API over mutual TLS and does not start without its certificates. Create them first, listing every DNS name and IP address clients use to reach d2k:
+
 ```bash
+d2k pki init --san d2k.d2k.svc.cluster.local,d2k.example.com --out d2k-pki
+kubectl create namespace d2k
+kubectl -n d2k create secret generic d2k-tls --from-file=d2k-pki/server
 kubectl apply -f deploy/kubernetes.yaml
 ```
+
+`d2k-pki/client` holds the client certificate (`ca.pem`, `cert.pem`, `key.pem`) for the Docker CLI and for Portainer's "Docker API" environment with TLS. Keep `d2k-pki/ca.key` private. cert-manager can issue the `d2k-tls` Secret instead, as long as it holds `tls.crt`, `tls.key` and the client CA as `ca.crt`. d2k reloads the Secret when it changes, without a restart.
 
 For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included.
 
@@ -248,7 +255,7 @@ Connect Portainer or the Docker CLI to the d2k Service:
 ```bash
 # Docker CLI
 docker context create d2k \
-  --docker "host=tcp://d2k.d2k.svc.cluster.local:2375"
+  --docker "host=tcp://d2k.d2k.svc.cluster.local:2376,ca=d2k-pki/client/ca.pem,cert=d2k-pki/client/cert.pem,key=d2k-pki/client/key.pem"
 
 docker --context d2k ps
 docker --context d2k service ls
@@ -261,7 +268,14 @@ docker --context d2k service ls
 | Variable | Default | Description |
 |---|---|---|
 | `D2K_NAMESPACE` | `default` | Target Kubernetes namespace |
-| `D2K_PORT` | `2375` | Docker API listen port |
+| `D2K_TLS_PORT` | `2376` | Docker API port (mutual TLS) |
+| `D2K_TLS_CERT_FILE` | `/etc/d2k/tls/tls.crt` | Server certificate |
+| `D2K_TLS_KEY_FILE` | `/etc/d2k/tls/tls.key` | Server key |
+| `D2K_TLS_CA_FILE` | `/etc/d2k/tls/ca.crt` | CA that client certificates must be signed by |
+| `D2K_HEALTH_PORT` | `8081` | Plain HTTP port serving `GET /healthz` only |
+| `D2K_SOCKET` | _(empty)_ | Also serve the Docker API on this unix socket (no TLS; file mode 0660) |
+| `D2K_INSECURE` | `false` | Serve without TLS or authentication on `D2K_PORT`. Anyone who can reach it controls the namespace |
+| `D2K_PORT` | `2375` | Plain Docker API port, used only with `D2K_INSECURE` |
 | `D2K_SWARM_MODE` | `false` | Enable Swarm API emulation |
 | `D2K_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
 | `D2K_LOG_FORMAT` | `text` | Log format: text, json |
@@ -273,7 +287,7 @@ docker --context d2k service ls
 
 ```
 Docker client
-     |  Docker Engine API (port 2375)
+     |  Docker Engine API (mutual TLS, port 2376)
      v
 +------------------------------------------+
 |  d2k                                     |

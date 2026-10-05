@@ -4,12 +4,17 @@
 #   standalone  namespace d2k        NodePort 31112
 #   swarm       namespace d2k-swarm  NodePort 31111
 # The kind cluster must map both ports to the host (see test/e2e/README.md).
+# Both instances serve mutual TLS with certificates from `d2k pki init`, kept
+# in test/e2e/.pki; run.sh uses the client certificate from there.
 set -euo pipefail
 
 CLUSTER=${CLUSTER:-d2k}
 CONTEXT=kind-$CLUSTER
 IMAGE=${IMAGE:-d2k:dev}
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+PKI=$ROOT/test/e2e/.pki
+
+[ -d "$PKI" ] || (cd "$ROOT" && go run ./cmd pki init --san localhost,127.0.0.1 --out "$PKI" >/dev/null)
 
 docker build -t "$IMAGE" --build-arg VERSION=dev "$ROOT"
 kind load docker-image "$IMAGE" --name "$CLUSTER"
@@ -22,12 +27,15 @@ render() {
       -e "s#image: portainer/d2k:latest#image: $IMAGE#" \
       -e "s/imagePullPolicy: Always/imagePullPolicy: IfNotPresent/" \
       -e "s/value: \"true\"   # set to \"false\"/value: \"$2\"   # set to \"false\"/" \
-      -e "s/^      targetPort: 2375$/      targetPort: 2375\n      nodePort: $3/" \
+      -e "s/^      targetPort: 2376$/      targetPort: 2376\n      nodePort: $3/" \
       -e "s/^  type: LoadBalancer$/  type: NodePort/" \
       "$ROOT/deploy/kubernetes.yaml"
 }
 
 deploy() {
+  kubectl --context "$CONTEXT" create namespace "$1" --dry-run=client -o yaml | kubectl --context "$CONTEXT" apply -f -
+  kubectl --context "$CONTEXT" -n "$1" create secret generic d2k-tls --from-file="$PKI/server" --dry-run=client -o yaml |
+    kubectl --context "$CONTEXT" apply -f -
   render "$1" "$2" "$3" | kubectl --context "$CONTEXT" apply -f -
   # Pick up a rebuilt image under the same tag.
   kubectl --context "$CONTEXT" -n "$1" rollout restart deployment/d2k

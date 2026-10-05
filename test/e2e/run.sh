@@ -14,6 +14,12 @@ SWARM=tcp://localhost:31111
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 
+# d2k serves mutual TLS: the Docker CLI, Compose and curl use the client
+# certificate created by setup.sh.
+PKI=$(cd "$(dirname "$0")" && pwd)/.pki/client
+export DOCKER_TLS_VERIFY=1 DOCKER_CERT_PATH=$PKI CURL_HOME=$WORKDIR
+printf 'cacert = "%s/ca.pem"\ncert = "%s/cert.pem"\nkey = "%s/key.pem"\n' "$PKI" "$PKI" "$PKI" >"$WORKDIR/.curlrc"
+
 pass=0 fail=0 xfail=0 xpass=0
 failed=()
 
@@ -69,6 +75,11 @@ standalone_cases() {
   echo "== standalone ($STANDALONE)"
 
   check "version negotiates" docker version
+  # Mutual TLS is required.
+  check "plaintext is refused" bash -c '! curl -sf -m 5 http://localhost:31112/_ping'
+  check "TLS without a client certificate is refused" bash -c "! curl -q -sf -m 5 --cacert $PKI/ca.pem https://localhost:31112/_ping"
+  check "TLS with a client certificate is accepted" bash -c '[ "$(curl -s https://localhost:31112/_ping)" = OK ]'
+
   check "run starts a container" bash -c '
     docker run -d --name e2e-web nginx:alpine >/dev/null &&
     for _ in $(seq 60); do [ "$(docker inspect -f {{.State.Status}} e2e-web)" = running ] && exit 0; sleep 2; done; exit 1'
@@ -100,14 +111,14 @@ standalone_cases() {
 
   # Volumes, including unversioned paths (Portainer UI).
   check "volume create and label filter" bash -c 'docker volume create --label e2e=1 e2e-vol >/dev/null && [ "$(docker volume ls -q --filter label=e2e=1)" = e2e-vol ]'
-  check "unversioned /volumes/create routes" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json -d "{\"Name\":\"e2e-vol-raw\"}" localhost:31112/volumes/create)" = 201 ]'
-  check "unversioned /volumes/{name} routes" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} localhost:31112/volumes/e2e-vol-raw)" = 200 ]'
+  check "unversioned /volumes/create routes" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json -d "{\"Name\":\"e2e-vol-raw\"}" https://localhost:31112/volumes/create)" = 201 ]'
+  check "unversioned /volumes/{name} routes" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/volumes/e2e-vol-raw)" = 200 ]'
   check "volume rm" bash -c 'docker volume rm e2e-vol e2e-vol-raw >/dev/null'
 
   # Docker Engine API operations d2k does not implement answer 501.
-  check "unsupported operation returns 501" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} localhost:31112/v1.41/system/df)" = 501 ]'
+  check "unsupported operation returns 501" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/v1.41/system/df)" = 501 ]'
   check "docker reports an unsupported operation" bash -c 'docker system df 2>&1 | grep -q "not supported by d2k"'
-  check "non-Docker path returns 404" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} localhost:31112/v1.41/not/docker)" = 404 ]'
+  check "non-Docker path returns 404" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/v1.41/not/docker)" = 404 ]'
 
   check "rm deletes the Deployment" bash -c "docker rm -f e2e-web >/dev/null && ! kubectl --context $CONTEXT -n d2k get deploy e2e-web >/dev/null 2>&1"
 }
@@ -255,7 +266,7 @@ YAML
   k -n d2k-swarm create secret generic e2e-unmanaged --from-literal=k=v >/dev/null
   check "service cannot mount an unmanaged secret" bash -c "[ \"\$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json \
     -d '{\"Name\":\"e2e-leak\",\"TaskTemplate\":{\"ContainerSpec\":{\"Image\":\"busybox\",\"Secrets\":[{\"SecretName\":\"e2e-unmanaged\",\"File\":{\"Name\":\"k\"}}]}}}' \
-    localhost:31111/services/create)\" = 400 ]"
+    https://localhost:31111/services/create)\" = 400 ]"
   k -n d2k-swarm delete secret e2e-unmanaged >/dev/null
 
   check "config create and label filter" bash -c "printf 'x' | docker config create --label e2e=1 e2e_conf - >/dev/null && [ \"\$(docker config ls --filter label=e2e=1 --format {{.Name}})\" = e2e_conf ]"
