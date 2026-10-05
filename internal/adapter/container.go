@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -125,7 +126,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, fmt.Errorf("unable to resolve port mappings: %w", err)
 	}
 
-	volumes, volumeMounts, volumeWarnings, err := a.namedVolumeMounts(ctx, opts.Binds)
+	volumes, volumeMounts, volumeNames, volumeWarnings, err := a.namedVolumeMounts(ctx, opts.Binds)
 	if err != nil {
 		return "", nil, err
 	}
@@ -143,6 +144,13 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 			return "", nil, fmt.Errorf("unable to encode labels: %w", err)
 		}
 		deployment.Annotations[types.AnnotationDockerLabels] = string(dockerLabels)
+	}
+	if len(volumeNames) > 0 {
+		raw, err := json.Marshal(volumeNames)
+		if err != nil {
+			return "", nil, fmt.Errorf("unable to encode volume names: %w", err)
+		}
+		deployment.Annotations[types.AnnotationVolumeNames] = string(raw)
 	}
 	deployment.Spec.Template.Spec.Volumes = volumes
 	deployment.Spec.Template.Spec.Containers[0].VolumeMounts = volumeMounts
@@ -850,23 +858,35 @@ func containerID(uid k8stypes.UID) string {
 // dockerName returns the Docker name of a container, falling back to the
 // Deployment name for containers created before the name was recorded.
 func dockerName(d appsv1.Deployment) string {
-	if name := d.Annotations[types.AnnotationDockerName]; name != "" {
+	return recordedName(d.ObjectMeta)
+}
+
+// recordedName returns the Docker name recorded on an object, falling back to
+// the object's name.
+func recordedName(m metav1.ObjectMeta) string {
+	if name := m.Annotations[types.AnnotationDockerName]; name != "" {
 		return name
 	}
-	return d.Name
+	return m.Name
 }
 
 // dockerLabels returns the Docker labels exactly as the container was created
 // with, falling back to the Deployment labels for older containers.
 func dockerLabels(d appsv1.Deployment) map[string]string {
+	return recordedLabels(d.ObjectMeta)
+}
+
+// recordedLabels returns the Docker labels recorded on an object, falling
+// back to its Kubernetes labels for objects created before they were recorded.
+func recordedLabels(m metav1.ObjectMeta) map[string]string {
 	var labels map[string]string
-	if raw := d.Annotations[types.AnnotationDockerLabels]; raw != "" && json.Unmarshal([]byte(raw), &labels) == nil {
+	if raw := m.Annotations[types.AnnotationDockerLabels]; raw != "" && json.Unmarshal([]byte(raw), &labels) == nil {
 		return labels
 	}
-	if _, recorded := d.Annotations[types.AnnotationDockerName]; recorded {
+	if _, recorded := m.Annotations[types.AnnotationDockerName]; recorded {
 		return map[string]string{}
 	}
-	return d.Labels
+	return m.Labels
 }
 
 // dockerNameInUse reports whether a managed container already has the Docker name.
@@ -897,17 +917,18 @@ func publishedServiceName(name string) string {
 	return strings.TrimRight(truncate(serviceName(name), 60), "-") + "-lb"
 }
 
-// namedVolumeMounts translates Docker binds into PVC mounts. Missing named
-// volumes are created, as Docker does on run. Host path binds are not
-// supported and produce a warning.
-func (a *KubernetesDockerAdapter) namedVolumeMounts(ctx context.Context, binds []string) ([]corev1.Volume, []corev1.VolumeMount, []string, error) {
+// namedVolumeMounts translates Docker binds into PVC mounts, and returns the
+// Docker volume name of each PVC. Missing named volumes are created, as Docker
+// does on run. Host path binds are not supported and produce a warning.
+func (a *KubernetesDockerAdapter) namedVolumeMounts(ctx context.Context, binds []string) ([]corev1.Volume, []corev1.VolumeMount, map[string]string, []string, error) {
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
+	names := map[string]string{}
 	var warnings []string
 	for _, bind := range binds {
 		parts := strings.Split(bind, ":")
 		if len(parts) < 2 {
-			return nil, nil, nil, errdefs.InvalidParameter(fmt.Errorf("invalid volume specification: %q", bind))
+			return nil, nil, nil, nil, errdefs.InvalidParameter(fmt.Errorf("invalid volume specification: %q", bind))
 		}
 		source, target := parts[0], parts[1]
 		if strings.HasPrefix(source, "/") || strings.HasPrefix(source, ".") {
@@ -915,18 +936,12 @@ func (a *KubernetesDockerAdapter) namedVolumeMounts(ctx context.Context, binds [
 			continue
 		}
 
-		claim := sanitiseResourceName(source)
-		pvc, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, claim, metav1GetOptions())
-		switch {
-		case errors.IsNotFound(err):
-			if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: source}); err != nil {
-				return nil, nil, nil, fmt.Errorf("unable to create volume %q: %w", source, err)
-			}
-		case err != nil:
-			return nil, nil, nil, fmt.Errorf("unable to get volume %q: %w", source, err)
-		case pvc.Labels[types.LabelManagedBy] != types.LabelManagedByValue:
-			return nil, nil, nil, errdefs.Conflict(fmt.Errorf("volume name %q is used by a PersistentVolumeClaim not managed by d2k", source))
+		// Creating a volume that exists returns it, as in Docker.
+		if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: source}); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("unable to create volume %q: %w", source, err)
 		}
+		claim := sanitiseResourceName(source)
+		names[claim] = source
 
 		name := fmt.Sprintf("volume-%d", len(volumes))
 		volumes = append(volumes, corev1.Volume{
@@ -941,7 +956,7 @@ func (a *KubernetesDockerAdapter) namedVolumeMounts(ctx context.Context, binds [
 			ReadOnly:  len(parts) > 2 && slices.Contains(strings.Split(parts[2], ","), "ro"),
 		})
 	}
-	return volumes, mounts, warnings, nil
+	return volumes, mounts, names, warnings, nil
 }
 
 // ignoredAliases warns about network aliases d2k cannot honour: a container
@@ -1055,10 +1070,14 @@ func containerNetworks(d appsv1.Deployment) []string {
 
 // containerMounts returns the container's named-volume mounts.
 func containerMounts(d appsv1.Deployment) []container.MountPoint {
+	var names map[string]string
+	if raw := d.Annotations[types.AnnotationVolumeNames]; raw != "" {
+		_ = json.Unmarshal([]byte(raw), &names)
+	}
 	claims := map[string]string{}
 	for _, v := range d.Spec.Template.Spec.Volumes {
 		if v.PersistentVolumeClaim != nil {
-			claims[v.Name] = v.PersistentVolumeClaim.ClaimName
+			claims[v.Name] = cmp.Or(names[v.PersistentVolumeClaim.ClaimName], v.PersistentVolumeClaim.ClaimName)
 		}
 	}
 	mounts := []container.MountPoint{}

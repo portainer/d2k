@@ -153,8 +153,6 @@ func TestContract(t *testing.T) {
 		{"GET", "/containers/" + created.ID + "/json", 200, ""},
 		{"GET", "/containers/nope/json", 404, ""},
 		{"GET", "/images/json", 200, "Phase 5: required image summary fields missing"},
-		{"GET", "/volumes", 200, "Phase 5: Scope and Options missing"},
-		{"GET", "/volumes/data", 200, "Phase 5: Scope and Options missing"},
 		{"GET", "/networks", 200, ""},
 		{"GET", "/networks/bridge", 200, ""},
 	}

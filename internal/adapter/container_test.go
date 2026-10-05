@@ -237,6 +237,14 @@ func TestCreateContainerNamedVolumes(t *testing.T) {
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "/srv/html") {
 		t.Fatalf("warnings = %q, want one about the host path bind", warnings)
 	}
+	// Mounts name the Docker volume, which compose compares with its own.
+	names := map[string]string{}
+	for _, m := range containerMounts(*d) {
+		names[m.Destination] = m.Name
+	}
+	if !maps.Equal(names, map[string]string{"/data": "demo_data", "/var/log": "logs"}) {
+		t.Fatalf("mount names = %v, want /data→demo_data, /var/log→logs", names)
+	}
 }
 
 func TestComposeServiceNamesAreScopedToTheirProject(t *testing.T) {

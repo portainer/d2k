@@ -176,7 +176,7 @@ Kubernetes namespace networking is flat. All Pods in the namespace can reach eac
 
 ## Volumes
 
-`docker volume create` creates a PersistentVolumeClaim using the cluster's default StorageClass with `ReadWriteOnce` access mode. Size defaults to `1Gi` and can be overridden with `--opt size=5Gi`. Volume names containing underscores are sanitised to hyphens to comply with Kubernetes naming rules.
+`docker volume create` creates a PersistentVolumeClaim using the cluster's default StorageClass with `ReadWriteOnce` access mode. Size defaults to `1Gi` and can be overridden with `--opt size=5Gi`. The PVC name is the volume name with underscores replaced by hyphens, as Kubernetes requires; Docker clients keep seeing the original name, labels and options, which d2k records on the PVC. Two volume names that map to the same PVC name (`app_data` and `app-data`) cannot both exist. Creating a volume that already exists returns it, as in Docker.
 
 ### NFS volumes
 

@@ -185,7 +185,12 @@ standalone_cases() {
   check "volume create and label filter" bash -c 'docker volume create --label e2e=1 e2e-vol >/dev/null && [ "$(docker volume ls -q --filter label=e2e=1)" = e2e-vol ]'
   check "unversioned /volumes/create routes" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json -d "{\"Name\":\"e2e-vol-raw\"}" https://localhost:31112/volumes/create)" = 201 ]'
   check "unversioned /volumes/{name} routes" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/volumes/e2e-vol-raw)" = 200 ]'
-  check "volume rm" bash -c 'docker volume rm e2e-vol e2e-vol-raw >/dev/null'
+  check "volume keeps its name, labels and options" bash -c '
+    long=$(printf "x%.0s" $(seq 80)) &&
+    docker volume create --label "long=$long" --opt size=2Gi e2e_vol_u >/dev/null &&
+    [ "$(docker volume inspect -f "{{.Name}} {{.Scope}} {{index .Labels \"long\"}} {{.Options.size}}" e2e_vol_u)" = "e2e_vol_u local $long 2Gi" ]'
+  check "creating an existing volume returns it" bash -c '[ "$(docker volume create e2e_vol_u)" = e2e_vol_u ]'
+  check "volume rm" bash -c 'docker volume rm e2e-vol e2e-vol-raw e2e_vol_u >/dev/null'
 
   # Docker Engine API operations d2k does not implement answer 501.
   check "unsupported operation returns 501" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/v1.52/system/df)" = 501 ]'
@@ -236,6 +241,7 @@ YAML
   check "services resolve each other by service name" in_service web getent hosts cache
   check "service names stay within their project" names_stay_in_project
   check "published port gets a Service" published_port_exists 18080
+  check "compose volume keeps its project name" bash -c '[ "$(docker volume ls -q --filter label=com.docker.compose.project=e2ec)" = e2ec_data ]'
   check "named volume is mounted" in_service web sh -c 'echo kept > /data/marker'
   check "compose logs" logs_show_ready
 

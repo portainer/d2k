@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/moby/moby/api/types/volume"
 	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
@@ -46,19 +47,15 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	vols = filterVolumes(vols, args)
 
-	// Docker wraps the list in a Volumes key.
-	httputils.WriteJSON(w, http.StatusOK, map[string]any{
-		"Volumes":  vols,
-		"Warnings": []string{},
-	})
+	httputils.WriteJSON(w, http.StatusOK, volume.ListResponse{Volumes: vols, Warnings: []string{}})
 }
 
 // volumeFilters are the `filters` keys d2k supports on GET /volumes.
 var volumeFilters = map[string]bool{"name": true, "label": true, "driver": true}
 
 // filterVolumes applies list filters with the Docker daemon's matching rules.
-func filterVolumes(vols []adapter.VolumeSummary, args filters.Args) []adapter.VolumeSummary {
-	result := []adapter.VolumeSummary{}
+func filterVolumes(vols []volume.Volume, args filters.Args) []volume.Volume {
+	result := []volume.Volume{}
 	for _, v := range vols {
 		if args.Match("name", v.Name) && args.ExactMatch("driver", v.Driver) && args.MatchKVList("label", v.Labels) {
 			result = append(result, v)
@@ -67,17 +64,9 @@ func filterVolumes(vols []adapter.VolumeSummary, args filters.Args) []adapter.Vo
 	return result
 }
 
-// createBody mirrors the Docker volume create request body.
-type createBody struct {
-	Name       string            `json:"Name"`
-	Driver     string            `json:"Driver"`
-	Labels     map[string]string `json:"Labels"`
-	DriverOpts map[string]string `json:"DriverOpts"`
-}
-
 // Create handles POST /volumes/create.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	var body createBody
+	var body volume.CreateRequest
 	if err := httputils.ParseJSON(r, &body); err != nil {
 		httputils.WriteError(w, http.StatusBadRequest, err.Error())
 		return

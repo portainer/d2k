@@ -39,6 +39,13 @@ const (
 	// labels such as com.docker.compose.config-hash cannot round-trip as labels.
 	AnnotationDockerLabels = LabelPrefix + "/docker-labels"
 
+	// AnnotationDriverOpts stores a volume's Docker driver options as JSON.
+	AnnotationDriverOpts = LabelPrefix + "/driver-opts"
+
+	// AnnotationVolumeNames maps the PVCs a container mounts to their Docker
+	// volume names, as JSON.
+	AnnotationVolumeNames = LabelPrefix + "/volume-names"
+
 	// AnnotationStartedAt and AnnotationStoppedAt record when the container was
 	// last started and stopped (RFC 3339). A container never started is in
 	// Docker's "created" state; a stopped one is "exited".

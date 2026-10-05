@@ -4,12 +4,13 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/portainer/d2k/internal/adapter"
+	"github.com/moby/moby/api/types/volume"
+
 	"github.com/portainer/d2k/internal/filters"
 )
 
 func TestFilterVolumes(t *testing.T) {
-	vols := []adapter.VolumeSummary{
+	vols := []volume.Volume{
 		{Name: "proj-data", Driver: "d2k", Labels: map[string]string{"com.docker.compose.project": "proj"}},
 		{Name: "other-data", Driver: "d2k", Labels: map[string]string{"com.docker.compose.project": "other"}},
 	}

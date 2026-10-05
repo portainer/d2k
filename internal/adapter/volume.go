@@ -2,9 +2,12 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/moby/moby/api/types/volume"
 	"github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -16,15 +19,6 @@ import (
 )
 
 const nfsCsiProvisioner = "nfs.csi.k8s.io"
-
-// VolumeSummary is a Docker-compatible volume entry for docker volume ls.
-type VolumeSummary struct {
-	Name       string
-	Driver     string
-	Mountpoint string
-	Labels     map[string]string
-	CreatedAt  string
-}
 
 // CreateVolumeOptions mirrors docker volume create flags.
 type CreateVolumeOptions struct {
@@ -39,14 +33,13 @@ type CreateVolumeOptions struct {
 // For NFS volumes (driver_opts type=nfs), it finds a matching nfs.csi.k8s.io
 // StorageClass by comparing parameters.server against the addr= in driver_opts.o.
 // If no matching StorageClass is found, it returns an error that blocks the deploy.
-func (a *KubernetesDockerAdapter) CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*VolumeSummary, error) {
+func (a *KubernetesDockerAdapter) CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*volume.Volume, error) {
 	if opts.Name == "" {
 		return nil, errdefs.InvalidParameter(fmt.Errorf("volume name is required"))
 	}
 
-	opts.Name = sanitiseResourceName(opts.Name)
-	if opts.Name == "" {
-		return nil, errdefs.InvalidParameter(fmt.Errorf("volume name is invalid after sanitisation"))
+	if sanitiseResourceName(opts.Name) == "" {
+		return nil, errdefs.InvalidParameter(fmt.Errorf("invalid volume name %q", opts.Name))
 	}
 
 	if opts.DriverOpts["type"] == "nfs" {
@@ -59,7 +52,7 @@ func (a *KubernetesDockerAdapter) CreateVolume(ctx context.Context, opts CreateV
 
 // createNFSVolume finds a nfs.csi.k8s.io StorageClass whose parameters.server
 // matches the addr= in driver_opts.o, then creates a ReadWriteMany PVC using it.
-func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts CreateVolumeOptions) (*VolumeSummary, error) {
+func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts CreateVolumeOptions) (*volume.Volume, error) {
 	// Parse addr= from the o= option string (comma-separated, e.g. "addr=192.168.18.118,nolock,soft,rw").
 	nfsServer := ""
 	for _, part := range strings.Split(opts.DriverOpts["o"], ",") {
@@ -106,22 +99,14 @@ func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts Crea
 		return nil, errdefs.InvalidParameter(fmt.Errorf("invalid size %q: %w", size, err))
 	}
 
-	labels := managedLabels(opts.Name)
-	for k, v := range opts.Labels {
-		if len(v) <= 63 {
-			labels[k] = v
-		}
+	meta, err := a.volumeMeta(opts)
+	if err != nil {
+		return nil, err
 	}
+	meta.Annotations["d2k.portainer.io/nfs-server"] = nfsServer
 
 	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      opts.Name,
-			Namespace: a.namespace,
-			Labels:    labels,
-			Annotations: map[string]string{
-				"d2k.portainer.io/nfs-server": nfsServer,
-			},
-		},
+		ObjectMeta: meta,
 		Spec: corev1.PersistentVolumeClaimSpec{
 			// NFS supports ReadWriteMany — multiple pods can mount simultaneously.
 			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
@@ -132,24 +117,11 @@ func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts Crea
 		},
 	}
 
-	created, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, pvc, metav1.CreateOptions{})
-	if err != nil {
-		if errors.IsAlreadyExists(err) {
-			// Idempotent for stack redeploy.
-			existing, getErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, opts.Name, metav1.GetOptions{})
-			if getErr != nil {
-				return nil, errdefs.Conflict(fmt.Errorf("NFS volume %q already exists", opts.Name))
-			}
-			return pvcToVolumeSummary(*existing), nil
-		}
-		return nil, fmt.Errorf("unable to create PVC for NFS volume %q: %w", opts.Name, err)
-	}
-
-	return pvcToVolumeSummary(*created), nil
+	return a.createPVC(ctx, opts.Name, pvc)
 }
 
 // createPVCVolume creates a standard PVC against the cluster default StorageClass.
-func (a *KubernetesDockerAdapter) createPVCVolume(ctx context.Context, opts CreateVolumeOptions) (*VolumeSummary, error) {
+func (a *KubernetesDockerAdapter) createPVCVolume(ctx context.Context, opts CreateVolumeOptions) (*volume.Volume, error) {
 	size := opts.SizeLimit
 	if size == "" {
 		size = "1Gi"
@@ -160,19 +132,13 @@ func (a *KubernetesDockerAdapter) createPVCVolume(ctx context.Context, opts Crea
 		return nil, errdefs.InvalidParameter(fmt.Errorf("invalid size %q: %w", size, err))
 	}
 
-	labels := managedLabels(opts.Name)
-	for k, v := range opts.Labels {
-		if len(v) <= 63 {
-			labels[k] = v
-		}
+	meta, err := a.volumeMeta(opts)
+	if err != nil {
+		return nil, err
 	}
 
 	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      opts.Name,
-			Namespace: a.namespace,
-			Labels:    labels,
-		},
+		ObjectMeta: meta,
 		Spec: corev1.PersistentVolumeClaimSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			Resources: corev1.VolumeResourceRequirements{
@@ -181,74 +147,114 @@ func (a *KubernetesDockerAdapter) createPVCVolume(ctx context.Context, opts Crea
 		},
 	}
 
-	created, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, pvc, metav1.CreateOptions{})
-	if err != nil {
-		if errors.IsAlreadyExists(err) {
-			return nil, errdefs.Conflict(fmt.Errorf("volume %q already exists", opts.Name))
-		}
-		return nil, fmt.Errorf("unable to create PVC %q: %w", opts.Name, err)
-	}
+	return a.createPVC(ctx, opts.Name, pvc)
+}
 
-	return pvcToVolumeSummary(*created), nil
+// volumeMeta returns the metadata of the PVC for a new volume. The Docker
+// name, labels and driver options are recorded verbatim in annotations, as
+// Kubernetes names and label values cannot hold all of them.
+func (a *KubernetesDockerAdapter) volumeMeta(opts CreateVolumeOptions) (metav1.ObjectMeta, error) {
+	name := sanitiseResourceName(opts.Name)
+	labels := managedLabels(name)
+	for k, v := range opts.Labels {
+		if clean, ok := sanitiseLabelValue(v); ok {
+			labels[k] = clean
+		}
+	}
+	annotations := map[string]string{types.AnnotationDockerName: opts.Name}
+	for key, value := range map[string]map[string]string{types.AnnotationDockerLabels: opts.Labels, types.AnnotationDriverOpts: opts.DriverOpts} {
+		if len(value) == 0 {
+			continue
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return metav1.ObjectMeta{}, err
+		}
+		annotations[key] = string(raw)
+	}
+	return metav1.ObjectMeta{Name: name, Namespace: a.namespace, Labels: labels, Annotations: annotations}, nil
+}
+
+// createPVC creates the PVC for volume name. Creating a volume that exists
+// returns it, as in Docker.
+func (a *KubernetesDockerAdapter) createPVC(ctx context.Context, name string, pvc *corev1.PersistentVolumeClaim) (*volume.Volume, error) {
+	created, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	if errors.IsAlreadyExists(err) {
+		existing, err := a.InspectVolume(ctx, name)
+		if errdefs.IsNotFound(err) {
+			return nil, errdefs.Conflict(fmt.Errorf("volume name %q is used by a PersistentVolumeClaim not managed by d2k", name))
+		}
+		return existing, err
+	}
+	if err != nil {
+		return nil, fmt.Errorf("unable to create PVC %q: %w", pvc.Name, err)
+	}
+	return pvcToVolume(*created), nil
 }
 
 // ListVolumes implements docker volume ls.
-func (a *KubernetesDockerAdapter) ListVolumes(ctx context.Context) ([]VolumeSummary, error) {
+func (a *KubernetesDockerAdapter) ListVolumes(ctx context.Context) ([]volume.Volume, error) {
 	pvcs, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).List(ctx, metav1ListOptions())
 	if err != nil {
 		return nil, fmt.Errorf("unable to list PVCs: %w", err)
 	}
 
-	summaries := make([]VolumeSummary, 0, len(pvcs.Items))
+	vols := make([]volume.Volume, 0, len(pvcs.Items))
 	for _, pvc := range pvcs.Items {
-		summaries = append(summaries, *pvcToVolumeSummary(pvc))
+		vols = append(vols, *pvcToVolume(pvc))
 	}
 
-	return summaries, nil
+	return vols, nil
 }
 
 // InspectVolume implements docker volume inspect.
-func (a *KubernetesDockerAdapter) InspectVolume(ctx context.Context, name string) (*VolumeSummary, error) {
-	name = sanitiseResourceName(name)
-
-	pvc, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, name, metav1.GetOptions{})
+func (a *KubernetesDockerAdapter) InspectVolume(ctx context.Context, name string) (*volume.Volume, error) {
+	notFound := errdefs.NotFound(fmt.Errorf("no such volume: %s", name))
+	pvc, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, sanitiseResourceName(name), metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return nil, notFound
+	}
 	if err != nil {
-		if errors.IsNotFound(err) {
-			return nil, errdefs.NotFound(fmt.Errorf("volume %q not found", name))
-		}
-		return nil, fmt.Errorf("unable to get PVC %q: %w", name, err)
+		return nil, fmt.Errorf("unable to get PVC for volume %q: %w", name, err)
 	}
 
-	if pvc.Labels[types.LabelManagedBy] != types.LabelManagedByValue {
-		return nil, errdefs.NotFound(fmt.Errorf("volume %q not found", name))
+	// Volumes whose Docker names map to the same PVC name are different
+	// volumes; volumes created before the name was recorded match any of them.
+	_, recorded := pvc.Annotations[types.AnnotationDockerName]
+	if pvc.Labels[types.LabelManagedBy] != types.LabelManagedByValue || (recorded && recordedName(pvc.ObjectMeta) != name) {
+		return nil, notFound
 	}
 
-	return pvcToVolumeSummary(*pvc), nil
+	return pvcToVolume(*pvc), nil
 }
 
 // RemoveVolume implements docker volume rm.
 func (a *KubernetesDockerAdapter) RemoveVolume(ctx context.Context, name string) error {
-	name = sanitiseResourceName(name)
-
 	if _, err := a.InspectVolume(ctx, name); err != nil {
 		return err
 	}
 
-	if err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+	if err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Delete(ctx, sanitiseResourceName(name), metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete PVC %q: %w", name, err)
 	}
 
 	return nil
 }
 
-// pvcToVolumeSummary converts a PVC to the Docker VolumeSummary shape.
-func pvcToVolumeSummary(pvc corev1.PersistentVolumeClaim) *VolumeSummary {
-	return &VolumeSummary{
-		Name:       pvc.Name,
+// pvcToVolume converts a PVC to the Docker volume it backs.
+func pvcToVolume(pvc corev1.PersistentVolumeClaim) *volume.Volume {
+	options := map[string]string{}
+	if raw := pvc.Annotations[types.AnnotationDriverOpts]; raw != "" {
+		_ = json.Unmarshal([]byte(raw), &options)
+	}
+	return &volume.Volume{
+		Name:       recordedName(pvc.ObjectMeta),
 		Driver:     "d2k",
 		Mountpoint: "/var/lib/d2k/volumes/" + pvc.Name,
-		Labels:     pvc.Labels,
-		CreatedAt:  pvc.CreationTimestamp.UTC().Format("2006-01-02T15:04:05Z"),
+		Labels:     recordedLabels(pvc.ObjectMeta),
+		Options:    options,
+		Scope:      "local",
+		CreatedAt:  pvc.CreationTimestamp.UTC().Format(time.RFC3339),
 	}
 }
 
