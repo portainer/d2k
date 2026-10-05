@@ -43,7 +43,7 @@ rules:
     resources: ["pods/log"]
     verbs: ["get"]
   - apiGroups: [""]
-    resources: ["pods/exec"]
+    resources: ["pods/exec", "pods/attach"]
     verbs: ["create"]
 
   # Services — created alongside Deployments for port mappings

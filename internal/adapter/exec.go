@@ -79,3 +79,45 @@ func (a *KubernetesDockerAdapter) ExecContainer(ctx context.Context, opts ExecOp
 	}
 	return 0, err
 }
+
+// AttachContainer connects streams to the running process of the
+// container, as `kubectl attach` does. It returns when the process ends or
+// the streams close.
+func (a *KubernetesDockerAdapter) AttachContainer(ctx context.Context, name string, tty bool, streams ExecStreams) error {
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return err
+	}
+	pod, err := a.currentPodForDeployment(ctx, resolved)
+	if err != nil && !errors.Is(err, errNoPod) {
+		return err
+	}
+	if pod == nil || pod.Status.Phase != corev1.PodRunning {
+		return errdefs.Conflict(fmt.Errorf("container %s is not running", name))
+	}
+
+	req := a.client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(pod.Name).
+		Namespace(a.namespace).
+		SubResource("attach").
+		VersionedParams(&corev1.PodAttachOptions{
+			Container: pod.Spec.Containers[0].Name,
+			Stdin:     streams.Stdin != nil,
+			Stdout:    streams.Stdout != nil,
+			Stderr:    streams.Stderr != nil && !tty,
+			TTY:       tty,
+		}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(a.restConfig, "POST", req.URL())
+	if err != nil {
+		return fmt.Errorf("unable to create SPDY executor: %w", err)
+	}
+	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:             streams.Stdin,
+		Stdout:            streams.Stdout,
+		Stderr:            streams.Stderr,
+		Tty:               tty,
+		TerminalSizeQueue: streams.Resize,
+	})
+}

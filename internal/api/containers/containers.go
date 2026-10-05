@@ -23,12 +23,15 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/events"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/internal/errdefs"
@@ -41,11 +44,14 @@ import (
 // Handler holds dependencies for all container API endpoints.
 type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
+
+	mu       sync.Mutex
+	attached map[string]*streams.SizeQueue // TTY sizes of attach sessions, by container ID
 }
 
 // NewHandler creates a Handler.
 func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
-	return &Handler{adapter: a}
+	return &Handler{adapter: a, attached: map[string]*streams.SizeQueue{}}
 }
 
 // DispatchAction handles POST /containers/{id}/start, /stop, /restart, /wait.
@@ -62,6 +68,8 @@ func (h *Handler) DispatchAction(w http.ResponseWriter, r *http.Request) {
 		h.Wait(w, r)
 	case strings.HasSuffix(path, "/attach"):
 		h.Attach(w, r)
+	case strings.HasSuffix(path, "/resize"):
+		h.Resize(w, r)
 	case strings.HasSuffix(path, "/rename"):
 		h.Rename(w, r)
 	default:
@@ -206,12 +214,58 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Wait handles POST /containers/{id}/wait.
+// Wait handles POST /containers/{id}/wait: it answers when the container
+// stops running (condition not-running, the default), next exits
+// (next-exit) or is removed (removed), with its exit code.
 func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
-	httputils.WriteJSON(w, http.StatusOK, map[string]any{
-		"StatusCode": 0,
-		"Error":      nil,
-	})
+	name := containerName(r.URL.Path, "/wait")
+	condition := r.URL.Query().Get("condition")
+	if !slices.Contains([]string{"", "not-running", "next-exit", "removed"}, condition) {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(fmt.Errorf("invalid condition %q", condition)))
+		return
+	}
+	// Subscribe before looking at the state so no exit is missed between.
+	_, live, cancel := h.adapter.SubscribeEvents()
+	defer cancel()
+	ctr, err := h.adapter.InspectContainer(r.Context(), name)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	respond := func(code int) { _ = json.NewEncoder(w).Encode(container.WaitResponse{StatusCode: int64(code)}) }
+
+	if (condition == "" || condition == "not-running") && !ctr.State.Running {
+		respond(ctr.State.ExitCode)
+		return
+	}
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case m := <-live:
+			if m.Actor.ID != ctr.ID {
+				continue
+			}
+			switch {
+			case m.Action == events.ActionDestroy:
+				respond(0)
+				return
+			case condition != "removed" && m.Action == events.ActionDie:
+				code, _ := strconv.Atoi(m.Actor.Attributes["exitCode"])
+				respond(code)
+				return
+			case condition != "removed" && m.Action == events.ActionStop:
+				respond(0)
+				return
+			}
+		}
+	}
 }
 
 // Start handles POST /containers/{id}/start.
@@ -464,11 +518,155 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Attach handles POST /containers/{id}/attach.
+// Attach handles POST /containers/{id}/attach. With stdin it attaches to
+// the container's process. Without, it follows the container's log: the
+// Docker CLI attaches before starting a container, and a process attach
+// would miss what the container prints before the attach connects.
 func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/vnd.docker.raw-stream")
-	w.Header().Set("Connection", "close")
-	w.WriteHeader(http.StatusSwitchingProtocols)
+	name := containerName(r.URL.Path, "/attach")
+	q := r.URL.Query()
+	stdin, stdout, stderr := boolParam(q.Get("stdin")), boolParam(q.Get("stdout")), boolParam(q.Get("stderr"))
+	stream, withLogs := boolParam(q.Get("stream")), boolParam(q.Get("logs"))
+
+	ctr, err := h.adapter.InspectContainer(r.Context(), name)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	tty := ctr.Config.Tty
+	conn, in, err := streams.Hijack(w, r, tty)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	if !stream && !withLogs {
+		return
+	}
+
+	var out, errOut io.Writer
+	switch {
+	case tty:
+		out, errOut = conn, conn
+	default:
+		out, errOut = streams.Multiplexed(conn, streams.Stdout), streams.Multiplexed(conn, streams.Stderr)
+	}
+	if !stdout {
+		out = nil
+	}
+	if !stderr {
+		errOut = nil
+	}
+
+	// The attach outlives the request's context, which Go cancels when the
+	// client half-closes after sending stdin; it ends with the process.
+	ctx, stop := context.WithCancel(context.WithoutCancel(r.Context()))
+	defer stop()
+	// Register the session first: the Docker CLI resizes right after start,
+	// before the container runs; the queue keeps that size for the attach.
+	var resize *streams.SizeQueue
+	if stdin && stream {
+		resize = h.attachSession(ctr.ID)
+		defer h.endAttachSession(ctr.ID, resize)
+	}
+	wasRunning := ctr.State.Running
+	if !wasRunning && !waitUntilRunning(ctx, h.adapter, ctr.ID) {
+		return
+	}
+
+	if stdin && stream {
+		err := h.adapter.AttachContainer(ctx, ctr.ID, tty, adapter.ExecStreams{Stdin: in, Stdout: out, Stderr: errOut, Resize: resize})
+		if err != nil {
+			log.Warn().Str("context", "ContainersAPI").Str("name", name).Err(err).Msg("Attach ended")
+		}
+		return
+	}
+
+	// Without stdin the client sends nothing, and the Docker CLI half-closes
+	// its side at once: EOF is not a disconnect. A read error is; so is a
+	// failed write of the next log line.
+	go func() {
+		if _, err := io.Copy(io.Discard, in); err != nil {
+			stop()
+		}
+	}()
+	tail := "0"
+	if withLogs || !wasRunning {
+		tail = "all"
+	}
+	logs, _, err := h.adapter.GetContainerLogs(ctx, ctr.ID, adapter.LogOptions{Follow: stream, Tail: tail})
+	if err != nil {
+		log.Warn().Str("context", "ContainersAPI").Str("name", name).Err(err).Msg("Attach ended")
+		return
+	}
+	defer func() { _ = logs.Close() }()
+	if out == nil {
+		out = errOut
+	}
+	if out != nil {
+		_, _ = io.Copy(out, logs)
+	}
+}
+
+// waitUntilRunning polls until the container runs, is removed, or ctx ends.
+func waitUntilRunning(ctx context.Context, a *adapter.KubernetesDockerAdapter, id string) bool {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		ctr, err := a.InspectContainer(ctx, id)
+		if err != nil {
+			return false
+		}
+		if ctr.State.Running {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+// Resize handles POST /containers/{id}/resize: it resizes the TTY of the
+// container's attach session, if any.
+func (h *Handler) Resize(w http.ResponseWriter, r *http.Request) {
+	name := containerName(r.URL.Path, "/resize")
+	height, errH := strconv.ParseUint(r.URL.Query().Get("h"), 10, 16)
+	width, errW := strconv.ParseUint(r.URL.Query().Get("w"), 10, 16)
+	if errH != nil || errW != nil {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(errors.New("invalid terminal size: h and w must be numbers")))
+		return
+	}
+	ctr, err := h.adapter.InspectContainer(r.Context(), name)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	h.mu.Lock()
+	resize := h.attached[ctr.ID]
+	h.mu.Unlock()
+	if resize != nil {
+		resize.Push(uint(height), uint(width))
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (h *Handler) attachSession(id string) *streams.SizeQueue {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	q := streams.NewSizeQueue()
+	h.attached[id] = q
+	return q
+}
+
+func (h *Handler) endAttachSession(id string, q *streams.SizeQueue) {
+	h.mu.Lock()
+	if h.attached[id] == q {
+		delete(h.attached, id)
+	}
+	h.mu.Unlock()
+	q.Close()
 }
 
 func mustJSON(v any) string {

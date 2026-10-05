@@ -139,6 +139,18 @@ standalone_cases() {
     sleep 3; docker volume create e2e-ev-vol >/dev/null; sleep 3; docker volume rm e2e-ev-vol >/dev/null;
     for _ in $(seq 10); do grep -q "destroy e2e-ev-vol" '"$WORKDIR"'/events.out && grep -q "create e2e-ev-vol" '"$WORKDIR"'/events.out && exit 0; sleep 1; done; exit 1'
 
+  # docker run without -d: create, wait, attach, start (busybox has no entrypoint).
+  check "run prints the output" bash -c '[ "$(perl -e "alarm 120; exec @ARGV" docker run --name e2e-fg busybox:1.36 echo hi)" = hi ]'
+  check "run returns the exit code" bash -c 'perl -e "alarm 120; exec @ARGV" docker run --name e2e-code busybox:1.36 sh -c "exit 3"; [ $? = 3 ]'
+  check "run -i passes stdin" bash -c '[ "$(echo hello | perl -e "alarm 120; exec @ARGV" docker run -i --name e2e-in busybox:1.36 cat)" = hello ]'
+  check "run -it attaches a TTY of the client's size" bash -c "python3 $(dirname "$0")/run_in_terminal.py docker run -it --name e2e-it busybox:1.36 sh -c 'sleep 2; ttysize' | grep -q '120 40'"
+  check "wait returns when the container stops" bash -c '
+    docker run -d --name e2e-wait nginx:alpine >/dev/null &&
+    for _ in $(seq 60); do [ "$(docker inspect -f {{.State.Status}} e2e-wait)" = running ] && break; sleep 2; done &&
+    (perl -e "alarm 60; exec @ARGV" docker wait e2e-wait > '"$WORKDIR"'/wait.out &) ; sleep 2; docker stop e2e-wait >/dev/null;
+    for _ in $(seq 20); do [ "$(cat '"$WORKDIR"'/wait.out)" = 0 ] && exit 0; sleep 1; done; exit 1'
+  docker rm -f e2e-fg e2e-code e2e-in e2e-it e2e-wait >/dev/null 2>&1
+
   # Phase 0: name resolution.
   docker run -d --name e2e-my-api nginx:alpine >/dev/null
   check "rm does not match by name suffix" bash -c '! docker rm api 2>/dev/null && docker container inspect e2e-my-api >/dev/null'

@@ -22,7 +22,6 @@ import (
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/rs/zerolog/log"
-	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/errdefs"
@@ -44,7 +43,7 @@ type instance struct {
 	id          string
 	containerID string
 	opts        adapter.ExecOptions
-	resize      *sizeQueue
+	resize      *streams.SizeQueue
 
 	mu       sync.Mutex
 	started  bool
@@ -113,10 +112,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 			AttachStderr: req.AttachStderr,
 			Tty:          req.Tty,
 		},
-		resize: newSizeQueue(),
+		resize: streams.NewSizeQueue(),
 	}
 	if req.ConsoleSize != nil {
-		inst.resize.push(req.ConsoleSize[0], req.ConsoleSize[1])
+		inst.resize.Push(req.ConsoleSize[0], req.ConsoleSize[1])
 	}
 
 	h.mu.Lock()
@@ -147,7 +146,7 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.ConsoleSize != nil {
-		inst.resize.push(req.ConsoleSize[0], req.ConsoleSize[1])
+		inst.resize.Push(req.ConsoleSize[0], req.ConsoleSize[1])
 	}
 
 	if req.Detach {
@@ -204,7 +203,7 @@ func (h *Handler) run(ctx context.Context, inst *instance, s adapter.ExecStreams
 		code = 126 // as the daemon reports a command that could not be run
 	}
 	inst.finish(code)
-	inst.resize.close()
+	inst.resize.Close()
 	return err
 }
 
@@ -220,7 +219,7 @@ func (h *Handler) Resize(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(errors.New("invalid terminal size: h and w must be numbers")))
 		return
 	}
-	inst.resize.push(uint(height), uint(width))
+	inst.resize.Push(uint(height), uint(width))
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -281,44 +280,3 @@ func (i *instance) isFinishedBefore(t time.Time) bool {
 	defer i.mu.Unlock()
 	return i.exitCode != nil && i.finished.Before(t)
 }
-
-// sizeQueue feeds terminal resizes to the exec stream. It keeps only the
-// latest size, as a terminal only cares about its current one.
-type sizeQueue struct {
-	sizes chan remotecommand.TerminalSize
-	once  sync.Once
-	done  chan struct{}
-}
-
-func newSizeQueue() *sizeQueue {
-	return &sizeQueue{sizes: make(chan remotecommand.TerminalSize, 1), done: make(chan struct{})}
-}
-
-func (q *sizeQueue) push(height, width uint) {
-	size := remotecommand.TerminalSize{Height: uint16(height), Width: uint16(width)}
-	select {
-	case <-q.done:
-		return
-	default:
-	}
-	select {
-	case <-q.sizes: // drop a size not yet applied
-	default:
-	}
-	select {
-	case q.sizes <- size:
-	default:
-	}
-}
-
-// Next blocks until a resize, or returns nil once the exec has ended.
-func (q *sizeQueue) Next() *remotecommand.TerminalSize {
-	select {
-	case size := <-q.sizes:
-		return &size
-	case <-q.done:
-		return nil
-	}
-}
-
-func (q *sizeQueue) close() { q.once.Do(func() { close(q.done) }) }

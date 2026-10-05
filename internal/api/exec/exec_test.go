@@ -7,20 +7,6 @@ import (
 	"testing"
 )
 
-func TestSizeQueueKeepsLatestAndEnds(t *testing.T) {
-	q := newSizeQueue()
-	q.push(24, 80)
-	q.push(40, 120)
-	if size := q.Next(); size == nil || size.Height != 40 || size.Width != 120 {
-		t.Fatalf("Next() = %+v, want the latest size 40x120", size)
-	}
-	q.close()
-	if size := q.Next(); size != nil {
-		t.Fatalf("Next() after close = %+v, want nil", size)
-	}
-	q.push(1, 1) // after close: no panic, no block
-}
-
 func TestCreateRejectsWhatKubernetesExecCannotDo(t *testing.T) {
 	h := NewHandler(nil) // rejected before the container is looked up
 	for _, body := range []string{
