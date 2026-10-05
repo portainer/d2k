@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/api/containers"
@@ -24,16 +24,16 @@ import (
 
 // New builds the router with all Docker API endpoints registered.
 // If swarmMode is true, the Docker Swarm API surface is also registered.
-func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, logger *zap.SugaredLogger) http.Handler {
+func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool) http.Handler {
 	mux := http.NewServeMux()
 
-	sys := system.NewHandler(a, namespace, swarmMode, logger)
-	c := containers.NewHandler(a, logger)
-	v := volumes.NewHandler(a, logger)
-	n := networks.NewHandler(a, logger)
-	img := images.NewHandler(a, logger)
-	ev := events.NewHandler(a, logger)
-	e := exec.NewHandler(a, logger)
+	sys := system.NewHandler(a, namespace, swarmMode)
+	c := containers.NewHandler(a)
+	v := volumes.NewHandler(a)
+	n := networks.NewHandler(a)
+	img := images.NewHandler(a)
+	ev := events.NewHandler(a)
+	e := exec.NewHandler(a)
 
 	// System
 	mux.HandleFunc("GET /_ping", sys.Ping)
@@ -81,8 +81,8 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 
 	// Swarm mode - only registered when D2K_SWARM_MODE=true.
 	if swarmMode {
-		logger.Infow("swarm mode enabled - registering Swarm API endpoints")
-		sw := swarm.NewHandler(a, namespace, logger)
+		log.Info().Str("context", "Router").Msg("Swarm mode enabled - registering Swarm API endpoints")
+		sw := swarm.NewHandler(a, namespace)
 
 		mux.HandleFunc("GET /swarm", sw.InspectSwarm)
 		mux.HandleFunc("POST /swarm/init", sw.InitSwarm)
@@ -118,7 +118,7 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 
 	// Catch-all for unmatched routes - logs the method and path for debugging.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		logger.Warnw("unmatched route", "method", r.Method, "path", r.URL.Path)
+		log.Warn().Str("context", "Router").Any("method", r.Method).Any("path", r.URL.Path).Msg("Unmatched route")
 		apispec.NotRouted(w, r)
 	})
 
@@ -137,7 +137,7 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 		mux.ServeHTTP(w, r)
 	})
 
-	return middleware.Logging(logger)(middleware.RequestID(handler))
+	return middleware.Logging(middleware.RequestID(handler))
 }
 
 // apiVersionPrefix matches the API version prefix Docker clients send, e.g. "/v1.41".

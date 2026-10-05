@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	"github.com/gorilla/websocket"
 	"github.com/portainer/d2k/internal/adapter"
@@ -20,7 +20,6 @@ import (
 // Handler holds dependencies for exec API endpoints.
 type Handler struct {
 	adapter   *adapter.KubernetesDockerAdapter
-	logger    *zap.SugaredLogger
 	mu        sync.Mutex
 	instances map[string]*execInstance
 }
@@ -31,10 +30,9 @@ type execInstance struct {
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *Handler {
+func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
 	return &Handler{
 		adapter:   a,
-		logger:    logger,
 		instances: map[string]*execInstance{},
 	}
 }
@@ -138,7 +136,7 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 
 	opts := instance.opts
 	if err := h.adapter.ExecContainer(r.Context(), opts, brw, brw, brw); err != nil {
-		h.logger.Warnw("exec stream ended", "id", id, "error", err)
+		log.Warn().Str("context", "ExecAPI").Any("id", id).Err(err).Msg("Exec stream ended")
 	}
 }
 
@@ -153,7 +151,7 @@ func (h *Handler) startWebSocket(w http.ResponseWriter, r *http.Request, instanc
 
 	wsConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		h.logger.Errorw("WebSocket upgrade failed", "error", err)
+		log.Error().Str("context", "ExecAPI").Err(err).Msg("WebSocket upgrade failed")
 		return
 	}
 	defer func() { _ = wsConn.Close() }()
@@ -211,7 +209,7 @@ func (h *Handler) startWebSocket(w http.ResponseWriter, r *http.Request, instanc
 
 	opts := instance.opts
 	if err := h.adapter.ExecContainer(r.Context(), opts, stdinR, stdoutW, stderrW); err != nil {
-		h.logger.Warnw("WebSocket exec stream ended", "error", err)
+		log.Warn().Str("context", "ExecAPI").Err(err).Msg("WebSocket exec stream ended")
 	}
 
 	_ = stdoutW.Close()

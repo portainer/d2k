@@ -17,7 +17,7 @@ import (
 	"net/http"
 	"strings"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/pkg/httputils"
@@ -26,19 +26,18 @@ import (
 // Handler holds dependencies for network API endpoints.
 type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
-	logger  *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *Handler {
-	return &Handler{adapter: a, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
+	return &Handler{adapter: a}
 }
 
 // List handles GET /networks.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	networks, err := h.adapter.ListNetworks(r.Context())
 	if err != nil {
-		h.logger.Errorw("ListNetworks failed", "error", err)
+		log.Error().Str("context", "NetworksAPI").Err(err).Msg("ListNetworks failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -123,14 +122,14 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		Labels: body.Labels,
 	})
 	if err != nil {
-		h.logger.Errorw("CreateNetwork failed", "name", body.Name, "error", err)
+		log.Error().Str("context", "NetworksAPI").Any("name", body.Name).Err(err).Msg("CreateNetwork failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
 	if len(warnings) > 0 {
 		for _, w := range warnings {
-			h.logger.Warnw("network warning", "warning", w)
+			log.Warn().Str("context", "NetworksAPI").Any("warning", w).Msg("Network warning")
 		}
 	}
 
@@ -153,7 +152,7 @@ func (h *Handler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	connect := strings.HasSuffix(r.URL.Path, "/connect")
 	if err := h.adapter.ConnectNetwork(r.Context(), r.PathValue("id"), body.Container, connect); err != nil {
-		h.logger.Errorw("ConnectNetwork failed", "network", r.PathValue("id"), "container", body.Container, "error", err)
+		log.Error().Str("context", "NetworksAPI").Any("network", r.PathValue("id")).Any("container", body.Container).Err(err).Msg("ConnectNetwork failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -166,7 +165,7 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 
 	network, err := h.adapter.InspectNetworkDetail(r.Context(), nameOrID)
 	if err != nil {
-		h.logger.Errorw("InspectNetwork failed", "id", nameOrID, "error", err)
+		log.Error().Str("context", "NetworksAPI").Any("id", nameOrID).Err(err).Msg("InspectNetwork failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -179,7 +178,7 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	nameOrID := networkIDFromPath(r.URL.Path)
 
 	if err := h.adapter.RemoveNetwork(r.Context(), nameOrID); err != nil {
-		h.logger.Errorw("RemoveNetwork failed", "id", nameOrID, "error", err)
+		log.Error().Str("context", "NetworksAPI").Any("id", nameOrID).Err(err).Msg("RemoveNetwork failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}

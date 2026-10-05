@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -50,7 +50,6 @@ type KubernetesDockerAdapter struct {
 	// (e.g. "nvidia.com/gpu" or "amd.com/gpu"). Empty means GPU support is disabled.
 	gpuResourceName string
 
-	logger     *zap.SugaredLogger
 	prevCPU    map[string]int64
 	prevCPUMu  sync.RWMutex
 	networks   map[string]*NetworkSummary
@@ -70,7 +69,6 @@ type KubernetesDockerAdapter struct {
 // Options configures a new KubernetesDockerAdapter.
 type Options struct {
 	Config *config.Config
-	Logger *zap.SugaredLogger
 }
 
 // NewKubernetesDockerAdapter creates and returns a new KubernetesDockerAdapter.
@@ -96,19 +94,19 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 	mc := initMetricsClient(restCfg)
 	if mc != nil {
 		if probeMetricsAPI(context.Background(), mc, opts.Config.Namespace) {
-			opts.Logger.Infow("metrics API available — stats will show real data")
+			log.Info().Str("context", "KubernetesAdapter").Msg("Metrics API available — stats will show real data")
 		} else {
-			opts.Logger.Infow("metrics API not available — stats will return zeroes")
+			log.Info().Str("context", "KubernetesAdapter").Msg("Metrics API not available — stats will return zeroes")
 			mc = nil
 		}
 	}
 
 	clusterDNS, clusterDomain := readClusterDNS("/etc/resolv.conf")
 	if clusterDNS == "" || clusterDomain == "" {
-		opts.Logger.Warnw("cluster DNS not found in /etc/resolv.conf — compose service names will not be scoped to their project")
+		log.Warn().Str("context", "KubernetesAdapter").Msg("Cluster DNS not found in /etc/resolv.conf — compose service names will not be scoped to their project")
 	}
 
-	a := NewWithClient(client, opts.Config.Namespace, opts.Logger)
+	a := NewWithClient(client, opts.Config.Namespace)
 	a.metricsClient = mc
 	a.restConfig = restCfg
 	a.apiServerHost = apiServerHost(restCfg.Host)
@@ -122,11 +120,10 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 // NewWithClient returns an adapter that uses client for the given namespace,
 // without contacting the cluster. Features that need more than the client
 // (exec, metrics, GPU) stay disabled.
-func NewWithClient(client kubernetes.Interface, namespace string, logger *zap.SugaredLogger) *KubernetesDockerAdapter {
+func NewWithClient(client kubernetes.Interface, namespace string) *KubernetesDockerAdapter {
 	return &KubernetesDockerAdapter{
 		client:            client,
 		namespace:         namespace,
-		logger:            logger,
 		prevCPU:           map[string]int64{},
 		networks:          map[string]*NetworkSummary{},
 		nfsStorageClasses: map[string]string{},

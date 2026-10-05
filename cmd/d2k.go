@@ -4,12 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
+	"github.com/rs/zerolog/log"
 	"github.com/sethvargo/go-envconfig"
 
 	"github.com/portainer/d2k/internal/adapter"
@@ -32,9 +32,14 @@ func main() {
 			pkiInit(os.Args[3:])
 			return
 		}
-		log.Fatal(usage)
+		exitUsage()
 	}
 	serve()
+}
+
+func exitUsage() {
+	fmt.Fprintln(os.Stderr, usage)
+	os.Exit(2)
 }
 
 func pkiInit(args []string) {
@@ -43,10 +48,11 @@ func pkiInit(args []string) {
 	out := fs.String("out", "d2k-pki", "output directory")
 	_ = fs.Parse(args)
 	if *sans == "" {
-		log.Fatal(usage)
+		exitUsage()
 	}
 	if err := pki.Init(*out, strings.Split(*sans, ",")); err != nil {
-		log.Fatalf("unable to create certificates: %s", err)
+		fmt.Fprintf(os.Stderr, "unable to create certificates: %s\n", err)
+		os.Exit(1)
 	}
 	fmt.Printf(`Certificates written to %[1]s.
 
@@ -66,29 +72,23 @@ func serve() {
 
 	var cfg config.Config
 	if err := envconfig.Process(ctx, &cfg); err != nil {
-		log.Fatalf("unable to parse configuration: %s", err)
+		log.Fatal().Str("context", "Startup").Err(err).Msg("Unable to parse configuration")
+	}
+	if err := logging.Configure(cfg.LogLevel, cfg.LogFormat); err != nil {
+		log.Fatal().Str("context", "Startup").Err(err).Msg("Unable to configure logging")
 	}
 
-	logger, err := logging.NewLogger(cfg.LogLevel, cfg.LogFormat)
+	log.Info().Str("context", "Startup").Str("namespace", cfg.Namespace).Bool("swarm_mode", cfg.SwarmMode).Msg("Starting d2k")
+
+	a, err := adapter.NewKubernetesDockerAdapter(&adapter.Options{Config: &cfg})
 	if err != nil {
-		log.Fatalf("unable to initialise logger: %s", err)
+		log.Fatal().Str("context", "Startup").Err(err).Msg("Unable to create Kubernetes adapter")
 	}
-	defer func() { _ = logger.Sync() }()
-
-	logger.Infow("starting d2k",
-		"namespace", cfg.Namespace,
-		"swarm_mode", cfg.SwarmMode,
-	)
-
-	a, err := adapter.NewKubernetesDockerAdapter(&adapter.Options{Config: &cfg, Logger: logger})
-	if err != nil {
-		logger.Fatalw("unable to create Kubernetes adapter", "error", err)
-	}
-	logger.Infow("connected to Kubernetes namespace", "namespace", cfg.Namespace)
+	log.Info().Str("context", "Startup").Str("namespace", cfg.Namespace).Msg("Connected to Kubernetes namespace")
 
 	a.LogNFSStorageClasses(ctx)
 
-	handler := router.New(a, cfg.Namespace, cfg.SwarmMode, logger)
+	handler := router.New(a, cfg.Namespace, cfg.SwarmMode)
 	err = server.Run(ctx, server.Config{
 		Insecure:   cfg.Insecure,
 		Port:       cfg.Port,
@@ -98,9 +98,9 @@ func serve() {
 		CAFile:     cfg.TLSCAFile,
 		SocketPath: cfg.SocketPath,
 		HealthPort: cfg.HealthPort,
-	}, handler, logger)
+	}, handler)
 	if err != nil {
-		logger.Fatalw("server error", "error", err)
+		log.Fatal().Str("context", "Startup").Err(err).Msg("Server error")
 	}
-	logger.Info("d2k stopped")
+	log.Info().Str("context", "Startup").Msg("Stopped")
 }

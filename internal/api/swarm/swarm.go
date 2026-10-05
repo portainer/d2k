@@ -38,7 +38,7 @@ import (
 	"net/http"
 	"strings"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/apispec"
@@ -49,15 +49,13 @@ import (
 type Handler struct {
 	adapter   *adapter.KubernetesDockerAdapter
 	namespace string
-	logger    *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string, logger *zap.SugaredLogger) *Handler {
+func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string) *Handler {
 	return &Handler{
 		adapter:   a,
 		namespace: namespace,
-		logger:    logger,
 	}
 }
 
@@ -68,7 +66,7 @@ func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string, logger *za
 func (h *Handler) InspectSwarm(w http.ResponseWriter, r *http.Request) {
 	identity, err := h.adapter.SwarmIdentity(r.Context())
 	if err != nil {
-		h.logger.Warnw("swarm identity unavailable", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("Swarm identity unavailable")
 		httputils.WriteError(w, http.StatusInternalServerError, "unable to retrieve swarm identity")
 		return
 	}
@@ -93,7 +91,7 @@ func (h *Handler) InitSwarm(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	nodes, err := h.adapter.SwarmListNodes(r.Context())
 	if err != nil {
-		h.logger.Warnw("list nodes failed", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List nodes failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -143,11 +141,11 @@ func (h *Handler) updateNode(w http.ResponseWriter, r *http.Request, id string) 
 func (h *Handler) CreateService(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.adapter.SwarmCreateService(r.Context(), r.Body)
 	if err != nil {
-		h.logger.Warnw("create service failed", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("Create service failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
-	h.logger.Infow("create service response", "resp", resp)
+	log.Info().Str("context", "SwarmAPI").Any("resp", resp).Msg("Create service response")
 	httputils.WriteJSON(w, http.StatusCreated, resp)
 }
 
@@ -157,7 +155,7 @@ func (h *Handler) CreateService(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListServices(w http.ResponseWriter, r *http.Request) {
 	services, err := h.adapter.SwarmListServices(r.Context())
 	if err != nil {
-		h.logger.Warnw("list services failed", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List services failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -305,7 +303,7 @@ func (h *Handler) serviceLogs(w http.ResponseWriter, r *http.Request, id string)
 
 	mw := &muxWriter{w: w}
 	if err := h.adapter.SwarmServiceLogs(r.Context(), mw, id, r.URL.Query()); err != nil {
-		h.logger.Warnw("service logs failed", "service", id, "error", err)
+		log.Warn().Str("context", "SwarmAPI").Any("service", id).Err(err).Msg("Service logs failed")
 	}
 }
 
@@ -349,11 +347,11 @@ func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
 	serviceFilter, stackFilter := parseTaskFilters(rawFilters)
 	tasks, err := h.adapter.SwarmListTasks(r.Context(), serviceFilter, stackFilter)
 	if err != nil {
-		h.logger.Warnw("list tasks failed", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List tasks failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
-	h.logger.Infow("list tasks", "service_filter", serviceFilter, "stack_filter", stackFilter, "count", len(tasks))
+	log.Info().Str("context", "SwarmAPI").Any("service_filter", serviceFilter).Any("stack_filter", stackFilter).Any("count", len(tasks)).Msg("List tasks")
 	httputils.WriteJSON(w, http.StatusOK, tasks)
 }
 
@@ -397,7 +395,7 @@ func (h *Handler) InspectTask(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) CreateSecret(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.adapter.SwarmCreateSecret(r.Context(), r.Body)
 	if err != nil {
-		h.logger.Warnw("create secret failed", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("Create secret failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -420,7 +418,7 @@ func (h *Handler) ListSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 	secrets, err := h.adapter.SwarmListSecrets(r.Context(), args)
 	if err != nil {
-		h.logger.Warnw("list secrets failed", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List secrets failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -466,7 +464,7 @@ func (h *Handler) DispatchSecret(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) CreateConfig(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.adapter.SwarmCreateConfig(r.Context(), r.Body)
 	if err != nil {
-		h.logger.Warnw("create config failed", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("Create config failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -482,7 +480,7 @@ func (h *Handler) ListConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 	configs, err := h.adapter.SwarmListConfigs(r.Context(), args)
 	if err != nil {
-		h.logger.Warnw("list configs failed", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List configs failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -527,7 +525,7 @@ func (h *Handler) DispatchConfig(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListStacks(w http.ResponseWriter, r *http.Request) {
 	stacks, err := h.adapter.SwarmListStacks(r.Context())
 	if err != nil {
-		h.logger.Warnw("list stacks failed", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List stacks failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -538,7 +536,7 @@ func (h *Handler) ListStacks(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeleteStack(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/stacks/")
 	if err := h.adapter.SwarmDeleteStack(r.Context(), name); err != nil {
-		h.logger.Warnw("delete stack failed", "stack", name, "error", err)
+		log.Warn().Str("context", "SwarmAPI").Any("stack", name).Err(err).Msg("Delete stack failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}

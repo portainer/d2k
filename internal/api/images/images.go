@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/apispec"
@@ -29,12 +29,11 @@ import (
 // Handler holds dependencies for image API endpoints.
 type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
-	logger  *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *Handler {
-	return &Handler{adapter: a, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
+	return &Handler{adapter: a}
 }
 
 // DispatchGet routes GET /images/{name}/json to Inspect.
@@ -50,7 +49,7 @@ func (h *Handler) DispatchGet(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	ctrs, err := h.adapter.ListContainers(r.Context(), true)
 	if err != nil {
-		h.logger.Errorw("ListContainers for image list failed", "error", err)
+		log.Error().Str("context", "ImagesAPI").Err(err).Msg("ListContainers for image list failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -93,7 +92,7 @@ func (h *Handler) Pull(w http.ResponseWriter, r *http.Request) {
 		ref = fmt.Sprintf("%s:%s", fromImage, tag)
 	}
 
-	h.logger.Infow("docker pull acknowledged — Kubernetes pulls at schedule time", "image", ref)
+	log.Info().Str("context", "ImagesAPI").Any("image", ref).Msg("Docker pull acknowledged — Kubernetes pulls at schedule time")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"strings"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	"github.com/docker/docker/api/types/filters"
 	"github.com/portainer/d2k/internal/adapter"
@@ -23,12 +23,11 @@ import (
 // Handler holds dependencies for volume API endpoints.
 type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
-	logger  *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *Handler {
-	return &Handler{adapter: a, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
+	return &Handler{adapter: a}
 }
 
 // List handles GET /volumes.
@@ -41,7 +40,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 	vols, err := h.adapter.ListVolumes(r.Context())
 	if err != nil {
-		h.logger.Errorw("ListVolumes failed", "error", err)
+		log.Error().Str("context", "VolumesAPI").Err(err).Msg("ListVolumes failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -98,7 +97,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		DriverOpts: body.DriverOpts,
 	})
 	if err != nil {
-		h.logger.Errorw("CreateVolume failed", "name", body.Name, "error", err)
+		log.Error().Str("context", "VolumesAPI").Any("name", body.Name).Err(err).Msg("CreateVolume failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -112,7 +111,7 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 
 	vol, err := h.adapter.InspectVolume(r.Context(), name)
 	if err != nil {
-		h.logger.Debugw("InspectVolume not found", "name", name, "error", err)
+		log.Debug().Str("context", "VolumesAPI").Any("name", name).Err(err).Msg("InspectVolume not found")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -125,7 +124,7 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	name := volumeNameFromPath(r.URL.Path)
 
 	if err := h.adapter.RemoveVolume(r.Context(), name); err != nil {
-		h.logger.Errorw("RemoveVolume failed", "name", name, "error", err)
+		log.Error().Str("context", "VolumesAPI").Any("name", name).Err(err).Msg("RemoveVolume failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}

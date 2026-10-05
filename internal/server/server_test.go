@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
-
 	"github.com/portainer/d2k/internal/pki"
 )
 
@@ -34,7 +32,7 @@ func newPKI(t *testing.T) string {
 // startMTLS serves ok with the mTLS configuration built from dir/server.
 func startMTLS(t *testing.T, dir string) *httptest.Server {
 	t.Helper()
-	cfg, err := mutualTLS(filepath.Join(dir, "server", "tls.crt"), filepath.Join(dir, "server", "tls.key"), filepath.Join(dir, "server", "ca.crt"), zap.NewNop().Sugar())
+	cfg, err := mutualTLS(filepath.Join(dir, "server", "tls.crt"), filepath.Join(dir, "server", "tls.key"), filepath.Join(dir, "server", "ca.crt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +128,7 @@ func TestRunRequiresTLSMaterial(t *testing.T) {
 	err := Run(context.Background(), Config{
 		TLSPort: freePort(t), HealthPort: freePort(t),
 		CertFile: missing, KeyFile: missing, CAFile: missing,
-	}, ok, zap.NewNop().Sugar())
+	}, ok)
 	if err == nil {
 		t.Fatal("Run() without certificates succeeded")
 	}
@@ -145,7 +143,7 @@ func TestRunServesHealthAndSocket(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error)
-	go func() { done <- Run(ctx, cfg, ok, zap.NewNop().Sugar()) }()
+	go func() { done <- Run(ctx, cfg, ok) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {

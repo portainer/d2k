@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
@@ -34,12 +34,11 @@ import (
 // Handler holds dependencies for all container API endpoints.
 type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
-	logger  *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *Handler {
-	return &Handler{adapter: a, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
+	return &Handler{adapter: a}
 }
 
 // DispatchAction handles POST /containers/{id}/start, /stop, /restart, /wait.
@@ -68,7 +67,7 @@ func (h *Handler) Rename(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/rename")
 	newName := r.URL.Query().Get("name")
 	if err := h.adapter.RenameContainer(r.Context(), name, newName); err != nil {
-		h.logger.Errorw("RenameContainer failed", "name", name, "newName", newName, "error", err)
+		log.Error().Str("context", "ContainersAPI").Any("name", name).Any("new_name", newName).Err(err).Msg("RenameContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -103,7 +102,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 	ctrs, err := h.adapter.ListContainers(r.Context(), all)
 	if err != nil {
-		h.logger.Errorw("ListContainers failed", "error", err)
+		log.Error().Str("context", "ContainersAPI").Err(err).Msg("ListContainers failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -290,7 +289,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	id, warnings, err := h.adapter.CreateContainer(r.Context(), opts)
 	if err != nil {
-		h.logger.Errorw("CreateContainer failed", "name", name, "error", err)
+		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("CreateContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -313,7 +312,7 @@ func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/start")
 	if err := h.adapter.StartContainer(r.Context(), name); err != nil {
-		h.logger.Errorw("StartContainer failed", "name", name, "error", err)
+		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("StartContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -324,7 +323,7 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Stop(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/stop")
 	if err := h.adapter.StopContainer(r.Context(), name); err != nil {
-		h.logger.Errorw("StopContainer failed", "name", name, "error", err)
+		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("StopContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -335,12 +334,12 @@ func (h *Handler) Stop(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Restart(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/restart")
 	if err := h.adapter.StopContainer(r.Context(), name); err != nil {
-		h.logger.Errorw("Restart/stop failed", "name", name, "error", err)
+		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("Restart/stop failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	if err := h.adapter.StartContainer(r.Context(), name); err != nil {
-		h.logger.Errorw("Restart/start failed", "name", name, "error", err)
+		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("Restart/start failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -351,7 +350,7 @@ func (h *Handler) Restart(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "")
 	if err := h.adapter.RemoveContainer(r.Context(), name); err != nil {
-		h.logger.Errorw("RemoveContainer failed", "name", name, "error", err)
+		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("RemoveContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -363,7 +362,7 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/json")
 	result, err := h.adapter.InspectContainer(r.Context(), name)
 	if err != nil {
-		h.logger.Errorw("InspectContainer failed", "name", name, "error", err)
+		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("InspectContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
@@ -383,7 +382,7 @@ func (h *Handler) Logs(w http.ResponseWriter, r *http.Request) {
 
 	logs, err := h.adapter.GetContainerLogs(r.Context(), name, opts)
 	if err != nil {
-		h.logger.Errorw("GetContainerLogs failed", "name", name, "error", err)
+		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("GetContainerLogs failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}

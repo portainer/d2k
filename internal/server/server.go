@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 )
 
 // Config selects and configures the listeners.
@@ -45,7 +45,7 @@ const readHeaderTimeout = 30 * time.Second
 // Run serves handler on the configured listeners until ctx is cancelled,
 // then shuts them down gracefully. It fails before serving anything when the
 // TLS material cannot be loaded.
-func Run(ctx context.Context, cfg Config, handler http.Handler, logger *zap.SugaredLogger) error {
+func Run(ctx context.Context, cfg Config, handler http.Handler) error {
 	var servers []*http.Server
 	var listeners []net.Listener
 
@@ -61,10 +61,10 @@ func Run(ctx context.Context, cfg Config, handler http.Handler, logger *zap.Suga
 		if err != nil {
 			return err
 		}
-		logger.Warnw("D2K_INSECURE is set: serving the Docker API without TLS or authentication", "addr", l.Addr().String())
+		log.Warn().Str("context", "Server").Any("addr", l.Addr().String()).Msg("D2K_INSECURE is set: serving the Docker API without TLS or authentication")
 		servers, listeners = append(servers, api), append(listeners, l)
 	} else {
-		tlsConfig, err := mutualTLS(cfg.CertFile, cfg.KeyFile, cfg.CAFile, logger)
+		tlsConfig, err := mutualTLS(cfg.CertFile, cfg.KeyFile, cfg.CAFile)
 		if err != nil {
 			return fmt.Errorf("mTLS is required (set D2K_INSECURE=true to serve without TLS): %w", err)
 		}
@@ -72,7 +72,7 @@ func Run(ctx context.Context, cfg Config, handler http.Handler, logger *zap.Suga
 		if err != nil {
 			return err
 		}
-		logger.Infow("serving the Docker API over mutual TLS", "addr", l.Addr().String())
+		log.Info().Str("context", "Server").Any("addr", l.Addr().String()).Msg("Serving the Docker API over mutual TLS")
 		servers, listeners = append(servers, api), append(listeners, l)
 	}
 
@@ -81,7 +81,7 @@ func Run(ctx context.Context, cfg Config, handler http.Handler, logger *zap.Suga
 		if err != nil {
 			return err
 		}
-		logger.Infow("serving the Docker API on a unix socket", "path", cfg.SocketPath)
+		log.Info().Str("context", "Server").Any("path", cfg.SocketPath).Msg("Serving the Docker API on a unix socket")
 		sock := &http.Server{Handler: handler, ReadHeaderTimeout: readHeaderTimeout}
 		servers, listeners = append(servers, sock), append(listeners, l)
 	}
@@ -143,8 +143,8 @@ func listenUnix(path string) (net.Listener, error) {
 // mutualTLS returns a TLS configuration that requires a client certificate
 // signed by the CA in caFile. The files are reloaded when they change, so a
 // rotated Kubernetes Secret takes effect without a restart.
-func mutualTLS(certFile, keyFile, caFile string, logger *zap.SugaredLogger) (*tls.Config, error) {
-	r := &reloader{certFile: certFile, keyFile: keyFile, caFile: caFile, logger: logger}
+func mutualTLS(certFile, keyFile, caFile string) (*tls.Config, error) {
+	r := &reloader{certFile: certFile, keyFile: keyFile, caFile: caFile}
 	if err := r.load(); err != nil {
 		return nil, err
 	}
@@ -171,7 +171,6 @@ func mutualTLS(certFile, keyFile, caFile string, logger *zap.SugaredLogger) (*tl
 // any of the files changes.
 type reloader struct {
 	certFile, keyFile, caFile string
-	logger                    *zap.SugaredLogger
 
 	mu      sync.Mutex
 	cert    tls.Certificate
@@ -215,9 +214,9 @@ func (r *reloader) current() (tls.Certificate, *x509.CertPool) {
 		if err := r.load(); err != nil {
 			// Retry on the next change, not on every handshake.
 			r.modTime = latest
-			r.logger.Errorw("unable to reload TLS material, keeping the previous one", "error", err)
+			log.Error().Str("context", "Server").Err(err).Msg("Unable to reload TLS material, keeping the previous one")
 		} else {
-			r.logger.Infow("reloaded TLS material")
+			log.Info().Str("context", "Server").Msg("Reloaded TLS material")
 		}
 	}
 	return r.cert, r.pool

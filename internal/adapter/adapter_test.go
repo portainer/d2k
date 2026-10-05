@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -43,7 +42,7 @@ func newTestAdapter(t *testing.T, objs ...runtime.Object) (*KubernetesDockerAdap
 		}
 		return false, nil, nil
 	})
-	return NewWithClient(client, testNamespace, zap.NewNop().Sugar()), client
+	return NewWithClient(client, testNamespace), client
 }
 
 // deployment returns a Deployment in the test namespace with the given UID and labels.

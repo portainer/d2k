@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"testing"
 
-	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,8 +27,7 @@ func node(name, cpu, memory string) *corev1.Node {
 func info(t *testing.T, objs ...runtime.Object) map[string]any {
 	t.Helper()
 	client := fake.NewClientset(objs...)
-	logger := zap.NewNop().Sugar()
-	h := New(adapter.NewWithClient(client, "d2k", logger), "d2k", false, logger)
+	h := New(adapter.NewWithClient(client, "d2k"), "d2k", false)
 	rec := do(t, h, "GET", "/info", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("info = %d %s", rec.Code, rec.Body)

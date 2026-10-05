@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker/errdefs"
+	"github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -49,7 +50,7 @@ func (a *KubernetesDockerAdapter) CreateVolume(ctx context.Context, opts CreateV
 	}
 
 	if opts.DriverOpts["type"] == "nfs" {
-		a.logger.Infow("NFS volume detected", "name", opts.Name, "opts", opts.DriverOpts)
+		log.Info().Str("context", "KubernetesAdapter").Any("name", opts.Name).Any("opts", opts.DriverOpts).Msg("NFS volume detected")
 		return a.createNFSVolume(ctx, opts)
 	}
 
@@ -94,7 +95,7 @@ func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts Crea
 		)
 	}
 
-	a.logger.Infow("NFS volume matched StorageClass", "volume", opts.Name, "storageClass", matchedSC, "server", nfsServer)
+	log.Info().Str("context", "KubernetesAdapter").Any("volume", opts.Name).Any("storage_class", matchedSC).Any("server", nfsServer).Msg("NFS volume matched StorageClass")
 
 	size := opts.SizeLimit
 	if size == "" {
@@ -257,7 +258,7 @@ func pvcToVolumeSummary(pvc corev1.PersistentVolumeClaim) *VolumeSummary {
 func (a *KubernetesDockerAdapter) LogNFSStorageClasses(ctx context.Context) {
 	storageClasses, err := a.client.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		a.logger.Warnw("unable to list StorageClasses for NFS probe", "error", err)
+		log.Warn().Str("context", "KubernetesAdapter").Err(err).Msg("Unable to list StorageClasses for NFS probe")
 		return
 	}
 
@@ -280,15 +281,12 @@ func (a *KubernetesDockerAdapter) LogNFSStorageClasses(ctx context.Context) {
 	}
 
 	if len(found) == 0 {
-		a.logger.Infow("no nfs.csi.k8s.io StorageClasses found — NFS volumes in Compose files will be rejected")
+		log.Info().Str("context", "KubernetesAdapter").Msg("No nfs.csi.k8s.io StorageClasses found — NFS volumes in Compose files will be rejected")
 		return
 	}
 
 	for _, e := range found {
-		a.logger.Infow("NFS volume support available",
-			"storageClass", e.storageClass,
-			"server", e.server,
-		)
+		log.Info().Str("context", "KubernetesAdapter").Any("storage_class", e.storageClass).Any("server", e.server).Msg("NFS volume support available")
 	}
 }
 

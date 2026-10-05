@@ -12,7 +12,6 @@ import (
 	"github.com/getkin/kin-openapi/openapi2"
 	"github.com/getkin/kin-openapi/openapi2conv"
 	"github.com/getkin/kin-openapi/openapi3"
-	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/uuid"
@@ -115,8 +114,7 @@ func newTestRouter() (http.Handler, *fake.Clientset) {
 		}
 		return false, nil, nil
 	})
-	logger := zap.NewNop().Sugar()
-	return New(adapter.NewWithClient(client, "d2k", logger), "d2k", false, logger), client
+	return New(adapter.NewWithClient(client, "d2k"), "d2k", false), client
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {

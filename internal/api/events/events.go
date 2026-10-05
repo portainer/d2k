@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
 )
@@ -12,12 +12,11 @@ import (
 // Handler holds dependencies for the events API endpoint.
 type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
-	logger  *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *Handler {
-	return &Handler{adapter: a, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
+	return &Handler{adapter: a}
 }
 
 // Stream handles GET /events.
@@ -29,7 +28,7 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 
 	ch, err := h.adapter.WatchEvents(r.Context())
 	if err != nil {
-		h.logger.Errorw("WatchEvents failed", "error", err)
+		log.Error().Str("context", "EventsAPI").Err(err).Msg("WatchEvents failed")
 		return
 	}
 

@@ -32,6 +32,7 @@ import (
 
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/errdefs"
+	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -324,7 +325,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	if spec.Mode.Global != nil {
 		// Global mode = DaemonSet. We don't translate DaemonSets - warn and
 		// treat as replicated with 1 replica so the service still comes up.
-		a.logger.Warnw("global mode service requested; d2k does not support DaemonSet translation, deploying as replicated with 1 replica", "service", name)
+		log.Warn().Str("context", "KubernetesAdapter").Any("service", name).Msg("Global mode service requested; d2k does not support DaemonSet translation, deploying as replicated with 1 replica")
 	} else if spec.Mode.Replicated != nil && spec.Mode.Replicated.Replicas > 0 {
 		replicas = int32(spec.Mode.Replicated.Replicas)
 	}
@@ -544,11 +545,11 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 						// If an NFS StorageClass is available, use it with RWX access.
 						// This handles docker stack deploy which never calls POST /volumes/create.
 						if nfsSC, hasNFS := a.anyNFSStorageClass(); hasNFS {
-							a.logger.Infow("creating NFS PVC for volume mount via stack deploy", "pvc", pvcName, "storageClass", nfsSC, "service", name)
+							log.Info().Str("context", "KubernetesAdapter").Any("pvc", pvcName).Any("storage_class", nfsSC).Any("service", name).Msg("Creating NFS PVC for volume mount via stack deploy")
 							pvcSpec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}
 							pvcSpec.StorageClassName = &nfsSC
 						} else {
-							a.logger.Warnw("PVC not found for volume mount; creating fallback PVC", "pvc", pvcName, "service", name)
+							log.Warn().Str("context", "KubernetesAdapter").Any("pvc", pvcName).Any("service", name).Msg("PVC not found for volume mount; creating fallback PVC")
 							pvcSpec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
 						}
 						fallbackPVC := &corev1.PersistentVolumeClaim{
@@ -588,7 +589,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			})
 		default:
 			// Unknown type — skip rather than fail the whole deploy.
-			a.logger.Warnw("unsupported mount type; skipping", "type", m.Type, "source", m.Source, "target", m.Target)
+			log.Warn().Str("context", "KubernetesAdapter").Any("type", m.Type).Any("source", m.Source).Any("target", m.Target).Msg("Unsupported mount type; skipping")
 			continue
 		}
 
@@ -1168,7 +1169,7 @@ func (a *KubernetesDockerAdapter) SwarmServiceLogs(ctx context.Context, w io.Wri
 			req := a.client.CoreV1().Pods(a.namespace).GetLogs(name, logOpts)
 			stream, streamErr := req.Stream(ctx)
 			if streamErr != nil {
-				a.logger.Warnw("unable to stream logs for pod", "pod", name, "error", streamErr)
+				log.Warn().Str("context", "KubernetesAdapter").Any("pod", name).Err(streamErr).Msg("Unable to stream logs for pod")
 				return
 			}
 			defer func() { _ = stream.Close() }()
@@ -2379,16 +2380,14 @@ func (a *KubernetesDockerAdapter) injectQuotaDefaults(ctx context.Context, reqs 
 	if needsCPU {
 		if _, alreadySet := reqs.Requests[corev1.ResourceCPU]; !alreadySet {
 			reqs.Requests[corev1.ResourceCPU] = resource.MustParse("10m")
-			a.logger.Infow("injected requests.cpu to satisfy namespace ResourceQuota",
-				"namespace", a.namespace, "value", "10m")
+			log.Info().Str("context", "KubernetesAdapter").Any("namespace", a.namespace).Any("value", "10m").Msg("Injected requests.cpu to satisfy namespace ResourceQuota")
 		}
 	}
 
 	if needsMem {
 		if _, alreadySet := reqs.Requests[corev1.ResourceMemory]; !alreadySet {
 			reqs.Requests[corev1.ResourceMemory] = resource.MustParse("32Mi")
-			a.logger.Infow("injected requests.memory to satisfy namespace ResourceQuota",
-				"namespace", a.namespace, "value", "32Mi")
+			log.Info().Str("context", "KubernetesAdapter").Any("namespace", a.namespace).Any("value", "32Mi").Msg("Injected requests.memory to satisfy namespace ResourceQuota")
 		}
 	}
 
