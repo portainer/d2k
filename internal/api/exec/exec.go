@@ -125,7 +125,7 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteError(w, http.StatusInternalServerError, fmt.Sprintf("hijack failed: %s", err))
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if instance.opts.Tty {
 		_, err = conn.Write([]byte("HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"))
@@ -156,7 +156,7 @@ func (h *Handler) startWebSocket(w http.ResponseWriter, r *http.Request, instanc
 		h.logger.Errorw("WebSocket upgrade failed", "error", err)
 		return
 	}
-	defer wsConn.Close()
+	defer func() { _ = wsConn.Close() }()
 
 	stdinR, stdinW := io.Pipe()
 	stdoutR, stdoutW := io.Pipe()
@@ -164,7 +164,7 @@ func (h *Handler) startWebSocket(w http.ResponseWriter, r *http.Request, instanc
 
 	// WebSocket → stdin
 	go func() {
-		defer stdinW.Close()
+		defer func() { _ = stdinW.Close() }()
 		for {
 			_, msg, err := wsConn.ReadMessage()
 			if err != nil {
@@ -172,20 +172,20 @@ func (h *Handler) startWebSocket(w http.ResponseWriter, r *http.Request, instanc
 			}
 			if len(msg) > 1 {
 				// First byte is stream type, rest is data.
-				stdinW.Write(msg[1:])
+				_, _ = stdinW.Write(msg[1:])
 			}
 		}
 	}()
 
 	// stdout → WebSocket
 	go func() {
-		defer stdoutR.Close()
+		defer func() { _ = stdoutR.Close() }()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := stdoutR.Read(buf)
 			if n > 0 {
 				frame := append([]byte{1}, buf[:n]...)
-				wsConn.WriteMessage(websocket.BinaryMessage, frame)
+				_ = wsConn.WriteMessage(websocket.BinaryMessage, frame)
 			}
 			if err != nil {
 				return
@@ -195,13 +195,13 @@ func (h *Handler) startWebSocket(w http.ResponseWriter, r *http.Request, instanc
 
 	// stderr → WebSocket
 	go func() {
-		defer stderrR.Close()
+		defer func() { _ = stderrR.Close() }()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := stderrR.Read(buf)
 			if n > 0 {
 				frame := append([]byte{2}, buf[:n]...)
-				wsConn.WriteMessage(websocket.BinaryMessage, frame)
+				_ = wsConn.WriteMessage(websocket.BinaryMessage, frame)
 			}
 			if err != nil {
 				return
@@ -214,8 +214,8 @@ func (h *Handler) startWebSocket(w http.ResponseWriter, r *http.Request, instanc
 		h.logger.Warnw("WebSocket exec stream ended", "error", err)
 	}
 
-	stdoutW.Close()
-	stderrW.Close()
+	_ = stdoutW.Close()
+	_ = stderrW.Close()
 }
 
 // Inspect handles GET /exec/{id}/json.
@@ -256,29 +256,6 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 			"user":       "",
 		},
 	})
-}
-
-// streamToWriter reads from r and writes to w with Docker multiplexed framing.
-func streamToWriter(w io.Writer, streamType byte, r io.Reader) {
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			header := []byte{
-				streamType,
-				0, 0, 0,
-				byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n),
-			}
-			w.Write(header)
-			w.Write(buf[:n])
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
 }
 
 func containerIDFromPath(path string) string {

@@ -104,7 +104,7 @@ func (h *Handler) Pull(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf(`{"status":"Status: Image will be pulled by Kubernetes when scheduled: %s"}`, ref),
 	}
 	for _, e := range events {
-		fmt.Fprintln(w, e)
+		_, _ = fmt.Fprintln(w, e)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}

@@ -37,7 +37,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("unable to initialise logger: %s", err)
 	}
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	logger.Infow("starting d2k",
 		"namespace", cfg.Namespace,

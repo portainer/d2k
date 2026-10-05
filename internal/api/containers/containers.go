@@ -398,7 +398,7 @@ func (h *Handler) Logs(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer logs.Close()
+	defer func() { _ = logs.Close() }()
 
 	w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
 	if opts.Follow {
@@ -415,8 +415,8 @@ func (h *Handler) Logs(w http.ResponseWriter, r *http.Request) {
 				0, 0, 0,
 				byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n),
 			}
-			w.Write(header)
-			w.Write(buf[:n])
+			_, _ = w.Write(header)
+			_, _ = w.Write(buf[:n])
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
@@ -503,7 +503,7 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 
-		fmt.Fprintln(w, mustJSON(stats))
+		_, _ = fmt.Fprintln(w, mustJSON(stats))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}

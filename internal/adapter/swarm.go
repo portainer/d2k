@@ -399,11 +399,12 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		rhs := strings.TrimSpace(parts[1])
 		switch {
 		case lhs == "node.role":
-			if rhs == "worker" {
+			switch rhs {
+			case "worker":
 				// Workers have no affirmative label in Kubernetes — use affinity
 				// to exclude control-plane nodes instead.
 				workerAffinity = true
-			} else if rhs == "manager" {
+			case "manager":
 				nodeSelector["node-role.kubernetes.io/control-plane"] = ""
 			}
 		case lhs == "node.hostname":
@@ -1170,12 +1171,12 @@ func (a *KubernetesDockerAdapter) SwarmServiceLogs(ctx context.Context, w io.Wri
 				a.logger.Warnw("unable to stream logs for pod", "pod", name, "error", streamErr)
 				return
 			}
-			defer stream.Close()
+			defer func() { _ = stream.Close() }()
 
 			// Close the stream if the context is cancelled (client disconnected).
 			go func() {
 				<-ctx.Done()
-				stream.Close()
+				_ = stream.Close()
 			}()
 
 			// Build the Docker swarm details prefix the CLI requires.
@@ -1401,7 +1402,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateSecret(ctx context.Context, body io
 
 	// Store the original Swarm name as an annotation so list/inspect can
 	// return the underscore form that the CLI and compose files expect.
-	secret.ObjectMeta.Annotations = map[string]string{
+	secret.Annotations = map[string]string{
 		"d2k.portainer.io/swarm-name": req.Name,
 	}
 
@@ -1507,7 +1508,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateConfig(ctx context.Context, body io
 		Data: map[string]string{k8sName: req.Data},
 	}
 
-	cm.ObjectMeta.Annotations = map[string]string{
+	cm.Annotations = map[string]string{
 		"d2k.portainer.io/swarm-name": req.Name,
 	}
 
@@ -2066,16 +2067,15 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointDNSRR(ctx context.Context,
 			if strings.Contains(nodeIP, ":") {
 				cidr = nodeIP + "/128"
 			}
-			nodeIPs = append(nodeIPs, map[string]any{
+			// The README documents dnsrr endpoints as returning these node IPs, but
+			// they are not returned; real Docker returns no VIPs for dnsrr. Left
+			// for the Swarm phase to decide.
+			nodeIPs = append(nodeIPs, map[string]any{ //nolint:staticcheck // see above
 				"NetworkID": networkIDForName(d.Name, a.namespace),
 				"Addr":      cidr,
 			})
 		}
 	}
-	if nodeIPs == nil {
-		nodeIPs = []any{}
-	}
-
 	return map[string]any{
 		"Spec": map[string]any{
 			"Mode":  "dnsrr",

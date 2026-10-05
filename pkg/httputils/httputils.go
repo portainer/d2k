@@ -21,7 +21,7 @@ func WriteError(w http.ResponseWriter, status int, message string) {
 
 // ParseJSON decodes the request body into v.
 func ParseJSON(r *http.Request, v any) error {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	return json.NewDecoder(r.Body).Decode(v)
 }
 

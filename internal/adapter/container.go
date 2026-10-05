@@ -658,7 +658,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 	if running {
 		state.Status = "running"
 		state.Running = true
-		state.StartedAt = d.CreationTimestamp.Time.Format(time.RFC3339)
+		state.StartedAt = d.CreationTimestamp.Format(time.RFC3339)
 	}
 
 	hostConfig := &container.HostConfig{
@@ -688,7 +688,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 			ID:         string(d.UID),
 			Name:       "/" + dockerName(d),
 			Image:      d.Annotations[types.AnnotationImageRef],
-			Created:    d.CreationTimestamp.Time.Format(time.RFC3339),
+			Created:    d.CreationTimestamp.Format(time.RFC3339),
 			State:      state,
 			HostConfig: hostConfig,
 		},
@@ -954,7 +954,7 @@ func (a *KubernetesDockerAdapter) ensureProjectDNSService(ctx context.Context, p
 			return fmt.Errorf("unable to get Service %q: %w", name, err)
 		}
 		if existing.Labels[types.LabelManagedBy] != types.LabelManagedByValue || existing.Labels[types.LabelComposeProject] != label {
-			return errdefs.Conflict(fmt.Errorf("Service %q, needed for the DNS of compose project %q, is already in use", name, project))
+			return errdefs.Conflict(fmt.Errorf("service %q, needed for the DNS of compose project %q, is already in use", name, project))
 		}
 		existing.OwnerReferences = append(existing.OwnerReferences, ownerRef)
 		_, err = a.client.CoreV1().Services(a.namespace).Update(ctx, existing, metav1.UpdateOptions{})

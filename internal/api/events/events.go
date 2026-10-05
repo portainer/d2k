@@ -45,8 +45,8 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			w.Write(b)
-			w.Write([]byte("\n"))
+			_, _ = w.Write(b)
+			_, _ = w.Write([]byte("\n"))
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}

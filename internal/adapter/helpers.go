@@ -38,18 +38,16 @@ func sanitiseLabelValue(v string) (string, bool) {
 	if v == "" {
 		return v, true
 	}
+	isAlnum := func(r rune) bool {
+		return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9'
+	}
 	for _, r := range v {
-		if !('a' <= r && r <= 'z') && !('A' <= r && r <= 'Z') && !('0' <= r && r <= '9') && r != '-' && r != '_' && r != '.' {
+		if !isAlnum(r) && r != '-' && r != '_' && r != '.' {
 			return "", false
 		}
 	}
 	// Must start and end with alphanumeric.
-	first := rune(v[0])
-	last := rune(v[len(v)-1])
-	if !('a' <= first && first <= 'z') && !('A' <= first && first <= 'Z') && !('0' <= first && first <= '9') {
-		return "", false
-	}
-	if !('a' <= last && last <= 'z') && !('A' <= last && last <= 'Z') && !('0' <= last && last <= '9') {
+	if !isAlnum(rune(v[0])) || !isAlnum(rune(v[len(v)-1])) {
 		return "", false
 	}
 	return v, true

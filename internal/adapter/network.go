@@ -10,10 +10,6 @@ import (
 	"github.com/portainer/d2k/internal/types"
 )
 
-const (
-	syntheticNetworkDriver = "d2k"
-)
-
 // NetworkIPAM is the IPAM configuration for a network.
 type NetworkIPAM struct {
 	Driver string       `json:"Driver"`
