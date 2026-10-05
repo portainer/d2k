@@ -92,8 +92,14 @@ standalone_cases() {
   check "stop scales to 0" bash -c "docker stop e2e-web >/dev/null && [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-web -o jsonpath={.spec.replicas})\" = 0 ]"
   check "start scales to 1" bash -c "docker start e2e-web >/dev/null && [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-web -o jsonpath={.spec.replicas})\" = 1 ]"
   eventually 60 bash -c '[ "$(docker inspect -f {{.State.Status}} e2e-web)" = running ]'
-  known "Phase 4" "exec (non-TTY) returns output" bash -c '[ "$(perl -e "alarm 20; exec @ARGV" docker exec e2e-web echo hi)" = hi ]'
-  known "Phase 4" "exec (TTY) returns output" bash -c 'perl -e "alarm 20; exec @ARGV" docker exec -t e2e-web echo hi | grep -q hi'
+  check "exec returns output" bash -c '[ "$(perl -e "alarm 20; exec @ARGV" docker exec e2e-web echo hi)" = hi ]'
+  check "exec with a TTY returns output" bash -c 'perl -e "alarm 20; exec @ARGV" docker exec -t e2e-web echo hi | grep -q hi'
+  check "exec returns the exit code" bash -c 'docker exec e2e-web sh -c "exit 3"; [ $? = 3 ]'
+  check "exec passes stdin" bash -c '[ "$(echo hello | perl -e "alarm 20; exec @ARGV" docker exec -i e2e-web cat)" = hello ]'
+  check "exec keeps stderr separate" bash -c '[ -z "$(docker exec e2e-web sh -c "echo err >&2" 2>/dev/null)" ] && [ "$(docker exec e2e-web sh -c "echo err >&2" 2>&1 >/dev/null)" = err ]'
+  # The resize reaches the process asynchronously, hence the sleep.
+  check "exec TTY gets the client's terminal size" bash -c "python3 $(dirname "$0")/run_in_terminal.py docker exec -it e2e-web sh -c 'sleep 1; ttysize' | grep -q '120 40'"
+  check "exec as another user is refused" bash -c 'docker exec -u root e2e-web id 2>&1 | grep -q "not supported by d2k"'
 
   # Docker lifecycle states: create does not start.
   docker create --name e2e-life nginx:alpine >/dev/null

@@ -52,8 +52,9 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool) h
 		}
 		c.DispatchAction(w, r)
 	})
-	mux.HandleFunc("POST /exec/", e.Start)
-	mux.HandleFunc("GET /exec/", e.Inspect)
+	mux.HandleFunc("POST /exec/{id}/start", e.Start)
+	mux.HandleFunc("POST /exec/{id}/resize", e.Resize)
+	mux.HandleFunc("GET /exec/{id}/json", e.Inspect)
 	mux.HandleFunc("DELETE /containers/", c.Remove)
 	mux.HandleFunc("GET /containers/", c.DispatchGet) // /containers/{id}/json|logs
 

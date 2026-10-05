@@ -4,7 +4,6 @@ go 1.26
 
 require (
 	github.com/getkin/kin-openapi v0.149.0
-	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/moby/moby/api v1.52.0
 	github.com/rs/zerolog v1.35.1
 	github.com/sethvargo/go-envconfig v0.9.0
@@ -27,6 +26,7 @@ require (
 	github.com/go-openapi/swag/jsonname v0.25.5 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect

@@ -1,267 +1,324 @@
+// Package exec implements the Docker Engine exec endpoints:
+//
+//	POST /containers/{id}/exec -> create an exec instance
+//	POST /exec/{id}/start      -> run it, streaming over the hijacked connection
+//	POST /exec/{id}/resize     -> resize its TTY
+//	GET  /exec/{id}/json       -> inspect it, including its exit code
 package exec
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/moby/moby/api/types/container"
 	"github.com/rs/zerolog/log"
+	"k8s.io/client-go/tools/remotecommand"
 
-	"github.com/gorilla/websocket"
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/errdefs"
+	"github.com/portainer/d2k/internal/streams"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
-// Handler holds dependencies for exec API endpoints.
+// finishedRetention is how long a finished exec instance stays inspectable.
+const finishedRetention = 10 * time.Minute
+
+// Handler holds the exec instances, which live in memory as in the daemon.
 type Handler struct {
 	adapter   *adapter.KubernetesDockerAdapter
 	mu        sync.Mutex
-	instances map[string]*execInstance
+	instances map[string]*instance
 }
 
-type execInstance struct {
+type instance struct {
+	id          string
 	containerID string
 	opts        adapter.ExecOptions
+	resize      *sizeQueue
+
+	mu       sync.Mutex
+	started  bool
+	running  bool
+	exitCode *int
+	finished time.Time
 }
 
 // NewHandler creates a Handler.
 func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
-	return &Handler{
-		adapter:   a,
-		instances: map[string]*execInstance{},
-	}
-}
-
-// createBody mirrors the Docker exec create request body.
-type createBody struct {
-	Cmd          []string `json:"Cmd"`
-	AttachStdin  bool     `json:"AttachStdin"`
-	AttachStdout bool     `json:"AttachStdout"`
-	AttachStderr bool     `json:"AttachStderr"`
-	Tty          bool     `json:"Tty"`
+	return &Handler{adapter: a, instances: map[string]*instance{}}
 }
 
 // Create handles POST /containers/{id}/exec.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	containerID := containerIDFromPath(r.URL.Path)
+	var req container.ExecCreateRequest
+	if err := httputils.ParseJSON(r, &req); err != nil {
+		httputils.WriteError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
+		return
+	}
+	if len(req.Cmd) == 0 {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(errors.New("no exec command specified")))
+		return
+	}
+	// Kubernetes runs exec processes as the container's user, in its working
+	// directory and environment: refuse rather than run them differently.
+	var unsupported []string
+	if req.User != "" {
+		unsupported = append(unsupported, "user")
+	}
+	if req.WorkingDir != "" {
+		unsupported = append(unsupported, "working directory")
+	}
+	if len(req.Env) > 0 {
+		unsupported = append(unsupported, "environment variables")
+	}
+	if req.Privileged {
+		unsupported = append(unsupported, "privileged mode")
+	}
+	if len(unsupported) > 0 {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(fmt.Errorf("exec with a custom %s is not supported by d2k", strings.Join(unsupported, ", "))))
+		return
+	}
 
-	var body createBody
-	if err := httputils.ParseJSON(r, &body); err != nil {
-		httputils.WriteError(w, http.StatusBadRequest, err.Error())
+	name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/containers/"), "/exec")
+	ctr, err := h.adapter.InspectContainer(r.Context(), name)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	if !ctr.State.Running {
+		httputils.WriteErrorFrom(w, errdefs.Conflict(fmt.Errorf("container %s is not running", ctr.ID)))
 		return
 	}
 
 	b := make([]byte, 32)
-	rand.Read(b)
-	id := hex.EncodeToString(b)
+	_, _ = rand.Read(b)
+	inst := &instance{
+		id:          hex.EncodeToString(b),
+		containerID: ctr.ID,
+		opts: adapter.ExecOptions{
+			Name:         ctr.ID,
+			Cmd:          req.Cmd,
+			AttachStdin:  req.AttachStdin,
+			AttachStdout: req.AttachStdout,
+			AttachStderr: req.AttachStderr,
+			Tty:          req.Tty,
+		},
+		resize: newSizeQueue(),
+	}
+	if req.ConsoleSize != nil {
+		inst.resize.push(req.ConsoleSize[0], req.ConsoleSize[1])
+	}
 
 	h.mu.Lock()
-	h.instances[id] = &execInstance{
-		containerID: containerID,
-		opts: adapter.ExecOptions{
-			Name:         containerID,
-			Cmd:          body.Cmd,
-			AttachStdin:  body.AttachStdin,
-			AttachStdout: body.AttachStdout,
-			AttachStderr: body.AttachStderr,
-			Tty:          body.Tty,
-		},
+	for id, old := range h.instances {
+		if old.isFinishedBefore(time.Now().Add(-finishedRetention)) {
+			delete(h.instances, id)
+		}
 	}
+	h.instances[inst.id] = inst
 	h.mu.Unlock()
 
-	httputils.WriteJSON(w, http.StatusCreated, map[string]any{
-		"Id": id,
-	})
+	httputils.WriteJSON(w, http.StatusCreated, map[string]string{"Id": inst.id})
 }
 
-// startBody mirrors the Docker exec start request body.
-type startBody struct {
-	Detach bool `json:"Detach"`
-	Tty    bool `json:"Tty"`
-}
-
-// Start handles POST /exec/{id}/start.
 // Start handles POST /exec/{id}/start.
 func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
-	id := execIDFromPath(r.URL.Path)
-
-	h.mu.Lock()
-	instance, ok := h.instances[id]
-	h.mu.Unlock()
-
+	inst, ok := h.lookup(w, r)
 	if !ok {
-		httputils.WriteError(w, http.StatusNotFound, fmt.Sprintf("exec instance %q not found", id))
+		return
+	}
+	var req container.ExecStartRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		httputils.WriteError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
+		return
+	}
+	if !inst.markStarted() {
+		httputils.WriteErrorFrom(w, errdefs.Conflict(fmt.Errorf("exec %s has already been started", inst.id)))
+		return
+	}
+	if req.ConsoleSize != nil {
+		inst.resize.push(req.ConsoleSize[0], req.ConsoleSize[1])
+	}
+
+	if req.Detach {
+		// run logs the error: a detached exec has no client to report it to.
+		go func() { _ = h.run(context.Background(), inst, adapter.ExecStreams{Resize: inst.resize}) }()
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	var body startBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
-		httputils.WriteError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// Detect WebSocket upgrade (Portainer browser console).
-	if websocket.IsWebSocketUpgrade(r) {
-		h.startWebSocket(w, r, instance)
-		return
-	}
-
-	// Raw TCP hijack (Docker CLI).
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		httputils.WriteError(w, http.StatusInternalServerError, "connection hijacking not supported")
-		return
-	}
-
-	conn, brw, err := hijacker.Hijack()
+	conn, in, err := streams.Hijack(w, r, inst.opts.Tty)
 	if err != nil {
-		httputils.WriteError(w, http.StatusInternalServerError, fmt.Sprintf("hijack failed: %s", err))
+		inst.finish(0)
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	defer func() { _ = conn.Close() }()
 
-	if instance.opts.Tty {
-		_, err = conn.Write([]byte("HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"))
-	} else {
-		_, err = conn.Write([]byte("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.docker.multiplexed-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"))
+	s := adapter.ExecStreams{Resize: inst.resize}
+	if inst.opts.AttachStdin {
+		s.Stdin = in
 	}
-	if err != nil {
-		return
+	switch {
+	case inst.opts.Tty:
+		if inst.opts.AttachStdout || inst.opts.AttachStderr {
+			s.Stdout = conn
+		}
+	default:
+		if inst.opts.AttachStdout {
+			s.Stdout = streams.Multiplexed(conn, streams.Stdout)
+		}
+		if inst.opts.AttachStderr {
+			s.Stderr = streams.Multiplexed(conn, streams.Stderr)
+		}
 	}
-
-	opts := instance.opts
-	if err := h.adapter.ExecContainer(r.Context(), opts, brw, brw, brw); err != nil {
-		log.Warn().Str("context", "ExecAPI").Any("id", id).Err(err).Msg("Exec stream ended")
+	// After the hijack the request's context is cancelled when the client
+	// closes its side, as `docker exec -i` does once stdin is sent; the
+	// command still owes its output. The stream ends with the command.
+	if err := h.run(context.WithoutCancel(r.Context()), inst, s); err != nil {
+		// The client has no other channel for the error: write it to the stream.
+		msg := []byte(err.Error() + "\r\n")
+		if !inst.opts.Tty {
+			_, _ = streams.Multiplexed(conn, streams.Stderr).Write(msg)
+		} else {
+			_, _ = conn.Write(msg)
+		}
 	}
 }
 
-// startWebSocket handles the Portainer browser console path.
-// Portainer connects via WebSocket and uses a simple framing protocol:
-// - Incoming frames: first byte is stream type (0=stdin), rest is data
-// - Outgoing frames: first byte is stream type (1=stdout, 2=stderr), rest is data
-func (h *Handler) startWebSocket(w http.ResponseWriter, r *http.Request, instance *execInstance) {
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
-
-	wsConn, err := upgrader.Upgrade(w, r, nil)
+// run executes the instance and records its exit code.
+func (h *Handler) run(ctx context.Context, inst *instance, s adapter.ExecStreams) error {
+	code, err := h.adapter.ExecContainer(ctx, inst.opts, s)
 	if err != nil {
-		log.Error().Str("context", "ExecAPI").Err(err).Msg("WebSocket upgrade failed")
+		log.Warn().Str("context", "ExecAPI").Str("exec_id", inst.id).Err(err).Msg("Exec failed")
+		code = 126 // as the daemon reports a command that could not be run
+	}
+	inst.finish(code)
+	inst.resize.close()
+	return err
+}
+
+// Resize handles POST /exec/{id}/resize.
+func (h *Handler) Resize(w http.ResponseWriter, r *http.Request) {
+	inst, ok := h.lookup(w, r)
+	if !ok {
 		return
 	}
-	defer func() { _ = wsConn.Close() }()
-
-	stdinR, stdinW := io.Pipe()
-	stdoutR, stdoutW := io.Pipe()
-	stderrR, stderrW := io.Pipe()
-
-	// WebSocket → stdin
-	go func() {
-		defer func() { _ = stdinW.Close() }()
-		for {
-			_, msg, err := wsConn.ReadMessage()
-			if err != nil {
-				return
-			}
-			if len(msg) > 1 {
-				// First byte is stream type, rest is data.
-				_, _ = stdinW.Write(msg[1:])
-			}
-		}
-	}()
-
-	// stdout → WebSocket
-	go func() {
-		defer func() { _ = stdoutR.Close() }()
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := stdoutR.Read(buf)
-			if n > 0 {
-				frame := append([]byte{1}, buf[:n]...)
-				_ = wsConn.WriteMessage(websocket.BinaryMessage, frame)
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	// stderr → WebSocket
-	go func() {
-		defer func() { _ = stderrR.Close() }()
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := stderrR.Read(buf)
-			if n > 0 {
-				frame := append([]byte{2}, buf[:n]...)
-				_ = wsConn.WriteMessage(websocket.BinaryMessage, frame)
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	opts := instance.opts
-	if err := h.adapter.ExecContainer(r.Context(), opts, stdinR, stdoutW, stderrW); err != nil {
-		log.Warn().Str("context", "ExecAPI").Err(err).Msg("WebSocket exec stream ended")
+	height, errH := strconv.ParseUint(r.URL.Query().Get("h"), 10, 16)
+	width, errW := strconv.ParseUint(r.URL.Query().Get("w"), 10, 16)
+	if errH != nil || errW != nil {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(errors.New("invalid terminal size: h and w must be numbers")))
+		return
 	}
-
-	_ = stdoutW.Close()
-	_ = stderrW.Close()
+	inst.resize.push(uint(height), uint(width))
+	w.WriteHeader(http.StatusOK)
 }
 
 // Inspect handles GET /exec/{id}/json.
 func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
-	id := execIDFromPath(r.URL.Path)
-
-	h.mu.Lock()
-	instance, ok := h.instances[id]
-	h.mu.Unlock()
-
+	inst, ok := h.lookup(w, r)
 	if !ok {
-		httputils.WriteError(w, http.StatusNotFound, fmt.Sprintf("exec instance %q not found", id))
 		return
 	}
+	inst.mu.Lock()
+	running, exitCode := inst.running, inst.exitCode
+	inst.mu.Unlock()
 
-	entrypoint := ""
-	args := []string{}
-	if len(instance.opts.Cmd) > 0 {
-		entrypoint = instance.opts.Cmd[0]
-	}
-	if len(instance.opts.Cmd) > 1 {
-		args = instance.opts.Cmd[1:]
-	}
-
-	httputils.WriteJSON(w, http.StatusOK, map[string]any{
-		"ID":          id,
-		"ContainerID": instance.containerID,
-		"Running":     false,
-		"ExitCode":    0,
-		"OpenStdin":   instance.opts.AttachStdin,
-		"OpenStdout":  instance.opts.AttachStdout,
-		"OpenStderr":  instance.opts.AttachStderr,
-		"ProcessConfig": map[string]any{
-			"entrypoint": entrypoint,
-			"arguments":  args,
-			"tty":        instance.opts.Tty,
-			"privileged": false,
-			"user":       "",
+	httputils.WriteJSON(w, http.StatusOK, container.ExecInspectResponse{
+		ID:          inst.id,
+		Running:     running,
+		ExitCode:    exitCode,
+		ContainerID: inst.containerID,
+		OpenStdin:   inst.opts.AttachStdin,
+		OpenStdout:  inst.opts.AttachStdout,
+		OpenStderr:  inst.opts.AttachStderr,
+		ProcessConfig: &container.ExecProcessConfig{
+			Tty:        inst.opts.Tty,
+			Entrypoint: inst.opts.Cmd[0],
+			Arguments:  inst.opts.Cmd[1:],
 		},
 	})
 }
 
-func containerIDFromPath(path string) string {
-	parts := strings.Split(strings.TrimPrefix(path, "/containers/"), "/")
-	return parts[0]
+func (h *Handler) lookup(w http.ResponseWriter, r *http.Request) (*instance, bool) {
+	h.mu.Lock()
+	inst, ok := h.instances[r.PathValue("id")]
+	h.mu.Unlock()
+	if !ok {
+		httputils.WriteErrorFrom(w, errdefs.NotFound(fmt.Errorf("no such exec instance: %s", r.PathValue("id"))))
+	}
+	return inst, ok
 }
 
-func execIDFromPath(path string) string {
-	parts := strings.Split(strings.TrimPrefix(path, "/exec/"), "/")
-	return parts[0]
+func (i *instance) markStarted() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.started {
+		return false
+	}
+	i.started, i.running = true, true
+	return true
 }
+
+func (i *instance) finish(code int) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.running, i.exitCode, i.finished = false, &code, time.Now()
+}
+
+func (i *instance) isFinishedBefore(t time.Time) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.exitCode != nil && i.finished.Before(t)
+}
+
+// sizeQueue feeds terminal resizes to the exec stream. It keeps only the
+// latest size, as a terminal only cares about its current one.
+type sizeQueue struct {
+	sizes chan remotecommand.TerminalSize
+	once  sync.Once
+	done  chan struct{}
+}
+
+func newSizeQueue() *sizeQueue {
+	return &sizeQueue{sizes: make(chan remotecommand.TerminalSize, 1), done: make(chan struct{})}
+}
+
+func (q *sizeQueue) push(height, width uint) {
+	size := remotecommand.TerminalSize{Height: uint16(height), Width: uint16(width)}
+	select {
+	case <-q.done:
+		return
+	default:
+	}
+	select {
+	case <-q.sizes: // drop a size not yet applied
+	default:
+	}
+	select {
+	case q.sizes <- size:
+	default:
+	}
+}
+
+// Next blocks until a resize, or returns nil once the exec has ended.
+func (q *sizeQueue) Next() *remotecommand.TerminalSize {
+	select {
+	case size := <-q.sizes:
+		return &size
+	case <-q.done:
+		return nil
+	}
+}
+
+func (q *sizeQueue) close() { q.once.Do(func() { close(q.done) }) }
