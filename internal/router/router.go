@@ -4,6 +4,7 @@ package router
 
 import (
 	"net/http"
+	"regexp"
 	"strings"
 
 	"go.uber.org/zap"
@@ -120,22 +121,30 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 
 	// Versioned path prefix stripping - Docker CLI sends /v1.41/containers/json etc.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/v") {
-			// Find the end of the version segment, e.g. /v1.41/...
-			rest := r.URL.Path[1:] // strip leading /
-			if idx := strings.Index(rest, "/"); idx != -1 {
-				r2 := r.Clone(r.Context())
-				// Clone the URL to avoid mutating the original request's URL,
-				// which would corrupt logging and any subsequent middleware reads.
-				urlCopy := *r.URL
-				urlCopy.Path = rest[idx:] // /containers/json etc.
-				r2.URL = &urlCopy
-				mux.ServeHTTP(w, r2)
-				return
-			}
+		if path := stripAPIVersion(r.URL.Path); path != r.URL.Path {
+			r2 := r.Clone(r.Context())
+			// Clone the URL to avoid mutating the original request's URL,
+			// which would corrupt logging and any subsequent middleware reads.
+			urlCopy := *r.URL
+			urlCopy.Path = path
+			r2.URL = &urlCopy
+			mux.ServeHTTP(w, r2)
+			return
 		}
 		mux.ServeHTTP(w, r)
 	})
 
 	return middleware.Logging(logger)(middleware.RequestID(handler))
+}
+
+// apiVersionPrefix matches the API version prefix Docker clients send, e.g. "/v1.41".
+var apiVersionPrefix = regexp.MustCompile(`^/v[0-9]+\.[0-9]+/`)
+
+// stripAPIVersion removes a leading /v<major>.<minor> segment. Unversioned
+// paths such as /volumes/create are returned unchanged.
+func stripAPIVersion(path string) string {
+	if loc := apiVersionPrefix.FindStringIndex(path); loc != nil {
+		return path[loc[1]-1:]
+	}
+	return path
 }

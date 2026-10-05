@@ -25,10 +25,13 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/errdefs"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -439,6 +442,15 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		// The secret was stored under the sanitised name (underscores → hyphens).
 		// Use the same sanitisation here so the volume reference matches.
 		k8sSecretName := sanitiseResourceName(s.SecretName)
+		// Only Swarm secrets are mountable; any other Secret in the namespace
+		// (e.g. d2k's own TLS key) must stay out of reach of the Docker API.
+		existing, err := a.client.CoreV1().Secrets(a.namespace).Get(ctx, k8sSecretName, metav1.GetOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			return nil, fmt.Errorf("unable to get secret %q: %w", s.SecretName, err)
+		}
+		if err != nil || existing.Labels[types.LabelSwarmManagedBy] != types.LabelSwarmManagedByValue {
+			return nil, errdefs.InvalidParameter(fmt.Errorf("secret not found: %s", s.SecretName))
+		}
 		targetName := s.File.Name
 		if targetName == "" {
 			targetName = s.SecretName // keep original as the mount filename
@@ -739,6 +751,11 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			if getErr != nil {
 				return nil, fmt.Errorf("service %q already exists and could not be retrieved: %w", name, getErr)
 			}
+			// Only a Swarm service may be updated in place; never overwrite a
+			// standalone container or a workload d2k does not manage.
+			if existing.Labels[types.LabelSwarmManagedBy] != types.LabelSwarmManagedByValue {
+				return nil, errdefs.Conflict(fmt.Errorf("name %q conflicts with an existing object", spec.Name))
+			}
 			deployment.ResourceVersion = existing.ResourceVersion
 			// Preserve the stable swarm service ID annotation from the existing deployment.
 			if existing.Annotations[types.AnnotationSwarmServiceID] != "" {
@@ -842,6 +859,10 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
 			return nil, fmt.Errorf("unable to create DNS service for %q: %w", name, svcErr)
 		}
+		if claimErr := a.claimDNSService(ctx, clusterSvc, name); claimErr != nil {
+			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, name, metav1.DeleteOptions{})
+			return nil, claimErr
+		}
 	}
 
 	// Create a LoadBalancer Service for externally published ports — but only
@@ -887,6 +908,40 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		"ID":       serviceID,
 		"Warnings": warnings,
 	}, nil
+}
+
+// claimDNSService resolves a DNS Service name that already exists. The name is
+// kept if it already belongs to deployName, and reclaimed if its owning service
+// no longer exists. Any other owner is a conflict: sharing the Service would
+// route this service's DNS name to another service's pods.
+func (a *KubernetesDockerAdapter) claimDNSService(ctx context.Context, svc *corev1.Service, deployName string) error {
+	existing, err := a.client.CoreV1().Services(a.namespace).Get(ctx, svc.Name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("unable to get DNS service %q: %w", svc.Name, err)
+	}
+	if existing.Labels[types.LabelSwarmManagedBy] != types.LabelSwarmManagedByValue {
+		return errdefs.Conflict(fmt.Errorf("DNS name %q is already used by a Kubernetes Service not managed by d2k", svc.Name))
+	}
+
+	owner := existing.Labels[types.LabelSwarmService]
+	if owner == deployName {
+		return nil
+	}
+	_, err = a.client.AppsV1().Deployments(a.namespace).Get(ctx, owner, metav1.GetOptions{})
+	if err == nil {
+		return errdefs.Conflict(fmt.Errorf("DNS name %q is already used by service %q", svc.Name, owner))
+	}
+	if !errors.IsNotFound(err) {
+		return fmt.Errorf("unable to look up service %q: %w", owner, err)
+	}
+
+	if err := a.client.CoreV1().Services(a.namespace).Delete(ctx, svc.Name, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("unable to delete stale DNS service %q: %w", svc.Name, err)
+	}
+	if _, err := a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("unable to create DNS service %q: %w", svc.Name, err)
+	}
+	return nil
 }
 
 // SwarmListServices returns all d2k-managed Deployments as Swarm service objects.
@@ -1018,15 +1073,17 @@ func (a *KubernetesDockerAdapter) SwarmDeleteService(ctx context.Context, id str
 			if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, d.Name, metav1.DeleteOptions{}); err != nil {
 				return err
 			}
-			// Delete DNS service (bare name for stack services, full name for standalone).
-			dnsName := d.Name
-			if idx := strings.LastIndex(d.Name, "-"); idx != -1 {
-				if bare := d.Name[idx+1:]; bare != "" {
-					dnsName = bare
+			// Delete the DNS and LB Services, which carry this service's label.
+			// Their names cannot be derived from the Deployment name reliably.
+			svcs, err := a.client.CoreV1().Services(a.namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue + "," +
+					types.LabelSwarmService + "=" + d.Name,
+			})
+			if err == nil {
+				for _, s := range svcs.Items {
+					_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, s.Name, metav1.DeleteOptions{})
 				}
 			}
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, dnsName, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(d.Name)+"-lb", metav1.DeleteOptions{})
 			return nil
 		}
 	}
@@ -1369,8 +1426,8 @@ func (a *KubernetesDockerAdapter) SwarmCreateSecret(ctx context.Context, body io
 	return map[string]any{"ID": swarmID(string(created.UID))}, nil
 }
 
-// SwarmListSecrets returns all d2k-managed Secrets.
-func (a *KubernetesDockerAdapter) SwarmListSecrets(ctx context.Context) ([]map[string]any, error) {
+// SwarmListSecrets returns the d2k-managed Secrets that match args.
+func (a *KubernetesDockerAdapter) SwarmListSecrets(ctx context.Context, args filters.Args) ([]map[string]any, error) {
 	secrets, err := a.client.CoreV1().Secrets(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
 	})
@@ -1380,6 +1437,9 @@ func (a *KubernetesDockerAdapter) SwarmListSecrets(ctx context.Context) ([]map[s
 
 	result := make([]map[string]any, 0, len(secrets.Items))
 	for _, s := range secrets.Items {
+		if !matchesSwarmListFilters(args, swarmID(string(s.UID)), swarmObjectName(s.ObjectMeta), s.Labels) {
+			continue
+		}
 		result = append(result, kubeSecretToSwarm(s))
 	}
 	return result, nil
@@ -1470,7 +1530,7 @@ func (a *KubernetesDockerAdapter) SwarmCreateConfig(ctx context.Context, body io
 }
 
 // SwarmListConfigs returns all d2k-managed ConfigMaps.
-func (a *KubernetesDockerAdapter) SwarmListConfigs(ctx context.Context) ([]map[string]any, error) {
+func (a *KubernetesDockerAdapter) SwarmListConfigs(ctx context.Context, args filters.Args) ([]map[string]any, error) {
 	cms, err := a.client.CoreV1().ConfigMaps(a.namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: types.LabelSwarmManagedBy + "=" + types.LabelSwarmManagedByValue,
 	})
@@ -1482,6 +1542,9 @@ func (a *KubernetesDockerAdapter) SwarmListConfigs(ctx context.Context) ([]map[s
 	for _, c := range cms.Items {
 		// Exclude internal d2k system ConfigMaps from the Swarm config list.
 		if c.Name == types.ConfigMapSwarmIdentity {
+			continue
+		}
+		if !matchesSwarmListFilters(args, swarmID(string(c.UID)), swarmObjectName(c.ObjectMeta), c.Labels) {
 			continue
 		}
 		result = append(result, kubeConfigMapToSwarm(c))
@@ -2191,6 +2254,28 @@ func podImage(p corev1.Pod) string {
 		return p.Spec.Containers[0].Image
 	}
 	return ""
+}
+
+// swarmObjectName returns the Swarm name of a secret or config: the original
+// name stored at create time, falling back to the Kubernetes name.
+func swarmObjectName(meta metav1.ObjectMeta) string {
+	if name := meta.Annotations["d2k.portainer.io/swarm-name"]; name != "" {
+		return name
+	}
+	return meta.Name
+}
+
+// matchesSwarmListFilters applies secret/config list filters as swarmkit does:
+// "name" and "id" match by prefix, "names" matches exactly, "label" by key[=value].
+func matchesSwarmListFilters(args filters.Args, id, name string, labels map[string]string) bool {
+	matchesPrefix := func(prefixes []string, s string) bool {
+		return len(prefixes) == 0 || slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(s, p) })
+	}
+	names := args.Get("names")
+	return matchesPrefix(args.Get("name"), name) &&
+		matchesPrefix(args.Get("id"), id) &&
+		(len(names) == 0 || slices.Contains(names, name)) &&
+		args.MatchKVList("label", labels)
 }
 
 func kubeSecretToSwarm(s corev1.Secret) map[string]any {

@@ -449,11 +449,11 @@ func serviceName(name string) string {
 // --- name/ID resolution ---
 
 func (a *KubernetesDockerAdapter) resolveDeploymentName(ctx context.Context, nameOrID string) (string, error) {
-	_, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, nameOrID, metav1GetOptions())
-	if err == nil {
+	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, nameOrID, metav1GetOptions())
+	if err == nil && d.Labels[types.LabelManagedBy] == types.LabelManagedByValue {
 		return nameOrID, nil
 	}
-	if !errors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return "", fmt.Errorf("unable to look up container %q: %w", nameOrID, err)
 	}
 	list, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
@@ -463,9 +463,6 @@ func (a *KubernetesDockerAdapter) resolveDeploymentName(ctx context.Context, nam
 	for _, d := range list.Items {
 		uid := string(d.UID)
 		if uid == nameOrID {
-			return d.Name, nil
-		}
-		if strings.HasSuffix(d.Name, "-"+nameOrID) {
 			return d.Name, nil
 		}
 		// Match the truncated UID format returned by docker ps (e.g. "2665dc61-cb7").

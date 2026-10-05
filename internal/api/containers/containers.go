@@ -17,11 +17,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/pkg/httputils"
@@ -88,7 +90,14 @@ func (h *Handler) DispatchGet(w http.ResponseWriter, r *http.Request) {
 
 // List handles GET /containers/json (docker ps / docker ps -a).
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true"
+	args, err := httputils.ParseFilters(r, containerFilters)
+	if err != nil {
+		httputils.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// As in the Docker daemon, a status filter implies all containers.
+	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true" || args.Contains("status")
 
 	ctrs, err := h.adapter.ListContainers(r.Context(), all)
 	if err != nil {
@@ -96,6 +105,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	ctrs = filterContainers(ctrs, args)
 
 	type portBinding struct {
 		IP          string `json:"IP"`
@@ -141,6 +151,26 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httputils.WriteJSON(w, http.StatusOK, result)
+}
+
+// containerFilters are the `filters` keys d2k supports on GET /containers/json.
+var containerFilters = map[string]bool{"id": true, "name": true, "label": true, "status": true}
+
+// filterContainers applies list filters with the Docker daemon's matching rules.
+func filterContainers(ctrs []adapter.ContainerSummary, args filters.Args) []adapter.ContainerSummary {
+	result := []adapter.ContainerSummary{}
+	for _, c := range ctrs {
+		if args.Contains("name") && !slices.ContainsFunc(c.Names, func(n string) bool {
+			return args.Match("name", n) || args.Match("name", strings.TrimPrefix(n, "/"))
+		}) {
+			continue
+		}
+		if !args.Match("id", c.ID) || !args.MatchKVList("label", c.Labels) || !args.Match("status", c.State) {
+			continue
+		}
+		result = append(result, c)
+	}
+	return result
 }
 
 // createBody mirrors the subset of the Docker create request body that d2k uses.

@@ -40,6 +40,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/docker/docker/errdefs"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/pkg/httputils"
 )
@@ -143,7 +144,14 @@ func (h *Handler) CreateService(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.adapter.SwarmCreateService(r.Context(), r.Body)
 	if err != nil {
 		h.logger.Warnw("create service failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		switch {
+		case errdefs.IsConflict(err):
+			status = http.StatusConflict
+		case errdefs.IsInvalidParameter(err):
+			status = http.StatusBadRequest
+		}
+		httputils.WriteError(w, status, err.Error())
 		return
 	}
 	h.logger.Infow("create service response", "resp", resp)
@@ -403,9 +411,21 @@ func (h *Handler) CreateSecret(w http.ResponseWriter, r *http.Request) {
 	httputils.WriteJSON(w, http.StatusCreated, resp)
 }
 
+// secretFilters and configFilters are the `filters` keys Docker accepts on
+// GET /secrets and GET /configs.
+var (
+	secretFilters = map[string]bool{"id": true, "label": true, "name": true, "names": true}
+	configFilters = map[string]bool{"id": true, "label": true, "name": true}
+)
+
 // ListSecrets handles GET /secrets.
 func (h *Handler) ListSecrets(w http.ResponseWriter, r *http.Request) {
-	secrets, err := h.adapter.SwarmListSecrets(r.Context())
+	args, err := httputils.ParseFilters(r, secretFilters)
+	if err != nil {
+		httputils.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	secrets, err := h.adapter.SwarmListSecrets(r.Context(), args)
 	if err != nil {
 		h.logger.Warnw("list secrets failed", "error", err)
 		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
@@ -462,7 +482,12 @@ func (h *Handler) CreateConfig(w http.ResponseWriter, r *http.Request) {
 
 // ListConfigs handles GET /configs.
 func (h *Handler) ListConfigs(w http.ResponseWriter, r *http.Request) {
-	configs, err := h.adapter.SwarmListConfigs(r.Context())
+	args, err := httputils.ParseFilters(r, configFilters)
+	if err != nil {
+		httputils.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	configs, err := h.adapter.SwarmListConfigs(r.Context(), args)
 	if err != nil {
 		h.logger.Warnw("list configs failed", "error", err)
 		httputils.WriteError(w, http.StatusInternalServerError, err.Error())

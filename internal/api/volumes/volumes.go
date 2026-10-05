@@ -15,6 +15,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/docker/docker/api/types/filters"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/pkg/httputils"
 )
@@ -32,18 +33,39 @@ func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *
 
 // List handles GET /volumes.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	args, err := httputils.ParseFilters(r, volumeFilters)
+	if err != nil {
+		httputils.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	vols, err := h.adapter.ListVolumes(r.Context())
 	if err != nil {
 		h.logger.Errorw("ListVolumes failed", "error", err)
 		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	vols = filterVolumes(vols, args)
 
 	// Docker wraps the list in a Volumes key.
 	httputils.WriteJSON(w, http.StatusOK, map[string]any{
 		"Volumes":  vols,
 		"Warnings": []string{},
 	})
+}
+
+// volumeFilters are the `filters` keys d2k supports on GET /volumes.
+var volumeFilters = map[string]bool{"name": true, "label": true, "driver": true}
+
+// filterVolumes applies list filters with the Docker daemon's matching rules.
+func filterVolumes(vols []adapter.VolumeSummary, args filters.Args) []adapter.VolumeSummary {
+	result := []adapter.VolumeSummary{}
+	for _, v := range vols {
+		if args.Match("name", v.Name) && args.ExactMatch("driver", v.Driver) && args.MatchKVList("label", v.Labels) {
+			result = append(result, v)
+		}
+	}
+	return result
 }
 
 // createBody mirrors the Docker volume create request body.
