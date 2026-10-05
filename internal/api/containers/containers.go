@@ -28,6 +28,7 @@ import (
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
@@ -59,7 +60,7 @@ func (h *Handler) DispatchAction(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/rename"):
 		h.Rename(w, r)
 	default:
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	}
 }
 
@@ -90,7 +91,7 @@ func (h *Handler) DispatchGet(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/stats"):
 		h.Stats(w, r)
 	default:
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	}
 }
 

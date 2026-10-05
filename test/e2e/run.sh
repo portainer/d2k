@@ -104,6 +104,11 @@ standalone_cases() {
   check "unversioned /volumes/{name} routes" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} localhost:31112/volumes/e2e-vol-raw)" = 200 ]'
   check "volume rm" bash -c 'docker volume rm e2e-vol e2e-vol-raw >/dev/null'
 
+  # Docker Engine API operations d2k does not implement answer 501.
+  check "unsupported operation returns 501" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} localhost:31112/v1.41/system/df)" = 501 ]'
+  check "docker reports an unsupported operation" bash -c 'docker system df 2>&1 | grep -q "not supported by d2k"'
+  check "non-Docker path returns 404" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} localhost:31112/v1.41/not/docker)" = 404 ]'
+
   check "rm deletes the Deployment" bash -c "docker rm -f e2e-web >/dev/null && ! kubectl --context $CONTEXT -n d2k get deploy e2e-web >/dev/null 2>&1"
 }
 

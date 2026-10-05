@@ -43,14 +43,7 @@ func newTestAdapter(t *testing.T, objs ...runtime.Object) (*KubernetesDockerAdap
 		}
 		return false, nil, nil
 	})
-	return &KubernetesDockerAdapter{
-		client:            client,
-		namespace:         testNamespace,
-		logger:            zap.NewNop().Sugar(),
-		prevCPU:           map[string]int64{},
-		networks:          map[string]*NetworkSummary{},
-		nfsStorageClasses: map[string]string{},
-	}, client
+	return NewWithClient(client, testNamespace, zap.NewNop().Sugar()), client
 }
 
 // deployment returns a Deployment in the test namespace with the given UID and labels.

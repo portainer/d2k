@@ -22,6 +22,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
@@ -42,7 +43,7 @@ func (h *Handler) DispatchGet(w http.ResponseWriter, r *http.Request) {
 		h.Inspect(w, r)
 		return
 	}
-	http.NotFound(w, r)
+	apispec.NotRouted(w, r)
 }
 
 // List handles GET /images/json (docker images).

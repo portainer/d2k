@@ -108,21 +108,29 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		opts.Logger.Warnw("cluster DNS not found in /etc/resolv.conf — compose service names will not be scoped to their project")
 	}
 
+	a := NewWithClient(client, opts.Config.Namespace, opts.Logger)
+	a.metricsClient = mc
+	a.restConfig = restCfg
+	a.apiServerHost = apiServerHost(restCfg.Host)
+	a.lowPortThreshold = opts.Config.LowPortThreshold
+	a.gpuResourceName = opts.Config.GPUResourceName
+	a.clusterDNS = clusterDNS
+	a.clusterDomain = clusterDomain
+	return a, nil
+}
+
+// NewWithClient returns an adapter that uses client for the given namespace,
+// without contacting the cluster. Features that need more than the client
+// (exec, metrics, GPU) stay disabled.
+func NewWithClient(client kubernetes.Interface, namespace string, logger *zap.SugaredLogger) *KubernetesDockerAdapter {
 	return &KubernetesDockerAdapter{
 		client:            client,
-		metricsClient:     mc,
-		restConfig:        restCfg,
-		namespace:         opts.Config.Namespace,
-		apiServerHost:     apiServerHost(restCfg.Host),
-		lowPortThreshold:  opts.Config.LowPortThreshold,
-		gpuResourceName:   opts.Config.GPUResourceName,
-		logger:            opts.Logger,
+		namespace:         namespace,
+		logger:            logger,
 		prevCPU:           map[string]int64{},
 		networks:          map[string]*NetworkSummary{},
 		nfsStorageClasses: map[string]string{},
-		clusterDNS:        clusterDNS,
-		clusterDomain:     clusterDomain,
-	}, nil
+	}
 }
 
 // readClusterDNS returns the nameserver and cluster domain from a pod's

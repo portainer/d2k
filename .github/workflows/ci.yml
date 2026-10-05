@@ -46,6 +46,11 @@ jobs:
       - name: "[execution] build"
         run: go build ./...
 
+      - name: "[validation] route table matches the pinned API spec"
+        run: |
+          go generate ./internal/apispec
+          git diff --exit-code internal/apispec/routes_gen.go
+
       - name: "[execution] vet"
         run: go vet ./...
 

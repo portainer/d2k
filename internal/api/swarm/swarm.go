@@ -42,6 +42,7 @@ import (
 
 	"github.com/docker/docker/errdefs"
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
@@ -115,7 +116,7 @@ func (h *Handler) DispatchNode(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.inspectNode(w, r, path)
 	default:
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	}
 }
 
@@ -263,7 +264,7 @@ func (h *Handler) DispatchService(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet:
 		h.inspectService(w, r, path)
 	default:
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	}
 }
 
@@ -463,7 +464,7 @@ func (h *Handler) DispatchSecret(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	}
 }
 
@@ -523,7 +524,7 @@ func (h *Handler) DispatchConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	}
 }
 

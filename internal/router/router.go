@@ -18,6 +18,7 @@ import (
 	"github.com/portainer/d2k/internal/api/swarm"
 	"github.com/portainer/d2k/internal/api/system"
 	"github.com/portainer/d2k/internal/api/volumes"
+	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/internal/middleware"
 )
 
@@ -118,7 +119,7 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 	// Catch-all for unmatched routes - logs the method and path for debugging.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		logger.Warnw("unmatched route", "method", r.Method, "path", r.URL.Path)
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	})
 
 	// Versioned path prefix stripping - Docker CLI sends /v1.41/containers/json etc.
