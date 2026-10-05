@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -79,14 +80,17 @@ func (a *KubernetesDockerAdapter) currentPodForDeployment(ctx context.Context, d
 		return nil, fmt.Errorf("unable to list pods for deployment %q: %w", deploymentName, err)
 	}
 
-	for _, p := range pods.Items {
+	// Pods being deleted belong to runs that are over.
+	current := slices.DeleteFunc(pods.Items, func(p corev1.Pod) bool { return p.DeletionTimestamp != nil })
+	for _, p := range current {
 		if p.Status.Phase == corev1.PodRunning {
 			return &p, nil
 		}
 	}
 
-	if len(pods.Items) > 0 {
-		return &pods.Items[0], nil
+	if len(current) > 0 {
+		newest := slices.MaxFunc(current, func(a, b corev1.Pod) int { return a.CreationTimestamp.Compare(b.CreationTimestamp.Time) })
+		return &newest, nil
 	}
 
 	return nil, fmt.Errorf("deployment %q: %w", deploymentName, errNoPod)

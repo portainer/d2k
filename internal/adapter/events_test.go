@@ -87,14 +87,14 @@ func TestPodEventsReportDeaths(t *testing.T) {
 			}}},
 		}
 	}
-	if got := podEvents(known, restarts, watch.Added, pod(0, 0), time.Now()); got != nil {
+	if got := podEvents(known, restarts, map[string]int32{}, watch.Added, pod(0, 0), time.Now()); got != nil {
 		t.Fatalf("new pod = %q, want no event", actions(got))
 	}
-	died := podEvents(known, restarts, watch.Modified, pod(1, 137), time.Now())
+	died := podEvents(known, restarts, map[string]int32{}, watch.Modified, pod(1, 137), time.Now())
 	if got := actions(died); !slices.Equal(got, []string{"container die"}) || died[0].Actor.Attributes["exitCode"] != "137" {
 		t.Fatalf("restart = %q %v", got, died)
 	}
-	if got := podEvents(known, restarts, watch.Modified, pod(1, 137), time.Now()); got != nil {
+	if got := podEvents(known, restarts, map[string]int32{}, watch.Modified, pod(1, 137), time.Now()); got != nil {
 		t.Fatalf("same restart count = %q, want no event", actions(got))
 	}
 }

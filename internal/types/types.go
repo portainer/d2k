@@ -46,6 +46,15 @@ const (
 	// volume names, as JSON.
 	AnnotationVolumeNames = LabelPrefix + "/volume-names"
 
+	// AnnotationRestartPolicy records the container's Docker restart policy.
+	// Containers with policy "no" or "on-failure" run as pods; others, and
+	// containers created before it was recorded, as Deployment replicas.
+	AnnotationRestartPolicy = LabelPrefix + "/restart-policy"
+
+	// AnnotationExitCode records the exit code of a container that runs as a
+	// pod, once its pod is gone.
+	AnnotationExitCode = LabelPrefix + "/exit-code"
+
 	// AnnotationStartedAt and AnnotationStoppedAt record when the container was
 	// last started and stopped (RFC 3339). A container never started is in
 	// Docker's "created" state; a stopped one is "exited".

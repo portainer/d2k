@@ -252,6 +252,18 @@ func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
+	// A container that is starting is running, as far as the client knows:
+	// wait for its run to begin.
+	if adapter.IsStarting(ctr.State) {
+		if _, ok := waitUntilStarted(r.Context(), h.adapter, ctr.ID, ""); !ok {
+			httputils.WriteErrorFrom(w, errdefs.NotFound(fmt.Errorf("no such container: %s", name)))
+			return
+		}
+		if ctr, err = h.adapter.InspectContainer(r.Context(), name); err != nil {
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -579,12 +591,17 @@ func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 		resize = h.attachSession(ctr.ID)
 		defer h.endAttachSession(ctr.ID, resize)
 	}
-	wasRunning := ctr.State.Running
-	if !wasRunning && !waitUntilRunning(ctx, h.adapter, ctr.ID) {
-		return
+	wasRunning, running := ctr.State.Running, ctr.State.Running
+	if !wasRunning {
+		var ok bool
+		if running, ok = waitUntilStarted(ctx, h.adapter, ctr.ID, ctr.State.StartedAt); !ok {
+			return
+		}
 	}
 
-	if stdin && stream {
+	// A run that already ended has no process to attach to: its output is
+	// sent below.
+	if stdin && stream && running {
 		err := h.adapter.AttachContainer(ctx, ctr.ID, tty, adapter.ExecStreams{Stdin: in, Stdout: out, Stderr: errOut, Resize: resize})
 		if err != nil {
 			log.Warn().Str("context", "ContainersAPI").Str("name", name).Err(err).Msg("Attach ended")
@@ -618,21 +635,27 @@ func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// waitUntilRunning polls until the container runs, is removed, or ctx ends.
-func waitUntilRunning(ctx context.Context, a *adapter.KubernetesDockerAdapter, id string) bool {
+// waitUntilStarted polls until the container runs, or a run started after
+// startedAt has already ended, as a short run of a container that runs once
+// may before it is seen running. ok is false if the container is removed or
+// ctx ends first.
+func waitUntilStarted(ctx context.Context, a *adapter.KubernetesDockerAdapter, id, startedAt string) (running, ok bool) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		ctr, err := a.InspectContainer(ctx, id)
 		if err != nil {
-			return false
+			return false, false
 		}
 		if ctr.State.Running {
-			return true
+			return true, true
+		}
+		if ctr.State.Status == container.StateExited && ctr.State.StartedAt != startedAt {
+			return false, true
 		}
 		select {
 		case <-ctx.Done():
-			return false
+			return false, false
 		case <-ticker.C:
 		}
 	}

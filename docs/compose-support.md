@@ -32,7 +32,9 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `init` | Not supported | Kubernetes has no init process injection. |
 | `healthcheck` | Partial | Becomes a readiness probe, which `docker ps` and `depends_on: service_healthy` read. `start_interval` is ignored with a warning: probes have one period. |
 | `healthcheck.start_interval` | Partial | See `healthcheck`. |
-| `restart` | Partial | Containers run as Deployments, which always restart: `always` and `unless-stopped` behave as in Docker; `on-failure` is restarted on success too, with a warning. |
+| `restart` | Supported | `always` and `unless-stopped` containers run as a Deployment's replica, which restarts. `no` (the default) runs the container once in a pod (`restartPolicy: Never`), and `on-failure` in a pod with `restartPolicy: OnFailure`; a maximum retry count is ignored with a warning. Such pods are not rescheduled if their node fails. |
+| `restart.no` | Supported | See `restart`. |
+| `restart.on_failure_max` | Partial | See `restart`. |
 | `post_start` | Partial | Run with exec once the container runs. Hooks with a `user`, `working_dir`, `environment` or `privileged` fail: Kubernetes exec runs as the container's process does. |
 | `post_start.user` | Partial | See `post_start`. |
 | `pre_start` | Not supported | Not yet in a compose release. |
@@ -52,11 +54,11 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `attach` | Compose |  |
 | `depends_on` | Supported |  |
 | `depends_on.service_healthy` | Supported | Waits on the dependency's healthcheck. |
-| `depends_on.service_completed_successfully` | Not supported | Not yet: one-shot services restart forever, so `compose up` waits forever. |
+| `depends_on.service_completed_successfully` | Supported | The dependency runs once (`restart: "no"`) and compose waits for it to exit with code 0. |
 | `scale` | Compose | Compose creates one container per replica. |
 | `deploy.replicas` | Compose | As `scale`. |
 | `deploy.resources` | Supported | Limits and reservations of CPU and memory become limits and requests. |
-| `deploy.restart_policy` | Partial | As `restart`. |
+| `deploy.restart_policy` | Supported | As `restart`. |
 | `deploy.placement` | Compose | Ignored by compose outside Swarm mode. |
 | `cpus` | Supported | CPU limit. |
 | `cpu_quota` | Supported | With `cpu_period`, a CPU limit. |

@@ -121,8 +121,12 @@ func RunOptionsFromRequest(name string, req container.CreateRequest) (RunOptions
 	opts.Resources = resources(host.Resources)
 	opts.GPUCount = gpuCount(host.DeviceRequests)
 
-	if host.RestartPolicy.Name == container.RestartPolicyOnFailure {
-		warnings = append(warnings, "restart policy on-failure is not supported by d2k: the container is always restarted")
+	opts.RestartPolicy = string(host.RestartPolicy.Name)
+	if opts.RestartPolicy == "" {
+		opts.RestartPolicy = string(container.RestartPolicyDisabled)
+	}
+	if n := host.RestartPolicy.MaximumRetryCount; n > 0 {
+		warnings = append(warnings, fmt.Sprintf("on-failure maximum retry count %d ignored: Kubernetes retries without limit", n))
 	}
 	if t := host.LogConfig.Type; t != "" && t != "json-file" {
 		warnings = append(warnings, fmt.Sprintf("log driver %q is not supported by d2k: logs are read from Kubernetes", t))

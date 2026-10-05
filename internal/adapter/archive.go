@@ -45,7 +45,15 @@ func (a *KubernetesDockerAdapter) CopyToContainer(ctx context.Context, nameOrID,
 	if err != nil {
 		return fmt.Errorf("unable to get deployment %q: %w", name, err)
 	}
-	if replicasOf(d) > 0 {
+	started := replicasOf(d) > 0
+	if runsAsPod(*d) {
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + name})
+		if err != nil {
+			return fmt.Errorf("unable to list the pods of %q: %w", name, err)
+		}
+		started = slices.ContainsFunc(pods.Items, func(p corev1.Pod) bool { return p.DeletionTimestamp == nil && !podEnded(p) })
+	}
+	if started {
 		return errdefs.NotImplemented(errors.New("copying files into a started container is not supported by d2k: copy them before starting it"))
 	}
 

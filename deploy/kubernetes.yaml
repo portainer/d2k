@@ -35,10 +35,11 @@ rules:
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-  # Pods — for log streaming and exec
+  # Pods — containers with restart policy "no" or "on-failure" run as pods;
+  # all pods are read for state, logs and exec
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "watch", "list"]
+    verbs: ["get", "watch", "list", "create", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]

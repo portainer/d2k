@@ -20,10 +20,10 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 
 | Docker concept | Kubernetes translation |
 |---|---|
-| `docker run` | Deployment (replicas=1) |
-| `docker stop` | Scale Deployment to 0 |
-| `docker start` | Scale Deployment to 1 |
-| `docker rm` | Delete Deployment + Service |
+| `docker run` | Deployment, the container's record. `--restart always` and `unless-stopped`: its replica runs the container. `--restart no` (the default) and `on-failure`: a pod created from it runs the container |
+| `docker stop` | Scale the Deployment to 0, or delete the pod and record its exit code |
+| `docker start` | Scale the Deployment to 1, or run a new pod |
+| `docker rm` | Delete the Deployment (and its pod) + Service |
 | `-p <host>:<container>` | LoadBalancer Service |
 | `-P` (publish all) | NodePort Service |
 | No port flags | No Service created |
@@ -37,7 +37,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `--gpus all` / `--gpus N` | Pod resource limits via device plugin (opt-in) |
 | `-u`, `-w`, `-t`, `-i`, `-m`, `--cpus`, `--cpu-shares`, `--memory-reservation`, `--add-host`, `--cap-add/--cap-drop`, `--read-only`, `--privileged`, `--stop-timeout` | Container and pod settings (`-u` must be numeric) |
 | `--health-*`, compose `healthcheck:` | Readiness probe; `State.Health` reports starting/healthy/unhealthy. Traffic is not affected, as in Docker. A `HEALTHCHECK` defined only in the image is not seen |
-| `--restart` | A Deployment always restarts its container: `no` (the default) and `unless-stopped` behave like `always`, `on-failure` returns a warning |
+| `--restart` | `always` and `unless-stopped`: the Deployment restarts the container. `no` (the default): the pod's container runs once (`restartPolicy: Never`) and exits with its exit code. `on-failure`: `restartPolicy: OnFailure`; a maximum retry count returns a warning. A pod is not rescheduled if its node fails |
 | Any other setting | Ignored, and named in a warning on create (`docker run` prints it) |
 
 ---
@@ -336,9 +336,9 @@ Docker host mode requires namespace-scoped permissions only.
 | Resource | Verbs |
 |---|---|
 | deployments | get, list, watch, create, update, patch, delete |
-| pods | get, list, watch |
+| pods | get, list, watch, create, delete |
 | pods/log | get |
-| pods/exec | create |
+| pods/exec, pods/attach | create |
 | services | get, list, watch, create, update, patch, delete |
 | configmaps | get, list, watch, create, update, patch, delete |
 | secrets | get, list, watch, create, update, patch, delete |

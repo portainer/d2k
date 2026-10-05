@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,5 +37,31 @@ func TestExecWaitsForAStartingContainer(t *testing.T) {
 	}()
 	if rec := do(t, h, "POST", "/containers/web/exec", `{"Cmd":["true"]}`); rec.Code != http.StatusCreated {
 		t.Fatalf("exec on a starting container = %d %s, want 201 once it runs", rec.Code, rec.Body)
+	}
+}
+
+// Docker's start returns once the container runs, so `docker start` then
+// `docker wait` waits for that run to end. d2k's start returns while the pod
+// is starting: wait must not answer before the run.
+func TestWaitAfterStartWaitsForTheRun(t *testing.T) {
+	h, client := newTestRouter()
+	if rec := do(t, h, "POST", "/containers/create?name=job", `{"Image":"busybox"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/containers/job/start", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("start = %d %s", rec.Code, rec.Body)
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		pods, _ := client.CoreV1().Pods("d2k").List(context.Background(), metav1.ListOptions{LabelSelector: "app=job"})
+		for _, p := range pods.Items {
+			p.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3, StartedAt: metav1.Now(), FinishedAt: metav1.Now()}},
+			}}}
+			_, _ = client.CoreV1().Pods("d2k").UpdateStatus(context.Background(), &p, metav1.UpdateOptions{})
+		}
+	}()
+	if rec := do(t, h, "POST", "/containers/job/wait", ""); !strings.Contains(rec.Body.String(), `"StatusCode":3`) {
+		t.Fatalf("wait = %d %s, want the run's exit code 3", rec.Code, rec.Body)
 	}
 }

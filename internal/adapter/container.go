@@ -66,6 +66,9 @@ type RunOptions struct {
 	Privileged  bool
 	ReadOnly    bool
 	Healthcheck *corev1.Probe // readiness probe; the container's health
+	// RestartPolicy is Docker's: "no" and "on-failure" containers run as
+	// pods, "always" and "unless-stopped" ones as Deployment replicas.
+	RestartPolicy string
 
 	// Hostname is the pod's hostname. Compose services keep their service
 	// name, which their DNS needs.
@@ -180,6 +183,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, fmt.Errorf("unable to build deployment: %w", err)
 	}
 	deployment.Annotations[types.AnnotationDockerName] = dockerName
+	if opts.RestartPolicy != "" {
+		deployment.Annotations[types.AnnotationRestartPolicy] = opts.RestartPolicy
+	}
 	if len(opts.Labels) > 0 {
 		dockerLabels, err := json.Marshal(opts.Labels)
 		if err != nil {
@@ -358,11 +364,26 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
 		return errdefs.Conflict(fmt.Errorf("cannot stop a container that is managed by swarm: use docker service scale instead"))
 	}
+	if getErr == nil && runsAsPod(*d) {
+		return a.stopPod(ctx, d)
+	}
 	return a.scaleDeployment(ctx, name, 0)
 }
 
-// StartContainer implements docker start: scales the Deployment back to 1 replica.
+// StartContainer implements docker start: it runs a pod for a container that
+// runs once, and scales the Deployment back to 1 replica otherwise.
 func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name string) error {
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return err
+	}
+	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if err != nil {
+		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+	}
+	if runsAsPod(*d) {
+		return a.startPod(ctx, d)
+	}
 	return a.scaleDeployment(ctx, name, 1)
 }
 
@@ -768,6 +789,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		LogConfig: container.LogConfig{
 			Type: "json-file",
 		},
+		RestartPolicy: container.RestartPolicy{Name: restartPolicyOf(d)},
 		// Each pod has its own cgroup namespace, as with Docker's default on cgroup v2.
 		CgroupnsMode: container.CgroupnsModePrivate,
 	}

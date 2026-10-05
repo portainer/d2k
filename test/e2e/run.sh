@@ -98,8 +98,16 @@ standalone_cases() {
     docker run -d -t --name e2e-ttylog nginx:alpine sh -c "echo tty-line; sleep 600" >/dev/null &&
     for _ in $(seq 60); do docker logs e2e-ttylog 2>&1 | grep -q tty-line && exit 0; sleep 2; done; exit 1'
   docker rm -f e2e-ttylog >/dev/null 2>&1
-  check "stop scales to 0" bash -c "docker stop e2e-web >/dev/null && [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-web -o jsonpath={.spec.replicas})\" = 0 ]"
-  check "start scales to 1" bash -c "docker start e2e-web >/dev/null && [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-web -o jsonpath={.spec.replicas})\" = 1 ]"
+  # e2e-web has Docker's default restart policy "no": a pod runs it.
+  check "stop deletes the pod" bash -c "docker stop e2e-web >/dev/null && [ \"\$(docker inspect -f {{.State.Status}} e2e-web)\" = exited ] &&
+    [ -z \"\$(kubectl --context $CONTEXT -n d2k get pods -l app=e2e-web -o name)\" ]"
+  check "start runs a new pod" bash -c "docker start e2e-web >/dev/null && [ -n \"\$(kubectl --context $CONTEXT -n d2k get pods -l app=e2e-web -o name)\" ]"
+  # --restart always: the Deployment's replica runs it.
+  check "restart always runs as a Deployment replica" bash -c "docker run -d --restart always --name e2e-always nginx:alpine >/dev/null &&
+    [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-always -o jsonpath={.spec.replicas})\" = 1 ]"
+  check "stop scales the Deployment to 0" bash -c "docker stop e2e-always >/dev/null && [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-always -o jsonpath={.spec.replicas})\" = 0 ]"
+  check "start scales the Deployment to 1" bash -c "docker start e2e-always >/dev/null && [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-always -o jsonpath={.spec.replicas})\" = 1 ]"
+  docker rm -f e2e-always >/dev/null 2>&1
   eventually 60 bash -c '[ "$(docker inspect -f {{.State.Status}} e2e-web)" = running ]'
   check "exec returns output" bash -c '[ "$(perl -e "alarm 20; exec @ARGV" docker exec e2e-web echo hi)" = hi ]'
   check "exec with a TTY returns output" bash -c 'perl -e "alarm 20; exec @ARGV" docker exec -t e2e-web echo hi | grep -q hi'
@@ -132,8 +140,9 @@ standalone_cases() {
   # Events are recorded and replayed with since/until, and streamed live.
   check "events replay a container's lifecycle" bash -c '
     start=$(date +%s); docker create --name e2e-ev nginx:alpine >/dev/null && docker start e2e-ev >/dev/null &&
+    for _ in $(seq 60); do [ "$(docker inspect -f {{.State.Status}} e2e-ev)" = running ] && break; sleep 1; done &&
     docker stop e2e-ev >/dev/null && docker rm e2e-ev >/dev/null && sleep 2 &&
-    [ "$(docker events --since $start --until $(( $(date +%s) + 1 )) --filter container=e2e-ev --format "{{.Action}}" | tr "\n" " ")" = "create start stop destroy " ]'
+    [ "$(docker events --since $start --until $(( $(date +%s) + 1 )) --filter container=e2e-ev --format "{{.Action}}" | tr "\n" " ")" = "create start die stop destroy " ]'
   check "events stream live" bash -c '
     (perl -e "alarm 20; exec @ARGV" docker events --filter type=volume --format "{{.Action}} {{.Actor.ID}}" > '"$WORKDIR"'/events.out 2>/dev/null &) ;
     sleep 3; docker volume create e2e-ev-vol >/dev/null; sleep 3; docker volume rm e2e-ev-vol >/dev/null;
@@ -191,6 +200,21 @@ standalone_cases() {
     [ "$(docker volume inspect -f "{{.Name}} {{.Scope}} {{index .Labels \"long\"}} {{.Options.size}}" e2e_vol_u)" = "e2e_vol_u local $long 2Gi" ]'
   check "creating an existing volume returns it" bash -c '[ "$(docker volume create e2e_vol_u)" = e2e_vol_u ]'
   check "volume rm" bash -c 'docker volume rm e2e-vol e2e-vol-raw e2e_vol_u >/dev/null'
+
+  # Restart policy "no" (the default) runs once; on-failure restarts on failure only.
+  check "a container exits and stays exited" bash -c '
+    docker run --name e2e-once busybox sh -c "echo once; exit 3" >/dev/null; [ $? = 3 ] && sleep 5 &&
+    [ "$(docker inspect -f "{{.State.Status}} {{.State.ExitCode}}" e2e-once)" = "exited 3" ] &&
+    [ "$(docker logs e2e-once)" = once ]'
+  check "start runs an exited container again" bash -c '
+    docker start e2e-once >/dev/null && [ "$(docker wait e2e-once)" = 3 ] && [ "$(docker inspect -f {{.State.Status}} e2e-once)" = exited ]'
+  check "on-failure restarts a failing container" bash -c '
+    docker run -d --name e2e-retry --restart on-failure busybox sh -c "exit 1" >/dev/null &&
+    for _ in $(seq 60); do [ "$(docker inspect -f {{.State.Status}} e2e-retry)" = restarting ] && exit 0; sleep 2; done; exit 1'
+  check "on-failure stops after success" bash -c '
+    docker run -d --name e2e-retry-ok --restart on-failure busybox true >/dev/null &&
+    for _ in $(seq 60); do [ "$(docker inspect -f "{{.State.Status}} {{.State.ExitCode}}" e2e-retry-ok)" = "exited 0" ] && exit 0; sleep 2; done; exit 1'
+  docker rm -f e2e-once e2e-retry e2e-retry-ok >/dev/null 2>&1
 
   # Settings with a Kubernetes field take effect in the running container.
   check "native settings run" bash -c '

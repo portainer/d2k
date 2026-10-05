@@ -13,6 +13,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/watch"
+
+	"github.com/portainer/d2k/internal/types"
 )
 
 // eventHistorySize is how many past events /events can replay with since.
@@ -103,9 +105,10 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context) error {
 	for i := range deps.Items {
 		known[deps.Items[i].Name] = &deps.Items[i]
 	}
-	restarts := map[string]int32{}
+	restarts, terminations := map[string]int32{}, map[string]int32{}
 	for i := range pods.Items {
 		restarts[pods.Items[i].Name] = restartCount(&pods.Items[i])
+		terminations[pods.Items[i].Name] = terminationCount(&pods.Items[i])
 	}
 
 	opts := metav1ListOptions()
@@ -145,7 +148,7 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context) error {
 				return fmt.Errorf("pod watch closed")
 			}
 			if p, isPod := e.Object.(*corev1.Pod); isPod {
-				msgs = podEvents(known, restarts, e.Type, p, time.Now())
+				msgs = podEvents(known, restarts, terminations, e.Type, p, time.Now())
 			}
 		case e, ok := <-pvcWatch.ResultChan():
 			if !ok {
@@ -181,9 +184,15 @@ func deploymentEvents(known map[string]*appsv1.Deployment, kind watch.EventType,
 			return nil
 		}
 		var msgs []events.Message
-		if was, is := replicasOf(prev), replicasOf(d); was == 0 && is > 0 {
+		started, stopped := replicasOf(prev) == 0 && replicasOf(d) > 0, replicasOf(prev) > 0 && replicasOf(d) == 0
+		if runsAsPod(*d) {
+			// The container's pod runs it: its start and stop are recorded.
+			started = d.Annotations[types.AnnotationStartedAt] != prev.Annotations[types.AnnotationStartedAt]
+			stopped = d.Annotations[types.AnnotationStoppedAt] != prev.Annotations[types.AnnotationStoppedAt]
+		}
+		if started {
 			msgs = append(msgs, containerEvent(d, events.ActionStart, now, nil))
-		} else if was > 0 && is == 0 {
+		} else if stopped {
 			msgs = append(msgs, containerEvent(d, events.ActionStop, now, nil))
 		}
 		if oldName := dockerName(*prev); oldName != dockerName(*d) {
@@ -194,24 +203,45 @@ func deploymentEvents(known map[string]*appsv1.Deployment, kind watch.EventType,
 	return nil
 }
 
-// podEvents reports a container's process dying, which Kubernetes shows as
-// its pod's restart count going up.
-func podEvents(known map[string]*appsv1.Deployment, restarts map[string]int32, kind watch.EventType, p *corev1.Pod, now time.Time) []events.Message {
+// podEvents reports a container's process dying. A Deployment's pod shows
+// it as its restart count going up; a container's own pod (restart policy
+// "no" or "on-failure") as its container terminating, which terminations
+// counts.
+func podEvents(known map[string]*appsv1.Deployment, restarts, terminations map[string]int32, kind watch.EventType, p *corev1.Pod, now time.Time) []events.Message {
 	if kind == watch.Deleted {
 		delete(restarts, p.Name)
+		delete(terminations, p.Name)
 		return nil
 	}
 	count, prev := restartCount(p), restarts[p.Name]
 	restarts[p.Name] = count
+	if p.Spec.RestartPolicy != "" && p.Spec.RestartPolicy != corev1.RestartPolicyAlways {
+		count, prev = terminationCount(p), terminations[p.Name]
+		terminations[p.Name] = count
+	}
 	d, ok := known[p.Labels["app"]]
 	if !ok || count <= prev {
 		return nil
 	}
 	extra := map[string]string{}
-	if s := p.Status.ContainerStatuses; len(s) > 0 && s[0].LastTerminationState.Terminated != nil {
-		extra["exitCode"] = strconv.Itoa(int(s[0].LastTerminationState.Terminated.ExitCode))
+	if s := p.Status.ContainerStatuses; len(s) > 0 {
+		if t := lastTermination(&s[0]); t != nil {
+			extra["exitCode"] = strconv.Itoa(int(t.ExitCode))
+		}
 	}
 	return []events.Message{containerEvent(d, events.ActionDie, now, extra)}
+}
+
+// terminationCount is how many times the pod's container has terminated.
+func terminationCount(p *corev1.Pod) int32 {
+	s := p.Status.ContainerStatuses
+	if len(s) == 0 {
+		return 0
+	}
+	if s[0].State.Terminated != nil {
+		return s[0].RestartCount + 1
+	}
+	return s[0].RestartCount
 }
 
 func volumeEvents(kind watch.EventType, pvc *corev1.PersistentVolumeClaim, now time.Time) []events.Message {

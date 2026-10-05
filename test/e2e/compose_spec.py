@@ -85,9 +85,13 @@ CASES = [
          ok(lambda d: ctr(d)["readinessProbe"]["periodSeconds"] == 5 and ctr(d)["readinessProbe"]["failureThreshold"] == 4)),
     case("healthcheck.start_interval", PARTIAL, "See `healthcheck`.",
          "healthcheck: {test: [CMD, 'true'], start_period: 10s, start_interval: 1s}", warns("start interval ignored")),
-    case("restart", PARTIAL, "Containers run as Deployments, which always restart: `always` and `unless-stopped` "
-         "behave as in Docker; `on-failure` is restarted on success too, with a warning.", "restart: on-failure:3",
-         warns("on-failure is not supported")),
+    case("restart", YES, "`always` and `unless-stopped` containers run as a Deployment's replica, which restarts. "
+         "`no` (the default) runs the container once in a pod (`restartPolicy: Never`), and `on-failure` in a pod with "
+         "`restartPolicy: OnFailure`; a maximum retry count is ignored with a warning. Such pods are not rescheduled "
+         "if their node fails.", "restart: always", ok(lambda d: d[0]["metadata"]["annotations"]["d2k.portainer.io/restart-policy"] == "always")),
+    case("restart.no", YES, "See `restart`.", "restart: 'no'",
+         ok(lambda d: d[0]["metadata"]["annotations"]["d2k.portainer.io/restart-policy"] == "no")),
+    case("restart.on_failure_max", PARTIAL, "See `restart`.", "restart: on-failure:3", warns("maximum retry count 3 ignored")),
     case("post_start", PARTIAL, "Run with exec once the container runs. Hooks with a `user`, `working_dir`, "
          "`environment` or `privileged` fail: Kubernetes exec runs as the container's process does.",
          "post_start: [{command: [touch, /tmp/x]}]", ok()),
@@ -123,16 +127,16 @@ CASES = [
     case("depends_on", YES, "", "depends_on: [db]", ok(), extra=DB),
     case("depends_on.service_healthy", YES, "Waits on the dependency's healthcheck.",
          "depends_on: {db: {condition: service_healthy}}", ok(), extra=DB_HEALTHY),
-    case("depends_on.service_completed_successfully", NO, "Not yet: one-shot services restart forever, so "
-         "`compose up` waits forever.", "depends_on: {init: {condition: service_completed_successfully}}",
-         ("known", None), extra=INIT_JOB),
+    case("depends_on.service_completed_successfully", YES, "The dependency runs once (`restart: \"no\"`) and "
+         "compose waits for it to exit with code 0.", "depends_on: {init: {condition: service_completed_successfully}}",
+         ok(), extra=INIT_JOB),
     case("scale", CLIENT, "Compose creates one container per replica.", "scale: 2", ("count", 2)),
     case("deploy.replicas", CLIENT, "As `scale`.", "deploy: {replicas: 2}", ("count", 2)),
     case("deploy.resources", YES, "Limits and reservations of CPU and memory become limits and requests.",
          "deploy: {resources: {limits: {cpus: '0.5', memory: 64M}, reservations: {memory: 32M}}}",
          ok(lambda d: ctr(d)["resources"] == {"limits": {"cpu": "500m", "memory": "64Mi"}, "requests": {"memory": "32Mi"}})),
-    case("deploy.restart_policy", PARTIAL, "As `restart`.", "deploy: {restart_policy: {condition: on-failure}}",
-         warns("on-failure is not supported")),
+    case("deploy.restart_policy", YES, "As `restart`.", "deploy: {restart_policy: {condition: on-failure}}",
+         ok(lambda d: d[0]["metadata"]["annotations"]["d2k.portainer.io/restart-policy"] == "on-failure")),
     case("deploy.placement", CLIENT, "Ignored by compose outside Swarm mode.", "deploy: {placement: {constraints: [node.role==manager]}}", ok()),
 
     # --- services: resources ------------------------------------------------

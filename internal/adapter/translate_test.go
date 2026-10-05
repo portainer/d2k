@@ -94,7 +94,7 @@ func TestUntranslatedSettingsWarn(t *testing.T) {
 	for _, want := range []string{
 		`user "nginx" ignored`, "Volumes is not supported",
 		"HostConfig.AutoRemove is not supported", "DNS servers 1.1.1.1 ignored", "HostConfig.PidsLimit is not supported",
-		"on-failure is not supported", `log driver "syslog"`, `extra host "gw:host-gateway" ignored`, `bind mount at "/srv" ignored`,
+		"maximum retry count 3 ignored", `log driver "syslog"`, `extra host "gw:host-gateway" ignored`, `bind mount at "/srv" ignored`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("warnings missing %q:\n%s", want, text)

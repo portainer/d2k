@@ -142,7 +142,7 @@ func (h *Handler) runningContainer(ctx context.Context, name string) (*container
 	defer cancel()
 	for {
 		ctr, err := h.adapter.InspectContainer(ctx, name)
-		if err != nil || !isStarting(ctr.State) {
+		if err != nil || !adapter.IsStarting(ctr.State) {
 			return ctr, err
 		}
 		select {
@@ -151,12 +151,6 @@ func (h *Handler) runningContainer(ctx context.Context, name string) (*container
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-}
-
-// isStarting reports whether a container was started and its pod is not
-// running yet, nor failing.
-func isStarting(s *container.State) bool {
-	return s != nil && s.Status == container.StateCreated && s.StartedAt != "" && s.Error == ""
 }
 
 // Start handles POST /exec/{id}/start.
