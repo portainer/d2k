@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 
 	"github.com/rs/zerolog/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,8 +49,6 @@ type KubernetesDockerAdapter struct {
 	// (e.g. "nvidia.com/gpu" or "amd.com/gpu"). Empty means GPU support is disabled.
 	gpuResourceName string
 
-	networks   map[string]*NetworkSummary
-	networksMu sync.RWMutex
 	// nfsStorageClasses caches nfs.csi.k8s.io StorageClass names discovered at
 	// startup, keyed by NFS server address. Used by SwarmCreateService to create
 	// NFS-backed PVCs inline when docker stack deploy doesn't call volume create.
@@ -120,7 +117,6 @@ func NewWithClient(client kubernetes.Interface, namespace string) *KubernetesDoc
 	return &KubernetesDockerAdapter{
 		client:            client,
 		namespace:         namespace,
-		networks:          map[string]*NetworkSummary{},
 		nfsStorageClasses: map[string]string{},
 	}
 }

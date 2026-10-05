@@ -12,7 +12,9 @@ import (
 	"github.com/getkin/kin-openapi/openapi2"
 	"github.com/getkin/kin-openapi/openapi2conv"
 	"github.com/getkin/kin-openapi/openapi3"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/kubernetes/fake"
@@ -106,7 +108,7 @@ func conforms(doc *openapi3.T, method, path string, status int, body []byte) err
 
 // newTestRouter returns the d2k router backed by a fake cluster.
 func newTestRouter() (http.Handler, *fake.Clientset) {
-	client := fake.NewClientset()
+	client := fake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "d2k", ResourceVersion: "1"}})
 	// Assign UIDs on create, as the API server does; container IDs derive from them.
 	client.PrependReactor("create", "*", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		if obj, err := meta.Accessor(action.(k8stesting.CreateAction).GetObject()); err == nil && obj.GetUID() == "" {

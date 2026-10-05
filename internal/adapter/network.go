@@ -34,10 +34,26 @@ type NetworkSummary struct {
 	Attachable bool              `json:"Attachable"`
 	IPAM       NetworkIPAM       `json:"IPAM"`
 	Labels     map[string]string `json:"Labels"`
+}
 
-	// warnings name the options the network was created with that d2k
+// networkRecord is a network as it was created, recorded on the namespace.
+type networkRecord struct {
+	Name   string            `json:"name"`
+	Labels map[string]string `json:"labels,omitempty"`
+	// Warnings name the options the network was created with that d2k
 	// cannot honour, reported to the containers that join it.
-	warnings []string
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+func (r networkRecord) summary(namespace string) NetworkSummary {
+	return NetworkSummary{
+		ID:     networkIDForName(r.Name, namespace),
+		Name:   r.Name,
+		Driver: "overlay",
+		Scope:  "swarm",
+		IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
+		Labels: r.Labels,
+	}
 }
 
 // CreateNetworkOptions mirrors docker network create flags.
@@ -102,28 +118,20 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 		labels[k] = v
 	}
 
-	summary := &NetworkSummary{
-		ID:     networkIDForName(opts.Name, a.namespace),
-		Name:   opts.Name,
-		Driver: "overlay",
-		Scope:  "swarm",
-		IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
-		Labels: labels,
-
-		warnings: optionWarnings,
+	record := networkRecord{Name: opts.Name, Labels: labels, Warnings: optionWarnings}
+	if err := a.recordNetwork(ctx, record); err != nil {
+		return nil, nil, err
 	}
-
-	a.networksMu.Lock()
-	a.networks[opts.Name] = summary
-	a.networksMu.Unlock()
-
-	return summary, warnings, nil
+	summary := record.summary(a.namespace)
+	return &summary, warnings, nil
 }
 
 // ListNetworks returns the synthetic network list.
 func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSummary, error) {
-	a.networksMu.RLock()
-	defer a.networksMu.RUnlock()
+	records, err := a.networkRecords(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	networks := []NetworkSummary{
 		{
@@ -177,9 +185,9 @@ func (a *KubernetesDockerAdapter) ListNetworks(ctx context.Context) ([]NetworkSu
 		},
 	}
 
-	// Include any networks created via CreateNetwork.
-	for _, n := range a.networks {
-		networks = append(networks, *n)
+	// Include the networks created with CreateNetwork.
+	for _, r := range records {
+		networks = append(networks, r.summary(a.namespace))
 	}
 
 	// Add per-service networks for all swarm-managed deployments.
@@ -235,8 +243,9 @@ func (a *KubernetesDockerAdapter) InspectNetwork(ctx context.Context, nameOrID s
 		}
 	}
 
-	// Networks live in memory; those that containers joined are known after
-	// a restart. Other names do not exist, as compose expects before creating.
+	// Networks created before they were recorded on the namespace are known
+	// while containers have joined them. Other names do not exist, as compose
+	// expects before creating.
 	joined, err := a.joinedNetwork(ctx, nameOrID)
 	if err != nil {
 		return nil, err
@@ -374,40 +383,28 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 		return errdefs.Forbidden(fmt.Errorf("network %q is a pre-defined network and cannot be removed", nameOrID))
 	}
 
-	a.networksMu.Lock()
-	defer a.networksMu.Unlock()
-
-	// Try direct name match first.
-	if _, ok := a.networks[nameOrID]; ok {
-		delete(a.networks, nameOrID)
-		return nil
-	}
-
-	// Fall back to ID match — the Docker CLI sends the synthetic ID
-	// (e.g. "d2k-d2k-example-app_backend") rather than the name.
-	for netName, net := range a.networks {
-		if net.ID == nameOrID {
-			delete(a.networks, netName)
-			return nil
-		}
-	}
-
-	// Not found — return nil to match Docker behaviour (idempotent remove).
-	return nil
+	// The Docker CLI sends the ID (e.g. "d2k-d2k-example-app_backend")
+	// rather than the name. A network that is not found is not an error, as
+	// d2k has always answered.
+	return a.removeNetworks(ctx, func(r networkRecord) bool {
+		return r.Name == nameOrID || networkIDForName(r.Name, a.namespace) == nameOrID
+	})
 }
 
 // networkIDForName produces a deterministic synthetic network ID from a name
 // and namespace, giving Docker clients a stable ID to reference across calls.
 // networkWarnings returns the warnings of the named networks' options, for
 // a container that joins them.
-func (a *KubernetesDockerAdapter) networkWarnings(names []string) []string {
-	a.networksMu.Lock()
-	defer a.networksMu.Unlock()
+func (a *KubernetesDockerAdapter) networkWarnings(ctx context.Context, names []string) []string {
+	records, err := a.networkRecords(ctx)
+	if err != nil {
+		return []string{fmt.Sprintf("unable to read the options of networks %s: %s", strings.Join(names, ", "), err)}
+	}
 	var warnings []string
-	for _, name := range names {
-		if n, ok := a.networks[name]; ok {
-			for _, w := range n.warnings {
-				warnings = append(warnings, fmt.Sprintf("network %q: %s", name, w))
+	for _, r := range records {
+		if slices.Contains(names, r.Name) {
+			for _, w := range r.Warnings {
+				warnings = append(warnings, fmt.Sprintf("network %q: %s", r.Name, w))
 			}
 		}
 	}

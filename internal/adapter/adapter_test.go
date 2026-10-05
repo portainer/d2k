@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,6 +27,10 @@ const testNamespace = "d2k"
 // newTestAdapter returns an adapter backed by a fake clientset seeded with objs.
 func newTestAdapter(t *testing.T, objs ...runtime.Object) (*KubernetesDockerAdapter, *fake.Clientset) {
 	t.Helper()
+	// The namespace d2k runs in exists, as the API server's does.
+	if !slices.ContainsFunc(objs, func(o runtime.Object) bool { _, ok := o.(*corev1.Namespace); return ok }) {
+		objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNamespace, ResourceVersion: "1"}})
+	}
 	client := fake.NewClientset(objs...)
 	// Assign UIDs on create, as the API server does; container IDs derive from them.
 	client.PrependReactor("create", "*", func(action k8stesting.Action) (bool, runtime.Object, error) {

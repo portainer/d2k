@@ -55,6 +55,11 @@ const (
 	// pod, once its pod is gone.
 	AnnotationExitCode = LabelPrefix + "/exit-code"
 
+	// AnnotationNetworkPrefix prefixes the namespace annotations that record
+	// the Docker networks created in it, one per network, as JSON. A Docker
+	// network has no Kubernetes object of its own.
+	AnnotationNetworkPrefix = LabelPrefix + "/network-"
+
 	// AnnotationStartedAt and AnnotationStoppedAt record when the container was
 	// last started and stopped (RFC 3339). A container never started is in
 	// Docker's "created" state; a stopped one is "exited".

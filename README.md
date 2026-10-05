@@ -174,6 +174,8 @@ For Swarm services, `--endpoint-mode dnsrr` or any port with `mode: host` bypass
 
 Kubernetes namespace networking is flat. All Pods in the namespace can reach each other by IP regardless of which Docker network they are assigned to. `docker network create` is accepted and returns a synthetic network, but no actual network isolation is enforced. Networks created by `docker stack deploy` are removed correctly when `docker stack rm` is run.
 
+A Docker network has no Kubernetes object of its own, so d2k records each one, exactly as it was created (name, labels, options), as a `d2k.portainer.io/network-*` annotation on its namespace. Networks therefore survive d2k restarts and upgrades. RBAC cannot limit which fields d2k patches on the namespace, so `deploy/kubernetes.yaml` installs a ValidatingAdmissionPolicy that lets d2k's ServiceAccount change only those annotations: it can never change the namespace's labels (such as the `pod-security.kubernetes.io/*` labels Portainer's policies manage), other annotations or spec. **This requires Kubernetes 1.30 or later.**
+
 ---
 
 ## Volumes
@@ -343,7 +345,7 @@ Docker host mode requires namespace-scoped permissions only.
 | configmaps | get, list, watch, create, update, patch, delete |
 | secrets | get, list, watch, create, update, patch, delete |
 | persistentvolumeclaims | get, list, watch, create, delete |
-| namespaces | get |
+| namespaces | get, patch _(its own namespace only; an admission policy limits patch to `d2k.portainer.io/network-*` annotations)_ |
 | events | get, list |
 | metrics.k8s.io/pods | get, list _(optional)_ |
 

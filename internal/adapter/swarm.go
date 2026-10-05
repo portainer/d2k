@@ -1668,18 +1668,12 @@ func (a *KubernetesDockerAdapter) SwarmDeleteStack(ctx context.Context, stackNam
 		}
 	}
 
-	// Delete in-memory networks belonging to this stack.
+	// Delete the networks belonging to this stack.
 	// Stack networks follow the "<stack>_<network>" naming convention.
 	// We match by the com.docker.compose.project label stored at create time.
-	a.networksMu.Lock()
-	for netName, net := range a.networks {
-		if net.Labels["com.docker.compose.project"] == stackName {
-			delete(a.networks, netName)
-		}
-	}
-	a.networksMu.Unlock()
-
-	return nil
+	return a.removeNetworks(ctx, func(r networkRecord) bool {
+		return r.Labels["com.docker.compose.project"] == stackName
+	})
 }
 
 func kubeNodeToSwarm(n corev1.Node, apiServerHost string) map[string]any {

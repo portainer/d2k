@@ -353,6 +353,45 @@ YAML
     for _ in \$(seq 30); do kubectl --context $CONTEXT -n d2k get secret -o name | grep -q e2es || exit 0; sleep 2; done; exit 1"
 }
 
+# network_cases checks that networks outlive a d2k restart, and that d2k can
+# change nothing on its namespace but the annotations that record them.
+network_cases() {
+  export DOCKER_HOST=$STANDALONE
+  echo "== networks across a d2k restart ($STANDALONE)"
+  local dir=$WORKDIR/networks
+  mkdir -p "$dir"
+  cat >"$dir/compose.yaml" <<'YAML'
+services:
+  web:
+    image: nginx:alpine
+    restart: always
+    networks: [front_end, named]
+networks:
+  front_end:
+    labels: {team: Payments Team}
+  named:
+    name: e2e-shared-net
+YAML
+  check "compose up with networks" bash -c "cd $dir && perl -e 'alarm 120; exec @ARGV' docker compose -p e2en up -d >/dev/null 2>&1"
+  check "network create without containers" bash -c 'docker network create e2e-empty-net >/dev/null'
+  k -n d2k rollout restart deploy/d2k >/dev/null && k -n d2k rollout status deploy/d2k --timeout=120s >/dev/null
+  eventually 60 bash -c 'docker version >/dev/null 2>&1'
+  check "networks keep their labels across a restart" bash -c '
+    [ "$(docker network inspect -f "{{index .Labels \"com.docker.compose.network\"}} {{index .Labels \"team\"}}" e2en_front_end)" = "front_end Payments Team" ] &&
+    [ "$(docker network inspect -f "{{index .Labels \"com.docker.compose.network\"}}" e2e-shared-net)" = named ]'
+  check "an unjoined network survives a restart" bash -c 'docker network inspect e2e-empty-net >/dev/null'
+  check "compose up after a restart" bash -c "cd $dir && perl -e 'alarm 120; exec @ARGV' docker compose -p e2en up -d"
+  check "compose down removes the networks" bash -c "cd $dir && perl -e 'alarm 60; exec @ARGV' docker compose -p e2en down -t 1 >/dev/null 2>&1 &&
+    ! docker network inspect e2en_front_end >/dev/null 2>&1 && ! docker network inspect e2e-shared-net >/dev/null 2>&1"
+  check "network rm" bash -c 'docker network rm e2e-empty-net >/dev/null && ! docker network inspect e2e-empty-net >/dev/null 2>&1'
+
+  local as=(--as=system:serviceaccount:d2k:d2k)
+  check "d2k cannot change its namespace's labels" bash -c "kubectl --context $CONTEXT ${as[*]} label namespace d2k pod-security.kubernetes.io/enforce=privileged 2>&1 | grep -q 'may not change'"
+  check "d2k cannot change other annotations of its namespace" bash -c "kubectl --context $CONTEXT ${as[*]} annotate namespace d2k example.com/x=1 2>&1 | grep -q 'may change only'"
+  check "d2k can record networks on its namespace" bash -c "kubectl --context $CONTEXT ${as[*]} annotate namespace d2k d2k.portainer.io/network-e2e=x >/dev/null &&
+    kubectl --context $CONTEXT ${as[*]} annotate namespace d2k d2k.portainer.io/network-e2e- >/dev/null"
+}
+
 # dc <args...>: docker compose for the e2ec lifecycle project, with a timeout.
 dc() { (cd "$COMPOSE_DIR" && to 180 docker compose -p e2ec "$@"); }
 running() { [ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" = running ]; }
@@ -459,6 +498,7 @@ standalone_cases
 compose_cases
 health_cases
 secrets_cases
+network_cases
 swarm_cases
 reset
 

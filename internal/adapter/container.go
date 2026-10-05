@@ -158,7 +158,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, err
 	}
 	warnings = append(warnings, volumeWarnings...)
-	warnings = append(warnings, a.networkWarnings(opts.Networks)...)
+	warnings = append(warnings, a.networkWarnings(ctx, opts.Networks)...)
 	for i := range volumeMounts {
 		volumeMounts[i].SubPath = opts.VolumeSubpaths[volumeMounts[i].MountPath]
 	}
