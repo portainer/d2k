@@ -14,10 +14,16 @@
 package containers
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,8 +32,10 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/apispec"
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/filters"
 	"github.com/portainer/d2k/internal/namesgenerator"
+	"github.com/portainer/d2k/internal/streams"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
@@ -272,47 +280,118 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Logs(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/logs")
 	q := r.URL.Query()
-
-	opts := adapter.LogOptions{
-		Follow:     q.Get("follow") == "1" || q.Get("follow") == "true",
-		Timestamps: q.Get("timestamps") == "1" || q.Get("timestamps") == "true",
-		Tail:       q.Get("tail"),
+	stdout, stderr := boolParam(q.Get("stdout")), boolParam(q.Get("stderr"))
+	if !stdout && !stderr {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(errors.New("bad parameters: you must choose at least one stream")))
+		return
+	}
+	since, errSince := parseLogTime(q.Get("since"))
+	until, errUntil := parseLogTime(q.Get("until"))
+	if err := errors.Join(errSince, errUntil); err != nil {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(err))
+		return
 	}
 
-	logs, err := h.adapter.GetContainerLogs(r.Context(), name, opts)
+	// Timestamps are always requested: they bound "until", and are removed
+	// unless the client asked for them.
+	logs, tty, err := h.adapter.GetContainerLogs(r.Context(), name, adapter.LogOptions{
+		Follow:     boolParam(q.Get("follow")),
+		Timestamps: true,
+		Tail:       q.Get("tail"),
+		Since:      since,
+	})
 	if err != nil {
-		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("GetContainerLogs failed")
+		log.Error().Str("context", "ContainersAPI").Str("name", name).Err(err).Msg("Unable to read container logs")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	defer func() { _ = logs.Close() }()
 
-	w.Header().Set("Content-Type", "application/vnd.docker.multiplexed-stream")
-	if opts.Follow {
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
+	// Kubernetes keeps one log for stdout and stderr: it goes to the
+	// requested stream. A TTY container's log is a raw stream, as in Docker.
+	var out io.Writer = w
+	contentType := "application/vnd.docker.raw-stream"
+	if !tty {
+		contentType = "application/vnd.docker.multiplexed-stream"
+		stream := streams.Stdout
+		if !stdout {
+			stream = streams.Stderr
+		}
+		out = streams.Multiplexed(w, stream)
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
 	}
 
-	buf := make([]byte, 32*1024)
+	err = copyLogLines(logs, until, boolParam(q.Get("timestamps")), func(line []byte) error {
+		if _, err := out.Write(line); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Warn().Str("context", "ContainersAPI").Str("name", name).Err(err).Msg("Log stream ended")
+	}
+}
+
+// copyLogLines emits timestamped log lines one by one, stopping at the first
+// line after until (when set), and removing each line's timestamp unless
+// keepTimestamps.
+func copyLogLines(src io.Reader, until time.Time, keepTimestamps bool, emit func([]byte) error) error {
+	r := bufio.NewReader(src)
 	for {
-		n, err := logs.Read(buf)
-		if n > 0 {
-			header := []byte{
-				1, // stdout
-				0, 0, 0,
-				byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n),
+		line, readErr := r.ReadBytes('\n')
+		if len(line) > 0 {
+			stamp, rest, _ := bytes.Cut(line, []byte(" "))
+			if ts, err := time.Parse(time.RFC3339Nano, string(stamp)); err == nil {
+				if !until.IsZero() && ts.After(until) {
+					return nil
+				}
+				if !keepTimestamps {
+					line = rest
+				}
 			}
-			_, _ = w.Write(header)
-			_, _ = w.Write(buf[:n])
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
+			if err := emit(line); err != nil {
+				return err
 			}
 		}
-		if err != nil {
-			break
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
 		}
 	}
 }
+
+// parseLogTime parses Docker's since/until: a Unix timestamp, optionally
+// with a fractional part. Empty or "0" means unset.
+func parseLogTime(v string) (time.Time, error) {
+	if v == "" || v == "0" {
+		return time.Time{}, nil
+	}
+	secs, frac, _ := strings.Cut(v, ".")
+	s, err := strconv.ParseInt(secs, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid timestamp %q: expected a Unix timestamp", v)
+	}
+	var nanos int64
+	if frac != "" {
+		frac = (frac + "000000000")[:9]
+		if nanos, err = strconv.ParseInt(frac, 10, 64); err != nil {
+			return time.Time{}, fmt.Errorf("invalid timestamp %q: expected a Unix timestamp", v)
+		}
+	}
+	return time.Unix(s, nanos), nil
+}
+
+func boolParam(v string) bool { return v == "1" || v == "true" }
 
 // containerName extracts the container name from a path like /containers/<name>/start
 // by stripping the /containers/ prefix and the given action suffix.

@@ -40,10 +40,10 @@ func (a *KubernetesDockerAdapter) ExecContainer(ctx context.Context, opts ExecOp
 		return 0, err
 	}
 	pod, err := a.currentPodForDeployment(ctx, resolved)
-	if err != nil {
+	if err != nil && !errors.Is(err, errNoPod) {
 		return 0, err
 	}
-	if pod.Status.Phase != corev1.PodRunning {
+	if pod == nil || pod.Status.Phase != corev1.PodRunning {
 		return 0, errdefs.Conflict(fmt.Errorf("container %s is not running", opts.Name))
 	}
 

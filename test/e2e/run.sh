@@ -89,6 +89,15 @@ standalone_cases() {
   check "container IDs are 64 hex characters" bash -c '[[ "$(docker ps -q --no-trunc --filter name=e2e-web)" =~ ^[0-9a-f]{64}$ ]]'
   check "ps lists the container" bash -c 'docker ps --format {{.Names}} | grep -qx e2e-web'
   check "logs returns output" bash -c 'docker logs e2e-web 2>&1 | grep -q "start worker"'
+  check "logs --tail 0 returns nothing" bash -c '[ -z "$(docker logs --tail 0 e2e-web 2>&1)" ]'
+  check "logs --tail 1 returns one line" bash -c '[ "$(docker logs --tail 1 e2e-web 2>&1 | wc -l | tr -d " ")" = 1 ]'
+  check "logs -t adds timestamps" bash -c 'docker logs -t --tail 1 e2e-web 2>&1 | grep -qE "^20[0-9]{2}-[0-9]{2}-[0-9]{2}T"'
+  check "logs --until in the past returns nothing" bash -c '[ -z "$(docker logs --until 2000-01-01T00:00:00Z e2e-web 2>&1)" ]'
+  check "logs --since now-1h returns lines" bash -c '[ -n "$(docker logs --since 1h e2e-web 2>&1)" ]'
+  check "logs of a TTY container" bash -c '
+    docker run -d -t --name e2e-ttylog nginx:alpine sh -c "echo tty-line; sleep 600" >/dev/null &&
+    for _ in $(seq 60); do docker logs e2e-ttylog 2>&1 | grep -q tty-line && exit 0; sleep 2; done; exit 1'
+  docker rm -f e2e-ttylog >/dev/null 2>&1
   check "stop scales to 0" bash -c "docker stop e2e-web >/dev/null && [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-web -o jsonpath={.spec.replicas})\" = 0 ]"
   check "start scales to 1" bash -c "docker start e2e-web >/dev/null && [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-web -o jsonpath={.spec.replicas})\" = 1 ]"
   eventually 60 bash -c '[ "$(docker inspect -f {{.State.Status}} e2e-web)" = running ]'

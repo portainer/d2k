@@ -751,7 +751,8 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		Config: &container.Config{
 			Image:        d.Annotations[types.AnnotationImageRef],
 			ExposedPorts: network.PortSet{},
-			Tty:          false,
+			Tty:          spec.TTY,
+			OpenStdin:    spec.Stdin,
 			AttachStdin:  false,
 			AttachStdout: true,
 			AttachStderr: true,

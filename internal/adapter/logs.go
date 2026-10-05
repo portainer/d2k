@@ -2,53 +2,67 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/types"
 )
 
-// LogOptions mirrors the subset of docker logs flags d2k supports.
+// LogOptions mirrors the docker logs settings Kubernetes can apply.
 type LogOptions struct {
 	Follow     bool
 	Timestamps bool
-	Tail       string // "all" or a number string
+	Tail       string // "all" (or empty) or a number of lines
+	Since      time.Time
 }
 
-// GetContainerLogs resolves the Deployment to its current Pod and streams logs.
-// The returned ReadCloser must be closed by the caller.
-func (a *KubernetesDockerAdapter) GetContainerLogs(ctx context.Context, name string, opts LogOptions) (io.ReadCloser, error) {
+// errNoPod means the container's Deployment has no pod: it never ran.
+var errNoPod = errors.New("no pod")
+
+// GetContainerLogs streams the logs of the container's current pod, and
+// reports whether the container runs with a TTY. A container that never ran
+// has an empty log. The caller closes the stream.
+func (a *KubernetesDockerAdapter) GetContainerLogs(ctx context.Context, name string, opts LogOptions) (io.ReadCloser, bool, error) {
 	resolved, err := a.resolveDeploymentName(ctx, name)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1.GetOptions{})
+	if err != nil {
+		return nil, false, fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+	}
+	tty := len(d.Spec.Template.Spec.Containers) > 0 && d.Spec.Template.Spec.Containers[0].TTY
+
+	logOpts := &corev1.PodLogOptions{Follow: opts.Follow, Timestamps: opts.Timestamps}
+	if opts.Tail != "" && opts.Tail != "all" {
+		n, err := strconv.ParseInt(opts.Tail, 10, 64)
+		if err != nil || n < 0 {
+			return nil, false, errdefs.InvalidParameter(fmt.Errorf("invalid tail %q: expected \"all\" or a number of lines", opts.Tail))
+		}
+		logOpts.TailLines = &n
+	}
+	if !opts.Since.IsZero() {
+		since := metav1.NewTime(opts.Since)
+		logOpts.SinceTime = &since
 	}
 
 	pod, err := a.currentPodForDeployment(ctx, resolved)
+	if errors.Is(err, errNoPod) {
+		return io.NopCloser(strings.NewReader("")), tty, nil
+	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-
-	tailLines := int64(-1)
-	if opts.Tail != "" && opts.Tail != "all" {
-		n := int64(0)
-		if _, scanErr := fmt.Sscan(opts.Tail, &n); scanErr == nil {
-			tailLines = n
-		}
-	}
-
-	logOpts := &corev1.PodLogOptions{
-		Follow:     opts.Follow,
-		Timestamps: opts.Timestamps,
-	}
-	if tailLines > 0 {
-		logOpts.TailLines = &tailLines
-	}
-
-	req := a.client.CoreV1().Pods(a.namespace).GetLogs(pod.Name, logOpts)
-	return req.Stream(ctx)
+	stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(pod.Name, logOpts).Stream(ctx)
+	return stream, tty, err
 }
 
 // currentPodForDeployment returns the first Running Pod owned by the named Deployment.
@@ -75,5 +89,5 @@ func (a *KubernetesDockerAdapter) currentPodForDeployment(ctx context.Context, d
 		return &pods.Items[0], nil
 	}
 
-	return nil, fmt.Errorf("no pods found for deployment %q", deploymentName)
+	return nil, fmt.Errorf("deployment %q: %w", deploymentName, errNoPod)
 }
