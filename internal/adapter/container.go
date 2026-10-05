@@ -50,6 +50,20 @@ type RunOptions struct {
 	Aliases []string
 	// Networks are the names of the Docker networks the container joins.
 	Networks []string
+
+	WorkingDir  string
+	Tty         bool
+	Stdin       bool
+	StdinOnce   bool
+	RunAsUser   *int64
+	RunAsGroup  *int64
+	StopTimeout *int64 // seconds; the pod's termination grace period
+	HostAliases []corev1.HostAlias
+	Resources   corev1.ResourceRequirements
+	CapAdd      []string
+	CapDrop     []string
+	Privileged  bool
+	ReadOnly    bool
 }
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
@@ -418,19 +432,18 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 		envVars = append(envVars, corev1.EnvVar{Name: parts[0], Value: parts[1]})
 	}
 
-	var resourceLimits corev1.ResourceList
+	requested := *opts.Resources.DeepCopy()
 	if opts.GPUCount > 0 && a.gpuResourceName != "" {
-		resourceLimits = corev1.ResourceList{
-			corev1.ResourceName(a.gpuResourceName): resource.MustParse(fmt.Sprintf("%d", opts.GPUCount)),
+		if requested.Limits == nil {
+			requested.Limits = corev1.ResourceList{}
 		}
+		requested.Limits[corev1.ResourceName(a.gpuResourceName)] = resource.MustParse(fmt.Sprintf("%d", opts.GPUCount))
 	}
 
 	// Inject requests.cpu / requests.memory when the namespace has a ResourceQuota
 	// that requires them. Docker has no concept of ResourceQuotas so the caller
 	// cannot know they are needed. injectQuotaDefaults is a no-op when no quota exists.
-	resourceReqs, err := a.injectQuotaDefaults(ctx, corev1.ResourceRequirements{
-		Limits: resourceLimits,
-	})
+	resourceReqs, err := a.injectQuotaDefaults(ctx, requested)
 	if err != nil {
 		return nil, err
 	}
@@ -459,15 +472,22 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 					},
 				},
 				Spec: corev1.PodSpec{
+					HostAliases:                   opts.HostAliases,
+					TerminationGracePeriodSeconds: opts.StopTimeout,
 					Containers: []corev1.Container{
 						{
-							Name:      opts.Name,
-							Image:     opts.Image,
-							Command:   opts.Entrypoint,
-							Args:      opts.Cmd,
-							Env:       envVars,
-							Ports:     containerPorts,
-							Resources: resourceReqs,
+							Name:            opts.Name,
+							Image:           opts.Image,
+							Command:         opts.Entrypoint,
+							Args:            opts.Cmd,
+							Env:             envVars,
+							Ports:           containerPorts,
+							WorkingDir:      opts.WorkingDir,
+							TTY:             opts.Tty,
+							Stdin:           opts.Stdin,
+							StdinOnce:       opts.StdinOnce,
+							SecurityContext: containerSecurityContext(opts),
+							Resources:       resourceReqs,
 						},
 					},
 				},
@@ -780,6 +800,32 @@ func encodePortMappings(bindings []string, publishAll bool) (string, error) {
 // ResolveContainerName is the public wrapper around resolveDeploymentName.
 func (a *KubernetesDockerAdapter) ResolveContainerName(ctx context.Context, name string) (string, error) {
 	return a.resolveDeploymentName(ctx, name)
+}
+
+// containerSecurityContext translates the user, capabilities, privileged
+// and read-only root settings, or returns nil when none is set. Whether they
+// are allowed is decided by the namespace's Pod Security policy.
+func containerSecurityContext(opts RunOptions) *corev1.SecurityContext {
+	if opts.RunAsUser == nil && opts.RunAsGroup == nil && len(opts.CapAdd) == 0 && len(opts.CapDrop) == 0 && !opts.Privileged && !opts.ReadOnly {
+		return nil
+	}
+	sc := &corev1.SecurityContext{RunAsUser: opts.RunAsUser, RunAsGroup: opts.RunAsGroup}
+	if opts.Privileged {
+		sc.Privileged = &opts.Privileged
+	}
+	if opts.ReadOnly {
+		sc.ReadOnlyRootFilesystem = &opts.ReadOnly
+	}
+	if len(opts.CapAdd) > 0 || len(opts.CapDrop) > 0 {
+		sc.Capabilities = &corev1.Capabilities{}
+		for _, c := range opts.CapAdd {
+			sc.Capabilities.Add = append(sc.Capabilities.Add, corev1.Capability(strings.TrimPrefix(strings.ToUpper(c), "CAP_")))
+		}
+		for _, c := range opts.CapDrop {
+			sc.Capabilities.Drop = append(sc.Capabilities.Drop, corev1.Capability(strings.TrimPrefix(strings.ToUpper(c), "CAP_")))
+		}
+	}
+	return sc
 }
 
 // containerID returns the Docker ID of the container a Deployment backs: 64

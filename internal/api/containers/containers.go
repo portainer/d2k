@@ -172,34 +172,6 @@ func filterContainers(ctrs []adapter.ContainerSummary, args filters.Args) []adap
 	return result
 }
 
-// createBody mirrors the subset of the Docker create request body that d2k uses.
-type createBody struct {
-	Image        string              `json:"Image"`
-	Entrypoint   []string            `json:"Entrypoint"`
-	Cmd          []string            `json:"Cmd"`
-	Env          []string            `json:"Env"`
-	Labels       map[string]string   `json:"Labels"`
-	ExposedPorts map[string]struct{} `json:"ExposedPorts"`
-	HostConfig   struct {
-		PortBindings map[string][]struct {
-			HostIP   string `json:"HostIp"`
-			HostPort string `json:"HostPort"`
-		} `json:"PortBindings"`
-		PublishAllPorts bool     `json:"PublishAllPorts"`
-		Binds           []string `json:"Binds"`
-		NetworkMode     string   `json:"NetworkMode"`
-		DeviceRequests  []struct {
-			Count        int        `json:"Count"`
-			Capabilities [][]string `json:"Capabilities"`
-		} `json:"DeviceRequests"`
-	} `json:"HostConfig"`
-	NetworkingConfig struct {
-		EndpointsConfig map[string]struct {
-			Aliases []string `json:"Aliases"`
-		} `json:"EndpointsConfig"`
-	} `json:"NetworkingConfig"`
-}
-
 // Create handles POST /containers/create (docker run — create phase).
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
@@ -207,69 +179,12 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		name = strings.ReplaceAll(namesgenerator.GetRandomName(0), "_", "-")
 	}
 
-	var body createBody
-	if err := httputils.ParseJSON(r, &body); err != nil {
+	var req container.CreateRequest
+	if err := httputils.ParseJSON(r, &req); err != nil {
 		httputils.WriteError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
 		return
 	}
-
-	// Translate Docker HostConfig.PortBindings map into raw "-p" strings.
-	var portBindings []string
-	for containerPortProto, hostBindings := range body.HostConfig.PortBindings {
-		containerPort := strings.SplitN(containerPortProto, "/", 2)[0]
-		for _, hb := range hostBindings {
-			if hb.HostIP != "" && hb.HostIP != "0.0.0.0" {
-				portBindings = append(portBindings, fmt.Sprintf("%s:%s:%s", hb.HostIP, hb.HostPort, containerPort))
-			} else {
-				portBindings = append(portBindings, fmt.Sprintf("%s:%s", hb.HostPort, containerPort))
-			}
-		}
-	}
-
-	// Extract GPU count from DeviceRequests. Docker sends Count=-1 for "all GPUs"
-	// and Count=N for a specific number. We treat -1 as 1 since Kubernetes device
-	// plugins require an explicit count.
-	var gpuCount int
-	for _, dr := range body.HostConfig.DeviceRequests {
-		for _, caps := range dr.Capabilities {
-			for _, c := range caps {
-				if c == "gpu" {
-					if dr.Count < 0 {
-						gpuCount = 1
-					} else if dr.Count > gpuCount {
-						gpuCount = dr.Count
-					}
-				}
-			}
-		}
-	}
-
-	var aliases, networks []string
-	if mode := body.HostConfig.NetworkMode; mode != "" && mode != "default" && !strings.Contains(mode, ":") {
-		networks = append(networks, mode)
-	}
-	for name, endpoint := range body.NetworkingConfig.EndpointsConfig {
-		aliases = append(aliases, endpoint.Aliases...)
-		if !slices.Contains(networks, name) {
-			networks = append(networks, name)
-		}
-	}
-
-	opts := adapter.RunOptions{
-		Name:         name,
-		Image:        body.Image,
-		Entrypoint:   body.Entrypoint,
-		Cmd:          body.Cmd,
-		Env:          body.Env,
-		Labels:       body.Labels,
-		ExposedPorts: body.ExposedPorts,
-		PortBindings: portBindings,
-		PublishAll:   body.HostConfig.PublishAllPorts,
-		GPUCount:     gpuCount,
-		Binds:        body.HostConfig.Binds,
-		Aliases:      aliases,
-		Networks:     networks,
-	}
+	opts, ignored := adapter.RunOptionsFromRequest(name, req)
 
 	id, warnings, err := h.adapter.CreateContainer(r.Context(), opts)
 	if err != nil {
@@ -280,7 +195,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	httputils.WriteJSON(w, http.StatusCreated, map[string]any{
 		"Id":       id,
-		"Warnings": warnings,
+		"Warnings": append(ignored, warnings...),
 	})
 }
 

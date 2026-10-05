@@ -346,3 +346,29 @@ func TestCreateDoesNotStart(t *testing.T) {
 		t.Fatalf("after stop: state = %s, finished at %q; want exited with a time", inspect.State.Status, inspect.State.FinishedAt)
 	}
 }
+
+func TestCreateContainerAppliesTranslatedSettings(t *testing.T) {
+	a, client := newTestAdapter(t)
+	opts, warnings := RunOptionsFromRequest("app", request(t, `{"Image":"app","User":"1000","WorkingDir":"/srv","Tty":true,"StopTimeout":5,
+		"HostConfig":{"Memory":268435456,"NanoCpus":500000000,"ExtraHosts":["db:10.0.0.5"],"CapDrop":["ALL"],"ReadonlyRootfs":true}}`))
+	if len(warnings) != 0 {
+		t.Fatal(warnings)
+	}
+	mustCreate(t, a, opts)
+
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "app", metav1.GetOptions{})
+	pod := d.Spec.Template.Spec
+	c := pod.Containers[0]
+	if c.WorkingDir != "/srv" || !c.TTY || *pod.TerminationGracePeriodSeconds != 5 {
+		t.Errorf("container = %+v, grace = %v", c, pod.TerminationGracePeriodSeconds)
+	}
+	if *c.SecurityContext.RunAsUser != 1000 || !*c.SecurityContext.ReadOnlyRootFilesystem || c.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("security context = %+v", c.SecurityContext)
+	}
+	if c.Resources.Limits.Memory().Value() != 256<<20 || c.Resources.Limits.Cpu().MilliValue() != 500 {
+		t.Errorf("resources = %+v", c.Resources)
+	}
+	if len(pod.HostAliases) != 1 || pod.HostAliases[0].IP != "10.0.0.5" {
+		t.Errorf("host aliases = %+v", pod.HostAliases)
+	}
+}

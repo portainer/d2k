@@ -103,6 +103,15 @@ standalone_cases() {
   check "ps without -a hides stopped containers" bash -c '! docker ps --format {{.Names}} | grep -qx e2e-life'
   docker rm e2e-life >/dev/null
 
+  # docker run settings are translated, and unsupported ones reported.
+  check "run settings reach the container" bash -c "
+    docker run -d --name e2e-settings -w /tmp -u 101:101 -m 64m --cpus 0.5 --add-host db:10.0.0.5 nginx:alpine sleep 600 >/dev/null &&
+    for _ in \$(seq 60); do [ \"\$(docker inspect -f {{.State.Status}} e2e-settings)\" = running ] && break; sleep 2; done &&
+    [ \"\$(kubectl --context $CONTEXT -n d2k exec deploy/e2e-settings -- sh -c 'pwd; id -u; grep db /etc/hosts' | tr -s ' \t\n' ' ')\" = '/tmp 101 10.0.0.5 db ' ] &&
+    [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-settings -o jsonpath='{.spec.template.spec.containers[0].resources.limits}')\" = '{\"cpu\":\"500m\",\"memory\":\"64Mi\"}' ]"
+  check "unsupported settings are reported" bash -c 'docker create --name e2e-warn --dns 1.1.1.1 nginx:alpine 2>&1 >/dev/null | grep -q "Dns is not supported by d2k"'
+  docker rm -f e2e-settings e2e-warn >/dev/null 2>&1
+
   # Phase 0: name resolution.
   docker run -d --name e2e-my-api nginx:alpine >/dev/null
   check "rm does not match by name suffix" bash -c '! docker rm api 2>/dev/null && docker container inspect e2e-my-api >/dev/null'
