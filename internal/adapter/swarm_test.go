@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/errdefs"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	"github.com/portainer/d2k/internal/errdefs"
+	"github.com/portainer/d2k/internal/filters"
 	"github.com/portainer/d2k/internal/types"
 )
 

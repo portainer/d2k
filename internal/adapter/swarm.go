@@ -30,8 +30,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/errdefs"
 	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -40,6 +38,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
+	"github.com/portainer/d2k/internal/errdefs"
+	"github.com/portainer/d2k/internal/filters"
 	"github.com/portainer/d2k/internal/types"
 )
 

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/docker/docker/errdefs"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/types"
 )
 

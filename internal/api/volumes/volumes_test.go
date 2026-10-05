@@ -4,9 +4,8 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/docker/docker/api/types/filters"
-
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/filters"
 )
 
 func TestFilterVolumes(t *testing.T) {

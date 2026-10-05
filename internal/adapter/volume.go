@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/docker/docker/errdefs"
 	"github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/types"
 )
 

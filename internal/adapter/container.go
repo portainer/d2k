@@ -13,7 +13,6 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -26,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/types"
 	"github.com/portainer/d2k/pkg/portmapper"
 )

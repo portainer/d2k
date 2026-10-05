@@ -8,9 +8,10 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/docker/docker/errdefs"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/portainer/d2k/internal/errdefs"
 )
 
 func TestParseFilters(t *testing.T) {

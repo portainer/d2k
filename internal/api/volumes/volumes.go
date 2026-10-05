@@ -15,8 +15,8 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/docker/docker/api/types/filters"
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/filters"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 

@@ -24,10 +24,10 @@ import (
 	"github.com/rs/zerolog/log"
 
 	dockertypes "github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/apispec"
+	"github.com/portainer/d2k/internal/filters"
+	"github.com/portainer/d2k/internal/namesgenerator"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 

@@ -4,9 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/errdefs"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
+	"github.com/portainer/d2k/internal/errdefs"
+	"github.com/portainer/d2k/internal/filters"
 )
 
 // WriteJSON writes v as a JSON response with the given status code.
