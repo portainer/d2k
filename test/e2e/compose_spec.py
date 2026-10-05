@@ -195,8 +195,8 @@ CASES = [
     case("devices", NO, "Use a device plugin and resource requests.", "devices: ['/dev/null:/dev/xnull']", warns("HostConfig.Devices")),
     case("device_cgroup_rules", NO, "", "device_cgroup_rules: ['c 1:3 mr']", warns("DeviceCgroupRules")),
     case("storage_opt", NO, "", "storage_opt: {size: 1G}", warns("StorageOpt")),
-    case("use_api_socket", NO, "There is no Docker socket to share: compose's bind mount is ignored and its upload of "
-         "the client's Docker config fails.", "use_api_socket: true", fails("archive is not supported")),
+    case("use_api_socket", NO, "There is no Docker socket to share: compose's bind mount of it is ignored with a warning.",
+         "use_api_socket: true", warns("host paths are not supported")),
 
     # --- services: networking -----------------------------------------------
     case("ports", PARTIAL, "Published ports get a LoadBalancer Service. A `host_ip` is ignored with a warning.",
@@ -248,12 +248,12 @@ CASES = [
          ok(lambda d: {"medium": "Memory", "sizeLimit": "64Mi"} in [v.get("emptyDir") for v in pod(d)["volumes"]])),
 
     # --- services: secrets and configs --------------------------------------
-    case("secrets", PARTIAL, "Not yet: secrets from `environment` fail. Secrets from a `file` are ignored with a "
-         "warning: the file is on the client.", "secrets: [pw]", fails("archive is not supported"),
-         top="secrets: {pw: {environment: DB_PASS}}"),
+    case("secrets", PARTIAL, "Secrets from `environment` (and configs from `content` or `environment`) are stored in "
+         "a Secret owned by the container and mounted read-only at their target with their `mode`; `uid` and `gid` are "
+         "not kept, and they total 1 MiB at most. Secrets from a `file` are ignored with a warning: the file is on the "
+         "client.", "secrets: [pw]", ok(lambda d: any(m["mountPath"] == "/run/secrets/pw" and m["readOnly"] for m in ctr(d)["volumeMounts"])), top="secrets: {pw: {environment: DB_PASS}}"),
     case("secrets.file", NO, "See `secrets`.", "secrets: [pw]", warns('"/run/secrets/pw" ignored'), top="secrets: {pw: {file: ./pw.txt}}"),
-    case("configs", PARTIAL, "Not yet: configs from `content` or `environment` fail. Configs from a `file` are ignored "
-         "with a warning.", "configs: [cfg]", fails("archive is not supported"), top="configs: {cfg: {content: hello}}"),
+    case("configs", PARTIAL, "As `secrets`.", "configs: [cfg]", ok(lambda d: any(m["mountPath"] == "/cfg" and m["readOnly"] for m in ctr(d)["volumeMounts"])), top="configs: {cfg: {content: hello}}"),
     case("configs.file", NO, "See `configs`.", "configs: [cfg]", warns('"/cfg" ignored'), top="configs: {cfg: {file: ./cfg.txt}}"),
 
     # --- services: logging --------------------------------------------------
@@ -299,16 +299,16 @@ CASES = [
     case("volumes.top.name", YES, "", "volumes: [data:/data]", ok(), top="volumes: {data: {name: custom_vol}}"),
     case("volumes.top.external", YES, "", "volumes: [data:/data]", fails("not found"),
          top="volumes: {data: {external: true, name: nosuchvol}}"),
-    case("secrets.top.environment", PARTIAL, "See `secrets`.", "secrets: [pw]", fails("archive is not supported"),
+    case("secrets.top.environment", PARTIAL, "See `secrets`.", "secrets: [pw]", ok(lambda d: any(m["mountPath"] == "/run/secrets/pw" and m["readOnly"] for m in ctr(d)["volumeMounts"])),
          top="secrets: {pw: {environment: DB_PASS}}"),
     case("secrets.top.file", NO, "See `secrets`.", "secrets: [pw]", warns('"/run/secrets/pw" ignored'), top="secrets: {pw: {file: ./pw.txt}}"),
     case("secrets.top.driver", CLIENT, "Compose rejects secret drivers outside Swarm mode.", "secrets: [pw]",
          fails("does not support secrets.*.driver"), top="secrets: {pw: {file: ./pw.txt, driver: vault}}"),
     case("secrets.top.template_driver", CLIENT, "As `driver`.", "secrets: [pw]",
          fails("does not support secrets.*.template_driver"), top="secrets: {pw: {file: ./pw.txt, template_driver: golang}}"),
-    case("configs.top.content", PARTIAL, "See `configs`.", "configs: [cfg]", fails("archive is not supported"),
+    case("configs.top.content", PARTIAL, "See `secrets`.", "configs: [cfg]", ok(lambda d: any(m["mountPath"] == "/cfg" and m["readOnly"] for m in ctr(d)["volumeMounts"])),
          top="configs: {cfg: {content: hello}}"),
-    case("configs.top.environment", PARTIAL, "See `configs`.", "configs: [cfg]", fails("archive is not supported"),
+    case("configs.top.environment", PARTIAL, "See `secrets`.", "configs: [cfg]", ok(lambda d: any(m["mountPath"] == "/cfg" and m["readOnly"] for m in ctr(d)["volumeMounts"])),
          top="configs: {cfg: {environment: DB_PASS}}"),
     case("configs.top.file", NO, "See `configs`.", "configs: [cfg]", warns('"/cfg" ignored'), top="configs: {cfg: {file: ./cfg.txt}}"),
     case("configs.top.external", CLIENT, "Compose rejects external configs outside Swarm mode.", "configs: [cfg]",

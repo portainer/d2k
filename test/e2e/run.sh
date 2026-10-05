@@ -303,6 +303,32 @@ YAML
   (cd "$dir" && to 120 docker compose -p e2eh down) >/dev/null 2>&1
 }
 
+# secrets_cases checks compose secrets and configs from environment and content.
+secrets_cases() {
+  export DOCKER_HOST=$STANDALONE
+  echo "== secrets and configs ($STANDALONE)"
+  local dir=$WORKDIR/secrets
+  mkdir -p "$dir"
+  cat >"$dir/compose.yaml" <<'YAML'
+services:
+  app:
+    image: busybox
+    command: [sleep, "3600"]
+    secrets: [pw]
+    configs: [{source: cfg, target: /etc/app.conf, mode: 0400}]
+secrets:
+  pw: {environment: E2E_PW}
+configs:
+  cfg: {content: "level=debug"}
+YAML
+  check "compose up with secrets and configs" bash -c "cd $dir && E2E_PW=s3cret perl -e 'alarm 120; exec @ARGV' docker compose -p e2es up -d"
+  eventually 120 running e2es-app-1
+  check "secret content is in the container" bash -c '[ "$(docker exec e2es-app-1 cat /run/secrets/pw)" = s3cret ]'
+  check "config content and mode are in the container" bash -c '[ "$(docker exec e2es-app-1 cat /etc/app.conf)" = level=debug ] && docker exec e2es-app-1 stat -L -c %a /etc/app.conf | grep -q "^400$"'
+  check "compose down removes the stored files" bash -c "cd $dir && perl -e 'alarm 60; exec @ARGV' docker compose -p e2es down -t 1 >/dev/null 2>&1 &&
+    for _ in \$(seq 30); do kubectl --context $CONTEXT -n d2k get secret -o name | grep -q e2es || exit 0; sleep 2; done; exit 1"
+}
+
 # dc <args...>: docker compose for the e2ec lifecycle project, with a timeout.
 dc() { (cd "$COMPOSE_DIR" && to 180 docker compose -p e2ec "$@"); }
 running() { [ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" = running ]; }
@@ -408,6 +434,7 @@ reset
 standalone_cases
 compose_cases
 health_cases
+secrets_cases
 swarm_cases
 reset
 

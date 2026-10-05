@@ -1,6 +1,8 @@
 package router
 
 import (
+	"archive/tar"
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,5 +60,24 @@ func TestCreateWarnsAboutPlatform(t *testing.T) {
 	rec := do(t, h, "POST", "/containers/create?name=web&platform=linux/arm64", `{"Image":"nginx"}`)
 	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `platform \"linux/arm64\"`) {
 		t.Fatalf("create = %d %s, want a warning about the platform", rec.Code, rec.Body)
+	}
+}
+
+func TestPutArchive(t *testing.T) {
+	h, _ := newTestRouter()
+	if rec := do(t, h, "POST", "/containers/create?name=web", `{"Image":"nginx"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	var b bytes.Buffer
+	w := tar.NewWriter(&b)
+	_ = w.WriteHeader(&tar.Header{Name: "/run/secrets/pw", Mode: 0o444, Size: 2, Typeflag: tar.TypeReg})
+	_, _ = w.Write([]byte("pw"))
+	_ = w.Close()
+
+	if rec := do(t, h, "PUT", "/containers/web/archive?path=/", b.String()); rec.Code != http.StatusOK {
+		t.Errorf("put archive = %d %s, want 200", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "PUT", "/containers/web/archive", b.String()); rec.Code != http.StatusBadRequest {
+		t.Errorf("put archive without a path = %d, want 400", rec.Code)
 	}
 }

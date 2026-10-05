@@ -217,6 +217,23 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// PutArchive handles PUT /containers/{id}/archive: it writes the files of a
+// tar archive into the container under the directory named by path, as
+// `docker cp` and compose's secrets and configs do.
+func (h *Handler) PutArchive(w http.ResponseWriter, r *http.Request) {
+	dir := r.URL.Query().Get("path")
+	if dir == "" {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(errors.New("path is required")))
+		return
+	}
+	if err := h.adapter.CopyToContainer(r.Context(), r.PathValue("id"), dir, r.Body); err != nil {
+		log.Error().Str("context", "ContainersAPI").Str("id", r.PathValue("id")).Err(err).Msg("CopyToContainer failed")
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // Wait handles POST /containers/{id}/wait: it answers when the container
 // stops running (condition not-running, the default), next exits
 // (next-exit) or is removed (removed), with its exit code.

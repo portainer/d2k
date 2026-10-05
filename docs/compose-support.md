@@ -98,7 +98,7 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `devices` | Not supported | Use a device plugin and resource requests. |
 | `device_cgroup_rules` | Not supported |  |
 | `storage_opt` | Not supported |  |
-| `use_api_socket` | Not supported | There is no Docker socket to share: compose's bind mount is ignored and its upload of the client's Docker config fails. |
+| `use_api_socket` | Not supported | There is no Docker socket to share: compose's bind mount of it is ignored with a warning. |
 | `ports` | Partial | Published ports get a LoadBalancer Service. A `host_ip` is ignored with a warning. |
 | `ports.range` | Supported |  |
 | `ports.host_ip` | Partial | See `ports`. |
@@ -124,9 +124,9 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `volumes.nocopy` | Supported | d2k never copies image content into a new volume, so every volume behaves as `nocopy`. |
 | `volumes_from` | Not supported |  |
 | `tmpfs` | Partial | Memory-backed `emptyDir`s; a `size=` option is the size limit, other options are ignored with a warning. |
-| `secrets` | Partial | Not yet: secrets from `environment` fail. Secrets from a `file` are ignored with a warning: the file is on the client. |
+| `secrets` | Partial | Secrets from `environment` (and configs from `content` or `environment`) are stored in a Secret owned by the container and mounted read-only at their target with their `mode`; `uid` and `gid` are not kept, and they total 1 MiB at most. Secrets from a `file` are ignored with a warning: the file is on the client. |
 | `secrets.file` | Not supported | See `secrets`. |
-| `configs` | Partial | Not yet: configs from `content` or `environment` fail. Configs from a `file` are ignored with a warning. |
+| `configs` | Partial | As `secrets`. |
 | `configs.file` | Not supported | See `configs`. |
 | `logging` | Partial | Logs are read from Kubernetes. Drivers other than `json-file` and log options are ignored with a warning: the kubelet rotates logs. |
 | `logging.options` | Partial | See `logging`. |
@@ -158,8 +158,8 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `secrets.file` | Not supported | See `secrets`. |
 | `secrets.driver` | Compose | Compose rejects secret drivers outside Swarm mode. |
 | `secrets.template_driver` | Compose | As `driver`. |
-| `configs.content` | Partial | See `configs`. |
-| `configs.environment` | Partial | See `configs`. |
+| `configs.content` | Partial | See `secrets`. |
+| `configs.environment` | Partial | See `secrets`. |
 | `configs.file` | Not supported | See `configs`. |
 | `configs.external` | Compose | Compose rejects external configs outside Swarm mode. |
 | `secrets.external` | Compose | Compose rejects external secrets outside Swarm mode. |
