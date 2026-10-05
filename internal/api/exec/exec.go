@@ -1,20 +1,20 @@
 package exec
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
-	"crypto/rand"
-	"encoding/hex"
-	
+
 	"go.uber.org/zap"
 
+	"github.com/gorilla/websocket"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/pkg/httputils"
-	"github.com/gorilla/websocket"
 )
 
 // Handler holds dependencies for exec API endpoints.
@@ -217,6 +217,7 @@ func (h *Handler) startWebSocket(w http.ResponseWriter, r *http.Request, instanc
 	stdoutW.Close()
 	stderrW.Close()
 }
+
 // Inspect handles GET /exec/{id}/json.
 func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 	id := execIDFromPath(r.URL.Path)

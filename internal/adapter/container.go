@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"strings"
 	"strconv"
+	"strings"
 	"time"
 
 	dockertypes "github.com/docker/docker/api/types"
@@ -303,6 +303,7 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 
 	return nil
 }
+
 // RenameContainer implements docker rename. The Docker name lives in an
 // annotation, so the Deployment, and with it the container ID, is unchanged.
 func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID, newName string) error {
@@ -444,12 +445,12 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:    opts.Name,
-							Image:   opts.Image,
-							Command: opts.Entrypoint,
-							Args:    opts.Cmd,
-							Env:     envVars,
-							Ports:   containerPorts,
+							Name:      opts.Name,
+							Image:     opts.Image,
+							Command:   opts.Entrypoint,
+							Args:      opts.Cmd,
+							Env:       envVars,
+							Ports:     containerPorts,
 							Resources: resourceReqs,
 						},
 					},

@@ -1,13 +1,13 @@
 package middleware
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
-	"net/http"
-	"time"
-	"bufio"
 	"fmt"
 	"net"
+	"net/http"
+	"time"
 
 	"go.uber.org/zap"
 )

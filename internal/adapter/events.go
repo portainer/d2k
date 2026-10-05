@@ -12,11 +12,11 @@ import (
 
 // DockerEvent mirrors the Docker event wire format.
 type DockerEvent struct {
-	Type   string            `json:"Type"`
-	Action string            `json:"Action"`
-	Actor  DockerEventActor  `json:"Actor"`
-	Time   int64             `json:"time"`
-	TimeNano int64           `json:"timeNano"`
+	Type     string           `json:"Type"`
+	Action   string           `json:"Action"`
+	Actor    DockerEventActor `json:"Actor"`
+	Time     int64            `json:"time"`
+	TimeNano int64            `json:"timeNano"`
 }
 
 // DockerEventActor holds the event subject.

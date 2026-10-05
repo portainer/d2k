@@ -121,8 +121,8 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 		"Comment":  "synthesized by d2k — actual image metadata lives on cluster nodes",
 		"Os":       "linux",
 		"Config": map[string]any{
-    		"Image": name,
-    		"Cmd":   []string{"/bin/sh"},
+			"Image": name,
+			"Cmd":   []string{"/bin/sh"},
 		},
 	})
 }

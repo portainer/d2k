@@ -122,7 +122,7 @@ func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts Crea
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
 			// NFS supports ReadWriteMany — multiple pods can mount simultaneously.
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
 			StorageClassName: &matchedSC,
 			Resources: corev1.VolumeResourceRequirements{
 				Requests: corev1.ResourceList{corev1.ResourceStorage: qty},

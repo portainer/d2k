@@ -57,7 +57,7 @@ func (h *Handler) DispatchAction(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/attach"):
 		h.Attach(w, r)
 	case strings.HasSuffix(path, "/rename"):
-    h.Rename(w, r)
+		h.Rename(w, r)
 	default:
 		http.NotFound(w, r)
 	}
