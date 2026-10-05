@@ -20,6 +20,7 @@ import (
 	"github.com/portainer/d2k/internal/api/volumes"
 	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/internal/middleware"
+	"github.com/portainer/d2k/pkg/httputils"
 )
 
 // New builds the router with all Docker API endpoints registered.
@@ -122,9 +123,13 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool) h
 		apispec.NotRouted(w, r)
 	})
 
-	// Versioned path prefix stripping - Docker CLI sends /v1.41/containers/json etc.
+	// Versioned path prefix stripping - Docker CLI sends /v1.52/containers/json etc.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if path := stripAPIVersion(r.URL.Path); path != r.URL.Path {
+			if err := apispec.CheckVersion(r.URL.Path[2 : len(r.URL.Path)-len(path)]); err != nil {
+				httputils.WriteErrorFrom(w, err)
+				return
+			}
 			r2 := r.Clone(r.Context())
 			// Clone the URL to avoid mutating the original request's URL,
 			// which would corrupt logging and any subsequent middleware reads.
@@ -140,7 +145,7 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool) h
 	return middleware.Logging(middleware.RequestID(handler))
 }
 
-// apiVersionPrefix matches the API version prefix Docker clients send, e.g. "/v1.41".
+// apiVersionPrefix matches the API version prefix Docker clients send, e.g. "/v1.52".
 var apiVersionPrefix = regexp.MustCompile(`^/v[0-9]+\.[0-9]+/`)
 
 // stripAPIVersion removes a leading /v<major>.<minor> segment. Unversioned

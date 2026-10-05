@@ -119,12 +119,13 @@ standalone_cases() {
   check "volume rm" bash -c 'docker volume rm e2e-vol e2e-vol-raw >/dev/null'
 
   # Docker Engine API operations d2k does not implement answer 501.
-  check "unsupported operation returns 501" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/v1.41/system/df)" = 501 ]'
+  check "unsupported operation returns 501" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/v1.52/system/df)" = 501 ]'
   check "docker reports an unsupported operation" bash -c 'docker system df 2>&1 | grep -q "not supported by d2k"'
   # Status codes clients branch on (compose treats 404 as "gone").
-  check "removing a missing container returns 404" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} -X DELETE https://localhost:31112/v1.41/containers/e2e-missing)" = 404 ]'
-  check "duplicate container name returns 409" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json -d "{\"Image\":\"nginx:alpine\"}" "https://localhost:31112/v1.41/containers/create?name=e2e-group-a")" = 409 ]'
-  check "non-Docker path returns 404" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/v1.41/not/docker)" = 404 ]'
+  check "removing a missing container returns 404" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} -X DELETE https://localhost:31112/v1.52/containers/e2e-missing)" = 404 ]'
+  check "duplicate container name returns 409" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json -d "{\"Image\":\"nginx:alpine\"}" "https://localhost:31112/v1.52/containers/create?name=e2e-group-a")" = 409 ]'
+  check "API versions older than 1.44 are rejected" bash -c 'curl -s https://localhost:31112/v1.41/_ping | grep -q "client version 1.41 is too old"'
+  check "non-Docker path returns 404" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/v1.52/not/docker)" = 404 ]'
 
   check "rm deletes the Deployment" bash -c "docker rm -f e2e-web >/dev/null && ! kubectl --context $CONTEXT -n d2k get deploy e2e-web >/dev/null 2>&1"
 }

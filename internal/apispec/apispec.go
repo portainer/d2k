@@ -1,18 +1,53 @@
 // Package apispec holds the Docker Engine API routes d2k is measured against,
-// generated from the pinned moby API specification in docker-v1.41.yaml
-// (https://github.com/moby/moby/blob/master/docs/api/v1.41.yaml, Apache-2.0).
+// generated from the pinned moby API specification in docker-v1.52.yaml
+// (https://github.com/moby/moby/blob/master/api/swagger.yaml, v1.52.0, Apache-2.0).
 package apispec
 
 import (
+	"cmp"
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
-//go:generate go run ./gen docker-v1.41.yaml routes_gen.go
+//go:generate go run ./gen docker-v1.52.yaml routes_gen.go
+
+// MinVersion is the oldest API version d2k serves, as for Docker Engine 29.
+// Version, the newest, comes from the pinned specification.
+const MinVersion = "1.44"
+
+// CheckVersion returns an error, as the Docker daemon words it, when a
+// client's API version is outside [MinVersion, Version].
+func CheckVersion(v string) error {
+	switch {
+	case compareVersions(v, MinVersion) < 0:
+		return errdefs.InvalidParameter(fmt.Errorf("client version %s is too old. Minimum supported API version is %s, please upgrade your client to a newer version", v, MinVersion))
+	case compareVersions(v, Version) > 0:
+		return errdefs.InvalidParameter(fmt.Errorf("client version %s is too new. Maximum supported API version is %s", v, Version))
+	}
+	return nil
+}
+
+// compareVersions compares "major.minor" versions numerically: 1.5 < 1.44.
+func compareVersions(a, b string) int {
+	parse := func(v string) (int, int) {
+		major, minor, _ := strings.Cut(v, ".")
+		x, _ := strconv.Atoi(major)
+		y, _ := strconv.Atoi(minor)
+		return x, y
+	}
+	aMajor, aMinor := parse(a)
+	bMajor, bMinor := parse(b)
+	if c := cmp.Compare(aMajor, bMajor); c != 0 {
+		return c
+	}
+	return cmp.Compare(aMinor, bMinor)
+}
 
 // Route is a Docker Engine API operation: a method and a path template such
 // as "/containers/{id}/json".

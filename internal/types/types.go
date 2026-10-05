@@ -6,9 +6,6 @@ package types
 var Version = "dev"
 
 const (
-	// DockerAPIVersion is the Docker API version we claim to implement.
-	DockerAPIVersion = "1.41"
-
 	// LabelPrefix is the prefix for all labels d2k places on Kubernetes resources.
 	LabelPrefix = "d2k.portainer.io"
 

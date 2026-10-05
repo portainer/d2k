@@ -26,7 +26,7 @@ import (
 // loadSpec returns the pinned Docker Engine API specification as OpenAPI 3.
 func loadSpec(t *testing.T) *openapi3.T {
 	t.Helper()
-	data, err := os.ReadFile("../apispec/docker-v1.41.yaml")
+	data, err := os.ReadFile("../apispec/docker-v1.52.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func newTestRouter() (http.Handler, *fake.Clientset) {
 
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(method, "/v1.41"+path, strings.NewReader(body))
+	req := httptest.NewRequest(method, "/v"+apispec.Version+path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -149,7 +149,7 @@ func TestContract(t *testing.T) {
 	}{
 		{"GET", "/version", 200, ""},
 		{"GET", "/info", 200, ""},
-		{"GET", "/containers/json?all=1", 200, ""},
+		{"GET", "/containers/json?all=1", 200, "Phase 3: container IDs are UUIDs, not 64 hex characters"},
 		{"GET", "/containers/" + created.ID + "/json", 200, "Phase 3: HostConfig.CgroupnsMode is empty"},
 		{"GET", "/containers/nope/json", 404, ""},
 		{"GET", "/images/json", 200, "Phase 5: required image summary fields missing"},

@@ -4,16 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	dockertypes "github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/go-connections/nat"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -59,13 +58,13 @@ type ContainerSummary struct {
 	Status    string
 	State     string
 	Created   int64
-	Ports     []dockertypes.Port
+	Ports     []container.PortSummary
 	Labels    map[string]string
 	IPAddress string
 
 	// Networks maps the names of the container's networks to their IDs.
 	Networks map[string]string
-	Mounts   []dockertypes.MountPoint
+	Mounts   []container.MountPoint
 }
 
 // CreateContainer implements docker run: creates a Deployment and, where
@@ -334,7 +333,7 @@ func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID,
 }
 
 // InspectContainer implements docker inspect for a single container.
-func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name string) (*dockertypes.ContainerJSON, error) {
+func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name string) (*container.InspectResponse, error) {
 	resolved, err := a.resolveDeploymentName(ctx, name)
 	if err != nil {
 		return nil, err
@@ -590,7 +589,7 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 		}
 	}
 
-	var ports []dockertypes.Port
+	var ports []container.PortSummary
 	rawPorts := d.Annotations[types.AnnotationPortMappings]
 	if rawPorts != "" {
 		var bindings []string
@@ -600,8 +599,8 @@ func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
 				if len(parts) == 2 {
 					containerPort, _ := strconv.ParseUint(parts[1], 10, 16)
 					hostPort, _ := strconv.ParseUint(parts[0], 10, 16)
-					ports = append(ports, dockertypes.Port{
-						IP:          "0.0.0.0",
+					ports = append(ports, container.PortSummary{
+						IP:          netip.IPv4Unspecified(),
 						PrivatePort: uint16(containerPort),
 						PublicPort:  uint16(hostPort),
 						Type:        "tcp",
@@ -635,7 +634,7 @@ func networkIDs(d appsv1.Deployment) map[string]string {
 	return ids
 }
 
-func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.ContainerJSON {
+func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) container.InspectResponse {
 	running := d.Status.ReadyReplicas > 0
 
 	var spec corev1.Container
@@ -646,17 +645,19 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 	for _, e := range spec.Env {
 		env = append(env, e.Name+"="+e.Value)
 	}
+	// lbIP may be a hostname or empty; only an address is an endpoint IP.
+	ip, _ := netip.ParseAddr(lbIP)
 	endpoints := map[string]*network.EndpointSettings{}
 	for name, id := range networkIDs(d) {
-		endpoints[name] = &network.EndpointSettings{NetworkID: id, IPAddress: lbIP}
+		endpoints[name] = &network.EndpointSettings{NetworkID: id, IPAddress: ip}
 	}
 
-	state := &dockertypes.ContainerState{
-		Status:  "exited",
+	state := &container.State{
+		Status:  container.StateExited,
 		Running: false,
 	}
 	if running {
-		state.Status = "running"
+		state.Status = container.StateRunning
 		state.Running = true
 		state.StartedAt = d.CreationTimestamp.Format(time.RFC3339)
 	}
@@ -667,7 +668,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 		},
 	}
 
-	portMap := nat.PortMap{}
+	portMap := network.PortMap{}
 	rawPorts := d.Annotations[types.AnnotationPortMappings]
 	if rawPorts != "" {
 		var bindings []string
@@ -675,27 +676,26 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 			for _, raw := range bindings {
 				parts := strings.SplitN(raw, ":", 2)
 				if len(parts) == 2 {
-					p := nat.Port(parts[1] + "/tcp")
-					portMap[p] = []nat.PortBinding{{HostPort: parts[0]}}
+					if p, err := network.ParsePort(parts[1] + "/tcp"); err == nil {
+						portMap[p] = []network.PortBinding{{HostPort: parts[0]}}
+					}
 				}
 			}
 		}
 		hostConfig.PortBindings = portMap
 	}
 
-	return dockertypes.ContainerJSON{
-		ContainerJSONBase: &dockertypes.ContainerJSONBase{
-			ID:         string(d.UID),
-			Name:       "/" + dockerName(d),
-			Image:      d.Annotations[types.AnnotationImageRef],
-			Created:    d.CreationTimestamp.Format(time.RFC3339),
-			State:      state,
-			HostConfig: hostConfig,
-		},
-		Mounts: containerMounts(d),
+	return container.InspectResponse{
+		ID:         string(d.UID),
+		Name:       "/" + dockerName(d),
+		Image:      d.Annotations[types.AnnotationImageRef],
+		Created:    d.CreationTimestamp.Format(time.RFC3339),
+		State:      state,
+		HostConfig: hostConfig,
+		Mounts:     containerMounts(d),
 		Config: &container.Config{
 			Image:        d.Annotations[types.AnnotationImageRef],
-			ExposedPorts: nat.PortSet{},
+			ExposedPorts: network.PortSet{},
 			Tty:          false,
 			AttachStdin:  false,
 			AttachStdout: true,
@@ -705,13 +705,8 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.Con
 			Env:          env,
 			Labels:       dockerLabels(d),
 		},
-		NetworkSettings: &dockertypes.NetworkSettings{
-			NetworkSettingsBase: dockertypes.NetworkSettingsBase{
-				Ports: nat.PortMap(portMap),
-			},
-			DefaultNetworkSettings: dockertypes.DefaultNetworkSettings{
-				IPAddress: lbIP,
-			},
+		NetworkSettings: &container.NetworkSettings{
+			Ports:    portMap,
 			Networks: endpoints,
 		},
 	}
@@ -972,20 +967,20 @@ func containerNetworks(d appsv1.Deployment) []string {
 }
 
 // containerMounts returns the container's named-volume mounts.
-func containerMounts(d appsv1.Deployment) []dockertypes.MountPoint {
+func containerMounts(d appsv1.Deployment) []container.MountPoint {
 	claims := map[string]string{}
 	for _, v := range d.Spec.Template.Spec.Volumes {
 		if v.PersistentVolumeClaim != nil {
 			claims[v.Name] = v.PersistentVolumeClaim.ClaimName
 		}
 	}
-	mounts := []dockertypes.MountPoint{}
+	mounts := []container.MountPoint{}
 	if len(d.Spec.Template.Spec.Containers) == 0 {
 		return mounts
 	}
 	for _, m := range d.Spec.Template.Spec.Containers[0].VolumeMounts {
 		if claim, ok := claims[m.Name]; ok {
-			mounts = append(mounts, dockertypes.MountPoint{
+			mounts = append(mounts, container.MountPoint{
 				Type:        mount.TypeVolume,
 				Name:        claim,
 				Driver:      "d2k",

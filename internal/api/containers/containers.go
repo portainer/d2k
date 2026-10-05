@@ -23,7 +23,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	dockertypes "github.com/docker/docker/api/types"
+	"github.com/moby/moby/api/types/container"
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/internal/filters"
@@ -108,44 +108,28 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	ctrs = filterContainers(ctrs, args)
 
-	type portBinding struct {
-		IP          string `json:"IP"`
-		PrivatePort uint16 `json:"PrivatePort"`
-		PublicPort  uint16 `json:"PublicPort"`
-		Type        string `json:"Type"`
-	}
-
 	type endpoint struct {
 		NetworkID string `json:"NetworkID"`
 	}
 	type item struct {
-		ID        string            `json:"Id"`
-		Names     []string          `json:"Names"`
-		Image     string            `json:"Image"`
-		Status    string            `json:"Status"`
-		State     string            `json:"State"`
-		Created   int64             `json:"Created"`
-		Ports     []portBinding     `json:"Ports"`
-		Labels    map[string]string `json:"Labels"`
-		IPAddress string            `json:"IPAddress"`
+		ID        string                  `json:"Id"`
+		Names     []string                `json:"Names"`
+		Image     string                  `json:"Image"`
+		Status    string                  `json:"Status"`
+		State     string                  `json:"State"`
+		Created   int64                   `json:"Created"`
+		Ports     []container.PortSummary `json:"Ports"`
+		Labels    map[string]string       `json:"Labels"`
+		IPAddress string                  `json:"IPAddress"`
 
 		NetworkSettings struct {
 			Networks map[string]endpoint `json:"Networks"`
 		} `json:"NetworkSettings"`
-		Mounts []dockertypes.MountPoint `json:"Mounts"`
+		Mounts []container.MountPoint `json:"Mounts"`
 	}
 
 	result := make([]item, 0, len(ctrs))
 	for _, c := range ctrs {
-		var ports []portBinding
-		for _, p := range c.Ports {
-			ports = append(ports, portBinding{
-				IP:          p.IP,
-				PrivatePort: p.PrivatePort,
-				PublicPort:  p.PublicPort,
-				Type:        p.Type,
-			})
-		}
 		it := item{
 			ID:        c.ID,
 			Names:     c.Names,
@@ -155,7 +139,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			Created:   c.Created,
 			Labels:    c.Labels,
 			IPAddress: c.IPAddress,
-			Ports:     ports,
+			Ports:     c.Ports,
 			Mounts:    c.Mounts,
 		}
 		it.NetworkSettings.Networks = map[string]endpoint{}

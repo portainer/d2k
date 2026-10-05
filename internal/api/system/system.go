@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/internal/types"
 	"github.com/portainer/d2k/pkg/httputils"
 )
@@ -34,7 +35,7 @@ func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode 
 
 // Ping handles GET /_ping.
 func (h *Handler) Ping(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("API-Version", types.DockerAPIVersion)
+	w.Header().Set("API-Version", apispec.Version)
 	w.Header().Set("Docker-Experimental", "false")
 	w.Header().Set("OSType", "linux")
 	w.WriteHeader(http.StatusOK)
@@ -44,8 +45,8 @@ func (h *Handler) Ping(w http.ResponseWriter, r *http.Request) {
 // Version handles GET /version.
 func (h *Handler) Version(w http.ResponseWriter, r *http.Request) {
 	details := map[string]string{
-		"ApiVersion":    types.DockerAPIVersion,
-		"MinAPIVersion": "1.24",
+		"ApiVersion":    apispec.Version,
+		"MinAPIVersion": apispec.MinVersion,
 		"Os":            runtime.GOOS,
 		"Arch":          runtime.GOARCH,
 		"GoVersion":     runtime.Version(),

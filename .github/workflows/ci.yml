@@ -61,20 +61,7 @@ jobs:
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run ./...
 
       - name: "[execution] check for known vulnerabilities"
-        # Fails on any vulnerability d2k's code reaches, except these
-        # github.com/docker/docker advisories: they affect the Docker daemon
-        # (AuthZ plugins, plugin privileges), which d2k does not run, and the
-        # module has no fixed version. They go away with the move to
-        # github.com/moby/moby/api.
-        env:
-          ALLOWED: GO-2026-4883|GO-2026-4887
-        run: |
-          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -format json ./... > govulncheck.json
-          found=$(jq -r 'select(.finding.trace[0].function) | .finding.osv' govulncheck.json | sort -u | grep -vxE "$ALLOWED" || true)
-          if [ -n "$found" ]; then
-            echo "::error::Reachable vulnerabilities: $found"
-            exit 1
-          fi
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
   build:
     name: build
