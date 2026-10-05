@@ -2,7 +2,11 @@ package httputils
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
@@ -63,4 +67,25 @@ func ParseFilters(r *http.Request, accepted map[string]bool) (filters.Args, erro
 		return args, err
 	}
 	return args, args.Validate(accepted)
+}
+
+// ParseUnixTime parses the since/until query values Docker uses: a Unix
+// timestamp, optionally with a fractional part. Empty or "0" means unset.
+func ParseUnixTime(v string) (time.Time, error) {
+	if v == "" || v == "0" {
+		return time.Time{}, nil
+	}
+	secs, frac, _ := strings.Cut(v, ".")
+	s, err := strconv.ParseInt(secs, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid timestamp %q: expected a Unix timestamp", v)
+	}
+	var nanos int64
+	if frac != "" {
+		frac = (frac + "000000000")[:9]
+		if nanos, err = strconv.ParseInt(frac, 10, 64); err != nil {
+			return time.Time{}, fmt.Errorf("invalid timestamp %q: expected a Unix timestamp", v)
+		}
+	}
+	return time.Unix(s, nanos), nil
 }

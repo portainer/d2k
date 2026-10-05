@@ -129,6 +129,16 @@ standalone_cases() {
   check "unsupported settings are reported" bash -c 'docker create --name e2e-warn --dns 1.1.1.1 nginx:alpine 2>&1 >/dev/null | grep -q "Dns is not supported by d2k"'
   docker rm -f e2e-settings e2e-warn >/dev/null 2>&1
 
+  # Events are recorded and replayed with since/until, and streamed live.
+  check "events replay a container's lifecycle" bash -c '
+    start=$(date +%s); docker create --name e2e-ev nginx:alpine >/dev/null && docker start e2e-ev >/dev/null &&
+    docker stop e2e-ev >/dev/null && docker rm e2e-ev >/dev/null && sleep 2 &&
+    [ "$(docker events --since $start --until $(( $(date +%s) + 1 )) --filter container=e2e-ev --format "{{.Action}}" | tr "\n" " ")" = "create start stop destroy " ]'
+  check "events stream live" bash -c '
+    (perl -e "alarm 20; exec @ARGV" docker events --filter type=volume --format "{{.Action}} {{.Actor.ID}}" > '"$WORKDIR"'/events.out 2>/dev/null &) ;
+    sleep 3; docker volume create e2e-ev-vol >/dev/null; sleep 3; docker volume rm e2e-ev-vol >/dev/null;
+    for _ in $(seq 10); do grep -q "destroy e2e-ev-vol" '"$WORKDIR"'/events.out && grep -q "create e2e-ev-vol" '"$WORKDIR"'/events.out && exit 0; sleep 1; done; exit 1'
+
   # Phase 0: name resolution.
   docker run -d --name e2e-my-api nginx:alpine >/dev/null
   check "rm does not match by name suffix" bash -c '! docker rm api 2>/dev/null && docker container inspect e2e-my-api >/dev/null'

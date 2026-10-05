@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -75,5 +76,23 @@ func TestStatusFor(t *testing.T) {
 		if got := StatusFor(tt.err); got != tt.want {
 			t.Errorf("StatusFor(%v) = %d, want %d", tt.err, got, tt.want)
 		}
+	}
+}
+
+func TestParseUnixTime(t *testing.T) {
+	for in, want := range map[string]time.Time{
+		"":                     {},
+		"0":                    {},
+		"1759665601":           time.Unix(1759665601, 0),
+		"1759665601.250000000": time.Unix(1759665601, 250000000),
+		"1759665601.5":         time.Unix(1759665601, 500000000),
+	} {
+		got, err := ParseUnixTime(in)
+		if err != nil || !got.Equal(want) {
+			t.Errorf("ParseUnixTime(%q) = %v, %v; want %v", in, got, err, want)
+		}
+	}
+	if _, err := ParseUnixTime("yesterday"); err == nil {
+		t.Error("ParseUnixTime(yesterday) succeeded")
 	}
 }

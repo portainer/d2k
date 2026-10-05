@@ -87,6 +87,7 @@ func serve() {
 	log.Info().Str("context", "Startup").Str("namespace", cfg.Namespace).Msg("Connected to Kubernetes namespace")
 
 	a.LogNFSStorageClasses(ctx)
+	go a.RecordEvents(ctx)
 
 	handler := router.New(a, cfg.Namespace, cfg.SwarmMode)
 	err = server.Run(ctx, server.Config{

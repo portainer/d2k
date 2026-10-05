@@ -64,6 +64,9 @@ type KubernetesDockerAdapter struct {
 	// service names within their project first. Empty outside a cluster.
 	clusterDNS    string
 	clusterDomain string
+
+	// events records the namespace's Docker events (RecordEvents).
+	events eventHub
 }
 
 // Options configures a new KubernetesDockerAdapter.

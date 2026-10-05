@@ -23,7 +23,6 @@ import (
 	"io"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -285,8 +284,8 @@ func (h *Handler) Logs(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(errors.New("bad parameters: you must choose at least one stream")))
 		return
 	}
-	since, errSince := parseLogTime(q.Get("since"))
-	until, errUntil := parseLogTime(q.Get("until"))
+	since, errSince := httputils.ParseUnixTime(q.Get("since"))
+	until, errUntil := httputils.ParseUnixTime(q.Get("until"))
 	if err := errors.Join(errSince, errUntil); err != nil {
 		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(err))
 		return
@@ -368,27 +367,6 @@ func copyLogLines(src io.Reader, until time.Time, keepTimestamps bool, emit func
 			return readErr
 		}
 	}
-}
-
-// parseLogTime parses Docker's since/until: a Unix timestamp, optionally
-// with a fractional part. Empty or "0" means unset.
-func parseLogTime(v string) (time.Time, error) {
-	if v == "" || v == "0" {
-		return time.Time{}, nil
-	}
-	secs, frac, _ := strings.Cut(v, ".")
-	s, err := strconv.ParseInt(secs, 10, 64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("invalid timestamp %q: expected a Unix timestamp", v)
-	}
-	var nanos int64
-	if frac != "" {
-		frac = (frac + "000000000")[:9]
-		if nanos, err = strconv.ParseInt(frac, 10, 64); err != nil {
-			return time.Time{}, fmt.Errorf("invalid timestamp %q: expected a Unix timestamp", v)
-		}
-	}
-	return time.Unix(s, nanos), nil
 }
 
 func boolParam(v string) bool { return v == "1" || v == "true" }
