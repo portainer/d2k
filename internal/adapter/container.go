@@ -261,6 +261,16 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 	for _, p := range pods.Items {
 		podsByContainer[p.Labels["app"]] = append(podsByContainer[p.Labels["app"]], p)
 	}
+	// One list for all containers: a lookup per container is throttled by
+	// the client's rate limit and made `docker ps` take seconds.
+	services, err := a.client.CoreV1().Services(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list services: %w", err)
+	}
+	servicesByName := map[string]corev1.Service{}
+	for _, svc := range services.Items {
+		servicesByName[svc.Name] = svc
+	}
 
 	var summaries []ContainerSummary
 
@@ -270,10 +280,8 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 			continue
 		}
 
-		// Look up the Service to get the LoadBalancer IP.
-		// Service name may have a "svc-" prefix if the deployment name started with a digit.
-		svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName(d.Name), metav1GetOptions())
-		if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
+		// The published Service, if any, gives the LoadBalancer IP.
+		if svc, ok := servicesByName[publishedServiceName(d.Name)]; ok && len(svc.Status.LoadBalancer.Ingress) > 0 {
 			summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].IP
 			if summary.IPAddress == "" {
 				summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].Hostname

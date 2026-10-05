@@ -80,6 +80,10 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		return nil, fmt.Errorf("unable to build Kubernetes REST config: %w", err)
 	}
 
+	// client-go's defaults (5 QPS, burst 10) suit a small controller, not a
+	// server answering many Docker clients at once.
+	restCfg.QPS, restCfg.Burst = 50, 100
+
 	client, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create Kubernetes client: %w", err)

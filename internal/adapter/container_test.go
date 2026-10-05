@@ -372,3 +372,17 @@ func TestCreateContainerAppliesTranslatedSettings(t *testing.T) {
 		t.Errorf("host aliases = %+v", pod.HostAliases)
 	}
 }
+
+func TestListContainersUsesConstantAPICalls(t *testing.T) {
+	a, client := newTestAdapter(t)
+	for i := range 20 {
+		mustCreate(t, a, RunOptions{Name: fmt.Sprintf("c%d", i), Image: "nginx", PortBindings: []string{fmt.Sprintf("%d:80", 18000+i)}})
+	}
+	client.ClearActions()
+	if _, err := a.ListContainers(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(client.Actions()); n > 3 {
+		t.Fatalf("ListContainers made %d API calls for 20 containers, want at most 3 (deployments, pods, services)", n)
+	}
+}
