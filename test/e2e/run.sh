@@ -95,6 +95,14 @@ standalone_cases() {
   known "Phase 4" "exec (non-TTY) returns output" bash -c '[ "$(perl -e "alarm 20; exec @ARGV" docker exec e2e-web echo hi)" = hi ]'
   known "Phase 4" "exec (TTY) returns output" bash -c 'perl -e "alarm 20; exec @ARGV" docker exec -t e2e-web echo hi | grep -q hi'
 
+  # Docker lifecycle states: create does not start.
+  docker create --name e2e-life nginx:alpine >/dev/null
+  check "create leaves the container created" bash -c '[ "$(docker inspect -f {{.State.Status}} e2e-life)" = created ]'
+  check "start runs it" bash -c 'docker start e2e-life >/dev/null && for _ in $(seq 60); do [ "$(docker inspect -f {{.State.Status}} e2e-life)" = running ] && exit 0; sleep 2; done; exit 1'
+  check "stop exits it" bash -c 'docker stop e2e-life >/dev/null && [ "$(docker inspect -f {{.State.Status}} e2e-life)" = exited ] && docker ps -a --filter name=e2e-life --format {{.Status}} | grep -q "^Exited (0)"'
+  check "ps without -a hides stopped containers" bash -c '! docker ps --format {{.Names}} | grep -qx e2e-life'
+  docker rm e2e-life >/dev/null
+
   # Phase 0: name resolution.
   docker run -d --name e2e-my-api nginx:alpine >/dev/null
   check "rm does not match by name suffix" bash -c '! docker rm api 2>/dev/null && docker container inspect e2e-my-api >/dev/null'

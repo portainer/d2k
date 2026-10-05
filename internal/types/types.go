@@ -39,6 +39,12 @@ const (
 	// labels such as com.docker.compose.config-hash cannot round-trip as labels.
 	AnnotationDockerLabels = LabelPrefix + "/docker-labels"
 
+	// AnnotationStartedAt and AnnotationStoppedAt record when the container was
+	// last started and stopped (RFC 3339). A container never started is in
+	// Docker's "created" state; a stopped one is "exited".
+	AnnotationStartedAt = LabelPrefix + "/started-at"
+	AnnotationStoppedAt = LabelPrefix + "/stopped-at"
+
 	// AnnotationNetworks stores the names of the Docker networks a container is
 	// attached to, as JSON. Compose compares them on every `up`.
 	AnnotationNetworks = LabelPrefix + "/networks"

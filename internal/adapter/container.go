@@ -236,13 +236,22 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 		return nil, fmt.Errorf("unable to list deployments: %w", err)
 	}
 
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list pods: %w", err)
+	}
+	podsByContainer := map[string][]corev1.Pod{}
+	for _, p := range pods.Items {
+		podsByContainer[p.Labels["app"]] = append(podsByContainer[p.Labels["app"]], p)
+	}
+
 	var summaries []ContainerSummary
 
 	for _, d := range deployments.Items {
-		if !all && d.Status.ReadyReplicas == 0 {
+		summary := deploymentToSummary(d, podsByContainer[d.Name])
+		if !all && summary.State != string(container.StateRunning) && summary.State != string(container.StateRestarting) {
 			continue
 		}
-		summary := deploymentToSummary(d)
 
 		// Look up the Service to get the LoadBalancer IP.
 		// Service name may have a "svc-" prefix if the deployment name started with a digit.
@@ -355,7 +364,12 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 		}
 	}
 
-	result := deploymentToContainerJSON(*d, lbIP)
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + d.Name})
+	if err != nil {
+		return nil, fmt.Errorf("unable to list pods of %q: %w", resolved, err)
+	}
+
+	result := deploymentToContainerJSON(*d, pods.Items, lbIP)
 	return &result, nil
 }
 
@@ -421,7 +435,8 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 		return nil, err
 	}
 
-	replicas := int32(1)
+	// Created, not started: start scales the Deployment up.
+	replicas := int32(0)
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -569,6 +584,14 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 		}
 
 		d.Spec.Replicas = &replicas
+		if d.Annotations == nil {
+			d.Annotations = map[string]string{}
+		}
+		stamp := types.AnnotationStoppedAt
+		if replicas > 0 {
+			stamp = types.AnnotationStartedAt
+		}
+		d.Annotations[stamp] = time.Now().UTC().Format(time.RFC3339Nano)
 		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, d, metav1.UpdateOptions{})
 		if err == nil {
 			return nil
@@ -583,19 +606,9 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 
 // --- converters ---
 
-func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
-	state := "exited"
-	status := "Exited (0)"
-	if d.Spec.Replicas != nil && *d.Spec.Replicas > 0 {
-		if d.Status.ReadyReplicas > 0 {
-			state = "running"
-			uptime := time.Since(d.CreationTimestamp.Time)
-			status = fmt.Sprintf("Up %s", humanizeDuration(uptime))
-		} else {
-			state = "starting"
-			status = "Starting"
-		}
-	}
+func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummary {
+	s := containerState(d, pods)
+	state, status := string(s.Status), containerStatus(s, time.Now())
 
 	var ports []container.PortSummary
 	rawPorts := d.Annotations[types.AnnotationPortMappings]
@@ -642,8 +655,8 @@ func networkIDs(d appsv1.Deployment) map[string]string {
 	return ids
 }
 
-func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) container.InspectResponse {
-	running := d.Status.ReadyReplicas > 0
+func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP string) container.InspectResponse {
+	state := containerState(d, pods)
 
 	var spec corev1.Container
 	if containers := d.Spec.Template.Spec.Containers; len(containers) > 0 {
@@ -660,20 +673,18 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) container.Inspe
 		endpoints[name] = &network.EndpointSettings{NetworkID: id, IPAddress: ip}
 	}
 
-	state := &container.State{
-		Status:  container.StateExited,
-		Running: false,
-	}
-	if running {
-		state.Status = container.StateRunning
-		state.Running = true
-		state.StartedAt = d.CreationTimestamp.Format(time.RFC3339)
-	}
-
 	hostConfig := &container.HostConfig{
 		LogConfig: container.LogConfig{
 			Type: "json-file",
 		},
+		// Each pod has its own cgroup namespace, as with Docker's default on cgroup v2.
+		CgroupnsMode: container.CgroupnsModePrivate,
+	}
+	process := append(append([]string{}, spec.Command...), spec.Args...)
+	var path string
+	var args []string
+	if len(process) > 0 {
+		path, args = process[0], process[1:]
 	}
 
 	portMap := network.PortMap{}
@@ -698,7 +709,9 @@ func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) container.Inspe
 		Name:       "/" + dockerName(d),
 		Image:      d.Annotations[types.AnnotationImageRef],
 		Created:    d.CreationTimestamp.Format(time.RFC3339),
-		State:      state,
+		Path:       path,
+		Args:       args,
+		State:      &state,
 		HostConfig: hostConfig,
 		Mounts:     containerMounts(d),
 		Config: &container.Config{

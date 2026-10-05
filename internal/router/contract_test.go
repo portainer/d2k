@@ -149,8 +149,8 @@ func TestContract(t *testing.T) {
 	}{
 		{"GET", "/version", 200, ""},
 		{"GET", "/info", 200, ""},
-		{"GET", "/containers/json?all=1", 200, "Phase 3: State \"starting\" is not a Docker state"},
-		{"GET", "/containers/" + created.ID + "/json", 200, "Phase 3: HostConfig.CgroupnsMode is empty"},
+		{"GET", "/containers/json?all=1", 200, ""},
+		{"GET", "/containers/" + created.ID + "/json", 200, ""},
 		{"GET", "/containers/nope/json", 404, ""},
 		{"GET", "/images/json", 200, "Phase 5: required image summary fields missing"},
 		{"GET", "/volumes", 200, "Phase 5: Scope and Options missing"},

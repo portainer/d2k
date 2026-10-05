@@ -12,6 +12,7 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/portainer/d2k/internal/errdefs"
+	"github.com/portainer/d2k/internal/types"
 )
 
 func TestContainerID(t *testing.T) {
@@ -312,5 +313,36 @@ func TestContainerNetworkAttachments(t *testing.T) {
 	inspect, _ := a.InspectContainer(ctx, "web")
 	if _, ok := inspect.NetworkSettings.Networks["demo_back"]; ok || len(inspect.NetworkSettings.Networks) != 1 {
 		t.Fatalf("after disconnect Networks = %v, want only demo_front", inspect.NetworkSettings.Networks)
+	}
+}
+
+func TestCreateDoesNotStart(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx"})
+
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if *d.Spec.Replicas != 0 {
+		t.Fatalf("replicas after create = %d, want 0", *d.Spec.Replicas)
+	}
+	inspect, _ := a.InspectContainer(ctx, "web")
+	if inspect.State.Status != "created" {
+		t.Fatalf("state after create = %s, want created", inspect.State.Status)
+	}
+
+	if err := a.StartContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	d, _ = client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if *d.Spec.Replicas != 1 || d.Annotations[types.AnnotationStartedAt] == "" {
+		t.Fatalf("after start: replicas = %d, started-at = %q", *d.Spec.Replicas, d.Annotations[types.AnnotationStartedAt])
+	}
+
+	if err := a.StopContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	inspect, _ = a.InspectContainer(ctx, "web")
+	if inspect.State.Status != "exited" || inspect.State.FinishedAt == "" {
+		t.Fatalf("after stop: state = %s, finished at %q; want exited with a time", inspect.State.Status, inspect.State.FinishedAt)
 	}
 }
