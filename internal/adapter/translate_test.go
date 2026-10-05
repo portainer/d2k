@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -91,8 +92,8 @@ func TestUntranslatedSettingsWarn(t *testing.T) {
 	_, warnings := RunOptionsFromRequest("web", req)
 	text := strings.Join(warnings, "\n")
 	for _, want := range []string{
-		`user "nginx" ignored`, "Hostname is not supported", "Volumes is not supported",
-		"HostConfig.AutoRemove is not supported", "HostConfig.Dns is not supported", "HostConfig.PidsLimit is not supported",
+		`user "nginx" ignored`, "Volumes is not supported",
+		"HostConfig.AutoRemove is not supported", "DNS servers 1.1.1.1 ignored", "HostConfig.PidsLimit is not supported",
 		"on-failure is not supported", `log driver "syslog"`, `extra host "gw:host-gateway" ignored`, `bind mount at "/srv" ignored`,
 	} {
 		if !strings.Contains(text, want) {
@@ -185,5 +186,62 @@ func TestSilentlyDroppedSettingsWarn(t *testing.T) {
 		"NetworkingConfig":{"EndpointsConfig":{"p_default":{"Aliases":["p-web-1","web"],"IPAMConfig":{},"DriverOpts":{}}}}}`))
 	if len(warnings) != 0 {
 		t.Fatalf("warnings for a plain compose service = %q", warnings)
+	}
+}
+
+// Settings Kubernetes has a field for.
+func TestNativeTranslations(t *testing.T) {
+	opts, warnings := RunOptionsFromRequest("web", request(t, `{"Image":"app","Hostname":"box",
+		"HostConfig":{"Dns":["1.1.1.1"],"DnsSearch":["example.com"],"DnsOptions":["use-vc","ndots:2"],
+			"Sysctls":{"net.core.somaxconn":"1024"},"ShmSize":134217728,"Tmpfs":{"/run":"rw,size=64m,noexec"},
+			"SecurityOpt":["no-new-privileges:true","seccomp=unconfined","apparmor=unconfined","label=type:spc_t","label=level:s0:c1"],
+			"GroupAdd":["1001","audio"],"Annotations":{"com.example.a":"b"},
+			"Mounts":[{"Type":"tmpfs","Target":"/cache","TmpfsOptions":{"SizeBytes":1048576}},
+				{"Type":"volume","Source":"data","Target":"/data","VolumeOptions":{"Subpath":"sub"}}]}}`))
+
+	if opts.Hostname != "box" {
+		t.Errorf("hostname = %q", opts.Hostname)
+	}
+	if !slices.Equal(opts.DNSSearch, []string{"example.com"}) || len(opts.DNSOptions) != 2 || opts.DNSOptions[1].Name != "ndots" || *opts.DNSOptions[1].Value != "2" {
+		t.Errorf("DNS search = %q, options = %+v", opts.DNSSearch, opts.DNSOptions)
+	}
+	if len(opts.Sysctls) != 1 || opts.Sysctls[0] != (corev1.Sysctl{Name: "net.core.somaxconn", Value: "1024"}) {
+		t.Errorf("sysctls = %+v", opts.Sysctls)
+	}
+	tmpfs := map[string]string{}
+	for _, m := range opts.Tmpfs {
+		tmpfs[m.Target] = ""
+		if m.SizeLimit != nil {
+			tmpfs[m.Target] = m.SizeLimit.String()
+		}
+	}
+	if !maps.Equal(tmpfs, map[string]string{"/dev/shm": "128Mi", "/run": "64Mi", "/cache": "1Mi"}) {
+		t.Errorf("memory mounts = %v", tmpfs)
+	}
+	if !opts.NoNewPrivileges || opts.Seccomp == nil || opts.Seccomp.Type != corev1.SeccompProfileTypeUnconfined ||
+		opts.AppArmor == nil || opts.AppArmor.Type != corev1.AppArmorProfileTypeUnconfined ||
+		opts.SELinux == nil || opts.SELinux.Type != "spc_t" || opts.SELinux.Level != "s0:c1" {
+		t.Errorf("security = %v %+v %+v %+v", opts.NoNewPrivileges, opts.Seccomp, opts.AppArmor, opts.SELinux)
+	}
+	if !slices.Equal(opts.SupplementalGroups, []int64{1001}) || opts.Annotations["com.example.a"] != "b" {
+		t.Errorf("groups = %v, annotations = %v", opts.SupplementalGroups, opts.Annotations)
+	}
+	if opts.VolumeSubpaths["/data"] != "sub" {
+		t.Errorf("subpaths = %v", opts.VolumeSubpaths)
+	}
+
+	text := strings.Join(warnings, "\n")
+	for _, want := range []string{`DNS servers 1.1.1.1 ignored`, `group "audio" ignored`, `tmpfs options noexec at "/run" ignored`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("warnings missing %q:\n%s", want, text)
+		}
+	}
+	if len(warnings) != 3 {
+		t.Errorf("warnings = %q, want exactly 3", warnings)
+	}
+
+	_, warnings = RunOptionsFromRequest("web", request(t, `{"Image":"app","HostConfig":{"SecurityOpt":["seccomp={\"defaultAction\":\"SCMP_ACT_ERRNO\"}","apparmor=docker-default","label=disable"]}}`))
+	if text := strings.Join(warnings, "\n"); !strings.Contains(text, "seccomp profile") || !strings.Contains(text, `"label=disable"`) || strings.Contains(text, "apparmor") {
+		t.Errorf("warnings = %q, want the seccomp profile and label=disable to warn", warnings)
 	}
 }

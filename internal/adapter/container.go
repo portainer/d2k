@@ -66,6 +66,30 @@ type RunOptions struct {
 	Privileged  bool
 	ReadOnly    bool
 	Healthcheck *corev1.Probe // readiness probe; the container's health
+
+	// Hostname is the pod's hostname. Compose services keep their service
+	// name, which their DNS needs.
+	Hostname   string
+	DNSSearch  []string
+	DNSOptions []corev1.PodDNSConfigOption
+	Sysctls    []corev1.Sysctl
+	// Tmpfs are memory-backed mounts, including /dev/shm for ShmSize.
+	Tmpfs              []TmpfsMount
+	NoNewPrivileges    bool
+	Seccomp            *corev1.SeccompProfile
+	AppArmor           *corev1.AppArmorProfile
+	SELinux            *corev1.SELinuxOptions
+	SupplementalGroups []int64
+	// Annotations are set on the pod.
+	Annotations map[string]string
+	// VolumeSubpaths maps mount targets to the volume subdirectory mounted.
+	VolumeSubpaths map[string]string
+}
+
+// TmpfsMount is a memory-backed mount.
+type TmpfsMount struct {
+	Target    string
+	SizeLimit *resource.Quantity
 }
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
@@ -132,6 +156,20 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	}
 	warnings = append(warnings, volumeWarnings...)
 	warnings = append(warnings, a.networkWarnings(opts.Networks)...)
+	for i := range volumeMounts {
+		volumeMounts[i].SubPath = opts.VolumeSubpaths[volumeMounts[i].MountPath]
+	}
+	for i, m := range opts.Tmpfs {
+		name := fmt.Sprintf("tmpfs-%d", i)
+		volumes = append(volumes, corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: m.SizeLimit},
+		}})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: name, MountPath: m.Target})
+	}
+	if opts.Hostname != "" && len(validation.IsDNS1123Label(opts.Hostname)) > 0 {
+		warnings = append(warnings, fmt.Sprintf("hostname %q ignored: a pod hostname must be a DNS label", opts.Hostname))
+		opts.Hostname = ""
+	}
 	if opts.GPUCount > 0 && a.gpuResourceName == "" {
 		warnings = append(warnings, "GPU request ignored: no node in the cluster offers a GPU resource")
 	}
@@ -172,6 +210,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	service := opts.Labels["com.docker.compose.service"]
 	scoped := project != "" && service != ""
 	if scoped {
+		if opts.Hostname != "" {
+			warnings = append(warnings, fmt.Sprintf("hostname %q ignored: compose services use their service name, which their DNS needs", opts.Hostname))
+		}
 		warnings = append(warnings, a.scopeDNSToProject(deployment, project, service)...)
 	}
 	warnings = append(warnings, ignoredAliases(opts.Aliases, dockerName, service)...)
@@ -493,8 +534,12 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 						types.LabelManagedBy:    types.LabelManagedByValue,
 						types.LabelWorkloadName: opts.Name,
 					},
+					Annotations: opts.Annotations,
 				},
 				Spec: corev1.PodSpec{
+					Hostname:                      opts.Hostname,
+					DNSConfig:                     dnsConfig(opts),
+					SecurityContext:               podSecurityContext(opts),
 					HostAliases:                   opts.HostAliases,
 					TerminationGracePeriodSeconds: opts.StopTimeout,
 					Containers: []corev1.Container{
@@ -829,10 +874,15 @@ func encodePortMappings(bindings []string, publishAll bool) (string, error) {
 // and read-only root settings, or returns nil when none is set. Whether they
 // are allowed is decided by the namespace's Pod Security policy.
 func containerSecurityContext(opts RunOptions) *corev1.SecurityContext {
-	if opts.RunAsUser == nil && opts.RunAsGroup == nil && len(opts.CapAdd) == 0 && len(opts.CapDrop) == 0 && !opts.Privileged && !opts.ReadOnly {
+	if opts.RunAsUser == nil && opts.RunAsGroup == nil && len(opts.CapAdd) == 0 && len(opts.CapDrop) == 0 && !opts.Privileged && !opts.ReadOnly &&
+		!opts.NoNewPrivileges && opts.Seccomp == nil && opts.AppArmor == nil && opts.SELinux == nil {
 		return nil
 	}
-	sc := &corev1.SecurityContext{RunAsUser: opts.RunAsUser, RunAsGroup: opts.RunAsGroup}
+	sc := &corev1.SecurityContext{RunAsUser: opts.RunAsUser, RunAsGroup: opts.RunAsGroup,
+		SeccompProfile: opts.Seccomp, AppArmorProfile: opts.AppArmor, SELinuxOptions: opts.SELinux}
+	if opts.NoNewPrivileges {
+		sc.AllowPrivilegeEscalation = new(bool)
+	}
 	if opts.Privileged {
 		sc.Privileged = &opts.Privileged
 	}
@@ -849,6 +899,23 @@ func containerSecurityContext(opts RunOptions) *corev1.SecurityContext {
 		}
 	}
 	return sc
+}
+
+// podSecurityContext returns the pod-level security settings, if any.
+func podSecurityContext(opts RunOptions) *corev1.PodSecurityContext {
+	if len(opts.Sysctls) == 0 && len(opts.SupplementalGroups) == 0 {
+		return nil
+	}
+	return &corev1.PodSecurityContext{Sysctls: opts.Sysctls, SupplementalGroups: opts.SupplementalGroups}
+}
+
+// dnsConfig returns the DNS search domains and options the container adds
+// to the cluster's.
+func dnsConfig(opts RunOptions) *corev1.PodDNSConfig {
+	if len(opts.DNSSearch) == 0 && len(opts.DNSOptions) == 0 {
+		return nil
+	}
+	return &corev1.PodDNSConfig{Searches: opts.DNSSearch, Options: opts.DNSOptions}
 }
 
 // containerID returns the Docker ID of the container a Deployment backs: 64
@@ -1005,16 +1072,21 @@ func (a *KubernetesDockerAdapter) scopeDNSToProject(d *appsv1.Deployment, projec
 
 	svcDomain := "svc." + a.clusterDomain
 	ndots := "5"
+	own := pod.Spec.DNSConfig
+	if own == nil {
+		own = &corev1.PodDNSConfig{}
+	}
 	pod.Spec.DNSPolicy = corev1.DNSNone
 	pod.Spec.DNSConfig = &corev1.PodDNSConfig{
 		Nameservers: []string{a.clusterDNS},
-		Searches: []string{
+		Searches: append([]string{
 			pod.Spec.Subdomain + "." + a.namespace + "." + svcDomain,
 			a.namespace + "." + svcDomain,
 			svcDomain,
 			a.clusterDomain,
-		},
-		Options: []corev1.PodDNSConfigOption{{Name: "ndots", Value: &ndots}},
+		}, own.Searches...),
+		// The container's own options come last, so they win.
+		Options: append([]corev1.PodDNSConfigOption{{Name: "ndots", Value: &ndots}}, own.Options...),
 	}
 	return nil
 }

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
@@ -448,5 +450,78 @@ func TestInspectNetwork(t *testing.T) {
 	n, err := restarted.InspectNetwork(ctx, "p_front")
 	if err != nil || n.Labels["com.docker.compose.project"] != "p" {
 		t.Fatalf("inspect of a joined network after restart = %+v, %v", n, err)
+	}
+}
+
+func TestCreateContainerNativeSettings(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	two := "2"
+	size := resource.MustParse("64Mi")
+	opts := RunOptions{
+		Name: "web", Image: "nginx", Hostname: "box", Binds: []string{"data:/data"},
+		DNSSearch: []string{"example.com"}, DNSOptions: []corev1.PodDNSConfigOption{{Name: "ndots", Value: &two}},
+		Sysctls:         []corev1.Sysctl{{Name: "net.core.somaxconn", Value: "1024"}},
+		Tmpfs:           []TmpfsMount{{Target: "/dev/shm", SizeLimit: &size}, {Target: "/run"}},
+		NoNewPrivileges: true, Seccomp: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+		SupplementalGroups: []int64{1001}, Annotations: map[string]string{"com.example.a": "b"},
+		VolumeSubpaths: map[string]string{"/data": "sub"},
+	}
+	if _, _, err := a.CreateContainer(ctx, opts); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	pod := d.Spec.Template
+	c := pod.Spec.Containers[0]
+
+	if pod.Spec.Hostname != "box" || pod.Annotations["com.example.a"] != "b" {
+		t.Errorf("hostname = %q, annotations = %v", pod.Spec.Hostname, pod.Annotations)
+	}
+	if dns := pod.Spec.DNSConfig; dns == nil || !slices.Equal(dns.Searches, []string{"example.com"}) || len(dns.Options) != 1 {
+		t.Errorf("DNS config = %+v", pod.Spec.DNSConfig)
+	}
+	if sc := pod.Spec.SecurityContext; sc == nil || len(sc.Sysctls) != 1 || !slices.Equal(sc.SupplementalGroups, []int64{1001}) {
+		t.Errorf("pod security context = %+v", pod.Spec.SecurityContext)
+	}
+	if sc := c.SecurityContext; sc == nil || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation || sc.SeccompProfile == nil {
+		t.Errorf("container security context = %+v", c.SecurityContext)
+	}
+	memory := map[string]string{}
+	for _, v := range pod.Spec.Volumes {
+		if v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
+			for _, m := range c.VolumeMounts {
+				if m.Name == v.Name {
+					memory[m.MountPath] = ""
+					if v.EmptyDir.SizeLimit != nil {
+						memory[m.MountPath] = v.EmptyDir.SizeLimit.String()
+					}
+				}
+			}
+		}
+	}
+	if !maps.Equal(memory, map[string]string{"/dev/shm": "64Mi", "/run": ""}) {
+		t.Errorf("memory mounts = %v", memory)
+	}
+	for _, m := range c.VolumeMounts {
+		if m.MountPath == "/data" && m.SubPath != "sub" {
+			t.Errorf("/data subPath = %q, want sub", m.SubPath)
+		}
+	}
+
+	// A compose service keeps its service name as hostname, for its DNS, and
+	// searches its project's domain first.
+	a.clusterDNS, a.clusterDomain = "10.96.0.10", "cluster.local"
+	opts = RunOptions{Name: "p-api-1", Image: "nginx", Hostname: "box", DNSSearch: []string{"example.com"},
+		Labels: map[string]string{"com.docker.compose.project": "p", "com.docker.compose.service": "api"}}
+	_, warnings, err := a.CreateContainer(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ = client.AppsV1().Deployments(testNamespace).Get(ctx, "p-api-1", metav1.GetOptions{})
+	if d.Spec.Template.Spec.Hostname != "api" || !strings.Contains(strings.Join(warnings, "\n"), `hostname "box" ignored`) {
+		t.Errorf("compose hostname = %q, warnings = %q", d.Spec.Template.Spec.Hostname, warnings)
+	}
+	if s := d.Spec.Template.Spec.DNSConfig.Searches; s[len(s)-1] != "example.com" || !strings.HasPrefix(s[0], "compose-p.") {
+		t.Errorf("compose DNS searches = %q", s)
 	}
 }

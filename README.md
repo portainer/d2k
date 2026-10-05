@@ -375,7 +375,7 @@ d2k stores no images. `docker images` lists none, `docker pull` is acknowledged 
 Additional networking features with no Kubernetes equivalent:
 
 - `--network host` — host network namespace sharing. Use `hostNetwork: true` in a raw Kubernetes manifest instead.
-- Per-container `--dns` and `--dns-search` overrides. DNS in Kubernetes is cluster-wide and namespace-scoped via CoreDNS.
+- Per-container `--dns` servers. The cluster DNS server must answer first for service names to resolve. (`--dns-search` and `--dns-option` are added to the pod's DNS configuration.)
 - `--ip` and `--mac-address` — static IP and MAC assignment. Not applicable in CNI-managed networking.
 - `--link` — legacy Docker container linking. Has no Kubernetes equivalent.
 
@@ -385,7 +385,7 @@ Additional networking features with no Kubernetes equivalent:
 - `--privileged` — may be blocked by cluster admission policy (PodSecurity, OPA/Gatekeeper). d2k passes the flag but enforcement is cluster-dependent.
 - `--device` — host device passthrough (e.g. `/dev/video0`). Requires a device plugin on Kubernetes; d2k does not configure one.
 - `--ulimit` — kernel resource limits. Not expressible in Kubernetes Pod spec.
-- `--sysctl` — kernel parameter overrides. Supported only for a restricted set by Kubernetes; d2k does not translate these.
+- `--sysctl` is translated to pod sysctls, but Kubernetes allows only its safe set unless the kubelet allowlists others; a container with a forbidden sysctl fails to start.
 - `docker system prune` and `docker system df` — operate against a local Docker daemon. Not meaningful in a Kubernetes context.
 
 ---

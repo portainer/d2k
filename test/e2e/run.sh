@@ -126,7 +126,7 @@ standalone_cases() {
     [ \"\$(kubectl --context $CONTEXT -n d2k get deploy e2e-settings -o jsonpath='{.spec.template.spec.containers[0].resources.limits}')\" = '{\"cpu\":\"500m\",\"memory\":\"64Mi\"}' ]"
   check "plain create reports no warnings" bash -c '[ -z "$(docker create --name e2e-quiet nginx:alpine 2>&1 >/dev/null)" ]'
   docker rm e2e-quiet >/dev/null 2>&1
-  check "unsupported settings are reported" bash -c 'docker create --name e2e-warn --dns 1.1.1.1 nginx:alpine 2>&1 >/dev/null | grep -q "Dns is not supported by d2k"'
+  check "unsupported settings are reported" bash -c 'docker create --name e2e-warn --dns 1.1.1.1 nginx:alpine 2>&1 >/dev/null | grep -q "DNS servers 1.1.1.1 ignored"'
   docker rm -f e2e-settings e2e-warn >/dev/null 2>&1
 
   # Events are recorded and replayed with since/until, and streamed live.
@@ -191,6 +191,17 @@ standalone_cases() {
     [ "$(docker volume inspect -f "{{.Name}} {{.Scope}} {{index .Labels \"long\"}} {{.Options.size}}" e2e_vol_u)" = "e2e_vol_u local $long 2Gi" ]'
   check "creating an existing volume returns it" bash -c '[ "$(docker volume create e2e_vol_u)" = e2e_vol_u ]'
   check "volume rm" bash -c 'docker volume rm e2e-vol e2e-vol-raw e2e_vol_u >/dev/null'
+
+  # Settings with a Kubernetes field take effect in the running container.
+  check "native settings run" bash -c '
+    docker run -d --name e2e-native --shm-size 64m --tmpfs /scratch:size=8m --sysctl net.ipv4.ip_unprivileged_port_start=0 \
+      --security-opt no-new-privileges --group-add 1001 --dns-search example.com busybox sleep 3600 >/dev/null &&
+    for _ in $(seq 60); do [ "$(docker inspect -f {{.State.Status}} e2e-native)" = running ] && break; sleep 2; done &&
+    [ "$(docker exec e2e-native cat /proc/sys/net/ipv4/ip_unprivileged_port_start)" = 0 ] &&
+    docker exec e2e-native df -k /dev/shm | grep -q " 65536 " && docker exec e2e-native df -k /scratch | grep -q " 8192 " &&
+    docker exec e2e-native id -G | grep -qw 1001 && docker exec e2e-native grep -q "search.*example.com" /etc/resolv.conf &&
+    docker exec e2e-native grep -q "NoNewPrivs:.*1" /proc/self/status'
+  docker rm -f e2e-native >/dev/null 2>&1
 
   # Images: d2k stores none; the kubelet pulls them.
   check "docker pull is acknowledged" bash -c 'docker pull nginx:alpine 2>&1 | grep -q "the kubelet pulls it"'

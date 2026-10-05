@@ -104,9 +104,10 @@ CASES = [
          ok(lambda d: d[0]["metadata"]["labels"]["a.b"] == "c")),
     case("label_file", CLIENT, "Read by compose; arrives as `labels`.", "label_file: ./app.labels",
          ok(lambda d: d[0]["metadata"]["labels"]["from.file"] == "1")),
-    case("annotations", NO, "Not yet translated.", "annotations: {com.example.a: b}", warns("HostConfig.Annotations")),
-    case("hostname", NO, "Not yet translated: the pod's hostname is the compose service name, which service DNS needs.",
-         "hostname: myhost", warns("Hostname")),
+    case("annotations", PARTIAL, "Set on the pod. Container runtimes receive pod annotations only where configured to.",
+         "annotations: {com.example.a: b}", ok(lambda d: d[0]["spec"]["template"]["metadata"]["annotations"]["com.example.a"] == "b")),
+    case("hostname", NO, "A compose service's pod hostname is its service name, which service DNS needs: ignored with a "
+         "warning. (`docker run --hostname` sets the pod hostname.)", "hostname: myhost", warns('hostname "myhost" ignored')),
     case("domainname", NO, "", "domainname: example.com", warns("Domainname")),
     case("mac_address", NO, "The cluster network assigns pod addresses.", "mac_address: 02:42:ac:11:00:02", warns("MacAddress")),
     case("platform", NO, "The node's container runtime picks the image platform.", "platform: linux/arm64", warns('platform "linux/arm64"')),
@@ -159,7 +160,8 @@ CASES = [
     case("pids_limit", NO, "A kubelet setting, not a pod one.", "pids_limit: 100", warns("PidsLimit")),
     case("blkio_config", NO, "", "blkio_config: {weight: 300}", warns("BlkioWeight")),
     case("ulimits", NO, "Kubernetes has no per-container ulimits.", "ulimits: {nofile: {soft: 1024, hard: 2048}}", warns("Ulimits")),
-    case("shm_size", NO, "Not yet translated.", "shm_size: 128m", warns("ShmSize")),
+    case("shm_size", YES, "A memory-backed `emptyDir` at `/dev/shm` with that size limit.", "shm_size: 128m",
+         ok(lambda d: {"medium": "Memory", "sizeLimit": "128Mi"} in [v.get("emptyDir") for v in pod(d)["volumes"]])),
 
     # --- services: security -------------------------------------------------
     case("cap_add", YES, "", "cap_add: [NET_ADMIN]", ok(lambda d: ctr(d)["securityContext"]["capabilities"]["add"] == ["NET_ADMIN"])),
@@ -167,9 +169,18 @@ CASES = [
     case("privileged", YES, "Subject to the namespace's pod security policy.", "privileged: true",
          ok(lambda d: ctr(d)["securityContext"]["privileged"] is True)),
     case("read_only", YES, "", "read_only: true", ok(lambda d: ctr(d)["securityContext"]["readOnlyRootFilesystem"] is True)),
-    case("security_opt", NO, "Not yet translated.", "security_opt: [no-new-privileges:true]", warns("SecurityOpt")),
-    case("group_add", NO, "Not yet translated.", "group_add: ['1001']", warns("GroupAdd")),
-    case("sysctls", NO, "Not yet translated.", "sysctls: {net.core.somaxconn: 1024}", warns("Sysctls")),
+    case("security_opt", PARTIAL, "`no-new-privileges` sets `allowPrivilegeEscalation: false`; `seccomp=unconfined`, "
+         "`apparmor=<profile>` and `label=user|role|type|level:<value>` set the matching profiles and SELinux options. "
+         "Seccomp profile files and other options are ignored with a warning: Kubernetes loads profiles from the node.",
+         "security_opt: [no-new-privileges:true, 'label=type:spc_t']",
+         ok(lambda d: ctr(d)["securityContext"]["allowPrivilegeEscalation"] is False and ctr(d)["securityContext"]["seLinuxOptions"]["type"] == "spc_t")),
+    case("security_opt.seccomp_profile", PARTIAL, "See `security_opt`.", "security_opt: ['seccomp=./profile.json']",
+         warns("seccomp profile ignored")),
+    case("group_add", PARTIAL, "Numeric groups become `supplementalGroups`; group names are ignored with a warning.",
+         "group_add: ['1001']", ok(lambda d: pod(d)["securityContext"]["supplementalGroups"] == [1001])),
+    case("sysctls", YES, "Pod `sysctls`. Kubernetes allows its safe sysctls; others need the kubelet's allowlist, or "
+         "the container fails to start with an error.", "sysctls: {net.ipv4.ip_unprivileged_port_start: '0'}",
+         ok(lambda d: pod(d)["securityContext"]["sysctls"] == [{"name": "net.ipv4.ip_unprivileged_port_start", "value": "0"}])),
     case("userns_mode", NO, "", "userns_mode: host", warns("UsernsMode")),
     case("credential_spec", NO, "Windows only; compose does not send it to a Linux engine.", "credential_spec: {file: x.json}", ok()),
     case("isolation", NO, "Windows only.", "isolation: process", warns("Isolation")),
@@ -210,23 +221,31 @@ CASES = [
     case("external_links", NO, "", "external_links: [other:alias]", warns("HostConfig.Links")),
     case("extra_hosts", YES, "Becomes `hostAliases`. `host-gateway` is ignored with a warning.",
          "extra_hosts: ['db.local=10.0.0.5']", ok(lambda d: pod(d)["hostAliases"] == [{"hostnames": ["db.local"], "ip": "10.0.0.5"}])),
-    case("dns", NO, "Not yet translated.", "dns: [1.1.1.1]", warns("HostConfig.Dns")),
-    case("dns_opt", NO, "Not yet translated.", "dns_opt: [use-vc]", warns("DnsOptions")),
-    case("dns_search", NO, "Not yet translated.", "dns_search: [example.com]", warns("DnsSearch")),
+    case("dns", NO, "The cluster DNS server must answer first for service names to resolve: ignored with a warning.",
+         "dns: [1.1.1.1]", warns("DNS servers 1.1.1.1 ignored")),
+    case("dns_opt", YES, "Added to the pod's DNS options, after d2k's own.", "dns_opt: [use-vc]",
+         ok(lambda d: {"name": "use-vc"} in pod(d)["dnsConfig"]["options"])),
+    case("dns_search", YES, "Searched after the compose project's and the namespace's domains.", "dns_search: [example.com]",
+         ok(lambda d: pod(d)["dnsConfig"]["searches"][-1] == "example.com")),
 
     # --- services: storage --------------------------------------------------
-    case("volumes", PARTIAL, "Named volumes are PersistentVolumeClaims. Bind mounts, `tmpfs`, `image` and `npipe` "
-         "mounts are ignored with a warning: pods cannot reach the client's files.", "volumes: [data:/data]",
+    case("volumes", PARTIAL, "Named volumes are PersistentVolumeClaims; `tmpfs` mounts are memory-backed `emptyDir`s. "
+         "Bind, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files.", "volumes: [data:/data]",
          ok(lambda d: pod(d)["volumes"][0]["persistentVolumeClaim"]["claimName"].endswith("data")), top="volumes: {data: {}}"),
     case("volumes.bind", NO, "See `volumes`.", "volumes: [./src:/src]", warns("host paths are not supported")),
-    case("volumes.tmpfs", NO, "Not yet translated.", "volumes: [{type: tmpfs, target: /cache}]", warns('tmpfs mount at "/cache" ignored')),
+    case("volumes.tmpfs", YES, "A memory-backed `emptyDir`, with `tmpfs.size` as its size limit.",
+         "volumes: [{type: tmpfs, target: /cache, tmpfs: {size: 1048576}}]",
+         ok(lambda d: {"medium": "Memory", "sizeLimit": "1Mi"} in [v.get("emptyDir") for v in pod(d)["volumes"]])),
     case("volumes.image", NO, "", "volumes: [{type: image, source: busybox, target: /img}]", warns('image mount at "/img" ignored')),
-    case("volumes.subpath", NO, "Not yet translated: the whole volume is mounted.",
-         "volumes: [{type: volume, source: data, target: /data, volume: {subpath: sub}}]", ok(), top="volumes: {data: {}}"),
+    case("volumes.subpath", YES, "Becomes the mount's `subPath`.",
+         "volumes: [{type: volume, source: data, target: /data, volume: {subpath: sub}}]",
+         ok(lambda d: ctr(d)["volumeMounts"][0]["subPath"] == "sub"), top="volumes: {data: {}}"),
     case("volumes.nocopy", YES, "d2k never copies image content into a new volume, so every volume behaves as `nocopy`.",
          "volumes: [{type: volume, source: data, target: /data, volume: {nocopy: true}}]", ok(), top="volumes: {data: {}}"),
     case("volumes_from", NO, "", "volumes_from: [db]", warns("VolumesFrom"), extra=DB),
-    case("tmpfs", NO, "Not yet translated.", "tmpfs: [/run]", warns("HostConfig.Tmpfs")),
+    case("tmpfs", PARTIAL, "Memory-backed `emptyDir`s; a `size=` option is the size limit, other options are ignored "
+         "with a warning.", "tmpfs: ['/run:size=64m']",
+         ok(lambda d: {"medium": "Memory", "sizeLimit": "64Mi"} in [v.get("emptyDir") for v in pod(d)["volumes"]])),
 
     # --- services: secrets and configs --------------------------------------
     case("secrets", PARTIAL, "Not yet: secrets from `environment` fail. Secrets from a `file` are ignored with a "
@@ -299,7 +318,7 @@ CASES = [
 ]
 
 FILES = {
-    "app.env": "FROM_FILE=1\n", "app.labels": "from.file=1\n", "cfg.txt": "cfg\n", "pw.txt": "pw\n",
+    "app.env": "FROM_FILE=1\n", "profile.json": '{"defaultAction": "SCMP_ACT_ALLOW"}', "app.labels": "from.file=1\n", "cfg.txt": "cfg\n", "pw.txt": "pw\n",
     "base.yaml": "services:\n  base:\n    image: nginx:alpine\n    environment: [BASE=1]\n",
 }
 NOISE = ("Network ", "Volume ", "Container ", "Image ", "nginx:alpine: not pulled")

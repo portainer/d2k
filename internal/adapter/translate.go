@@ -24,7 +24,7 @@ var (
 		"AttachStdin": true, "AttachStdout": true, "AttachStderr": true, "ArgsEscaped": true,
 		"Image": true, "Entrypoint": true, "Cmd": true, "Env": true, "Labels": true, "ExposedPorts": true,
 		"User": true, "WorkingDir": true, "Tty": true, "OpenStdin": true, "StdinOnce": true, "StopTimeout": true,
-		"Healthcheck": true,
+		"Healthcheck": true, "Hostname": true,
 	}
 	hostConfigHandled = map[string]bool{
 		"Binds": true, "Mounts": true, "NetworkMode": true, "PortBindings": true, "PublishAllPorts": true,
@@ -32,6 +32,8 @@ var (
 		"CapAdd": true, "CapDrop": true, "Privileged": true, "ReadonlyRootfs": true,
 		"Memory": true, "MemoryReservation": true, "NanoCPUs": true,
 		"CPUShares": true, "CPUQuota": true, "CPUPeriod": true, "DeviceRequests": true,
+		"DNS": true, "DNSSearch": true, "DNSOptions": true, "Sysctls": true, "ShmSize": true, "Tmpfs": true,
+		"SecurityOpt": true, "GroupAdd": true, "Annotations": true,
 	}
 	// Links are reported with HostConfig.Links, where compose also sets them.
 	endpointHandled = map[string]bool{"Aliases": true, "Links": true}
@@ -109,6 +111,12 @@ func RunOptionsFromRequest(name string, req container.CreateRequest) (RunOptions
 	var healthWarnings []string
 	opts.Healthcheck, healthWarnings = healthProbe(cfg.Healthcheck)
 	warnings = append(warnings, healthWarnings...)
+
+	native, nativeWarnings := nativeSettings(cfg, host)
+	opts.Hostname, opts.DNSSearch, opts.DNSOptions, opts.Sysctls = native.Hostname, native.DNSSearch, native.DNSOptions, native.Sysctls
+	opts.Tmpfs, opts.NoNewPrivileges, opts.Seccomp, opts.AppArmor, opts.SELinux = native.Tmpfs, native.NoNewPrivileges, native.Seccomp, native.AppArmor, native.SELinux
+	opts.SupplementalGroups, opts.Annotations, opts.VolumeSubpaths = native.SupplementalGroups, native.Annotations, native.VolumeSubpaths
+	warnings = append(warnings, nativeWarnings...)
 
 	opts.Resources = resources(host.Resources)
 	opts.GPUCount = gpuCount(host.DeviceRequests)
@@ -237,11 +245,11 @@ func volumeMountBinds(mounts []mount.Mount) []string {
 func mountWarningsFor(mounts []mount.Mount) []string {
 	var warnings []string
 	for _, m := range mounts {
-		if m.Type != mount.TypeVolume {
-			warnings = append(warnings, fmt.Sprintf("%s mount at %q ignored: only named volumes are supported by d2k", m.Type, m.Target))
+		if m.Type != mount.TypeVolume && m.Type != mount.TypeTmpfs {
+			warnings = append(warnings, fmt.Sprintf("%s mount at %q ignored: only named volumes and tmpfs are supported by d2k", m.Type, m.Target))
 			continue
 		}
-		if o := m.VolumeOptions; o != nil && o.DriverConfig != nil && o.DriverConfig.Name != "" && o.DriverConfig.Name != "local" {
+		if o := m.VolumeOptions; m.Type == mount.TypeVolume && o != nil && o.DriverConfig != nil && o.DriverConfig.Name != "" && o.DriverConfig.Name != "local" {
 			warnings = append(warnings, fmt.Sprintf("volume driver %q ignored at %q: d2k volumes are PersistentVolumeClaims", o.DriverConfig.Name, m.Target))
 		}
 	}
@@ -368,4 +376,141 @@ func gpuCount(requests []container.DeviceRequest) int {
 		}
 	}
 	return count
+}
+
+// nativeSettings translates the settings Kubernetes has a pod or container
+// field for. Only the fields it sets in the returned RunOptions are used.
+func nativeSettings(cfg container.Config, host container.HostConfig) (RunOptions, []string) {
+	var opts RunOptions
+	var warnings []string
+
+	opts.Hostname = cfg.Hostname
+	if len(host.DNS) > 0 {
+		servers := make([]string, len(host.DNS))
+		for i, s := range host.DNS {
+			servers[i] = s.String()
+		}
+		warnings = append(warnings, fmt.Sprintf("DNS servers %s ignored: the cluster DNS resolves names, which service discovery needs", strings.Join(servers, ", ")))
+	}
+	opts.DNSSearch = host.DNSSearch
+	for _, o := range host.DNSOptions {
+		name, value, hasValue := strings.Cut(o, ":")
+		option := corev1.PodDNSConfigOption{Name: name}
+		if hasValue {
+			option.Value = &value
+		}
+		opts.DNSOptions = append(opts.DNSOptions, option)
+	}
+	for _, name := range slices.Sorted(maps.Keys(host.Sysctls)) {
+		opts.Sysctls = append(opts.Sysctls, corev1.Sysctl{Name: name, Value: host.Sysctls[name]})
+	}
+
+	if host.ShmSize > 0 {
+		opts.Tmpfs = append(opts.Tmpfs, TmpfsMount{Target: "/dev/shm", SizeLimit: resource.NewQuantity(host.ShmSize, resource.BinarySI)})
+	}
+	for _, target := range slices.Sorted(maps.Keys(host.Tmpfs)) {
+		m := TmpfsMount{Target: target}
+		var ignored []string
+		for _, o := range strings.Split(host.Tmpfs[target], ",") {
+			switch size, isSize := strings.CutPrefix(o, "size="); {
+			case isSize:
+				if q, err := resource.ParseQuantity(dockerSize(size)); err == nil {
+					m.SizeLimit = &q
+				} else {
+					ignored = append(ignored, o)
+				}
+			case o != "" && o != "rw":
+				ignored = append(ignored, o)
+			}
+		}
+		if len(ignored) > 0 {
+			warnings = append(warnings, fmt.Sprintf("tmpfs options %s at %q ignored: Kubernetes memory volumes take a size only", strings.Join(ignored, ","), target))
+		}
+		opts.Tmpfs = append(opts.Tmpfs, m)
+	}
+	for _, mnt := range host.Mounts {
+		switch {
+		case mnt.Type == mount.TypeTmpfs:
+			m := TmpfsMount{Target: mnt.Target}
+			if o := mnt.TmpfsOptions; o != nil && o.SizeBytes > 0 {
+				m.SizeLimit = resource.NewQuantity(o.SizeBytes, resource.BinarySI)
+			}
+			opts.Tmpfs = append(opts.Tmpfs, m)
+		case mnt.Type == mount.TypeVolume && mnt.VolumeOptions != nil && mnt.VolumeOptions.Subpath != "":
+			if opts.VolumeSubpaths == nil {
+				opts.VolumeSubpaths = map[string]string{}
+			}
+			opts.VolumeSubpaths[mnt.Target] = mnt.VolumeOptions.Subpath
+		}
+	}
+
+	for _, o := range host.SecurityOpt {
+		key, value, _ := strings.Cut(o, "=")
+		if k, v, ok := strings.Cut(o, ":"); ok && k == "no-new-privileges" {
+			key, value = k, v
+		}
+		switch {
+		case key == "no-new-privileges" && (value == "" || value == "true"):
+			opts.NoNewPrivileges = true
+		case key == "seccomp" && value == "unconfined":
+			opts.Seccomp = &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}
+		case key == "seccomp":
+			warnings = append(warnings, "seccomp profile ignored: Kubernetes loads seccomp profiles from the node")
+		case key == "apparmor" && value == "unconfined":
+			opts.AppArmor = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined}
+		case key == "apparmor" && value == "docker-default":
+			opts.AppArmor = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault}
+		case key == "apparmor" && value != "":
+			opts.AppArmor = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeLocalhost, LocalhostProfile: &value}
+		case key == "label" && seLinuxLabel(&opts, value):
+		default:
+			warnings = append(warnings, fmt.Sprintf("security option %q is not supported by d2k and was ignored", o))
+		}
+	}
+
+	for _, g := range host.GroupAdd {
+		if id, err := strconv.ParseInt(g, 10, 64); err == nil {
+			opts.SupplementalGroups = append(opts.SupplementalGroups, id)
+		} else {
+			warnings = append(warnings, fmt.Sprintf("group %q ignored: Kubernetes needs a numeric GID", g))
+		}
+	}
+	opts.Annotations = host.Annotations
+	return opts, warnings
+}
+
+// seLinuxLabel applies a label=<field>:<value> security option, and reports
+// whether it is one Kubernetes can express.
+func seLinuxLabel(opts *RunOptions, label string) bool {
+	field, value, ok := strings.Cut(label, ":")
+	if !ok {
+		return false
+	}
+	if opts.SELinux == nil {
+		opts.SELinux = &corev1.SELinuxOptions{}
+	}
+	switch field {
+	case "user":
+		opts.SELinux.User = value
+	case "role":
+		opts.SELinux.Role = value
+	case "type":
+		opts.SELinux.Type = value
+	case "level":
+		opts.SELinux.Level = value
+	default:
+		return false
+	}
+	return true
+}
+
+// dockerSize converts Docker's size suffixes (k, m, g, in powers of 1024)
+// to Kubernetes quantities.
+func dockerSize(s string) string {
+	for suffix, unit := range map[string]string{"k": "Ki", "m": "Mi", "g": "Gi"} {
+		if n, ok := strings.CutSuffix(strings.ToLower(s), suffix); ok {
+			return n + unit
+		}
+	}
+	return s
 }

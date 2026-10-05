@@ -40,8 +40,8 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `container_name` | Supported | The Docker name is kept; the Kubernetes name is derived from it. |
 | `labels` | Supported | Kept verbatim; also set as Kubernetes labels where the value is valid. |
 | `label_file` | Compose | Read by compose; arrives as `labels`. |
-| `annotations` | Not supported | Not yet translated. |
-| `hostname` | Not supported | Not yet translated: the pod's hostname is the compose service name, which service DNS needs. |
+| `annotations` | Partial | Set on the pod. Container runtimes receive pod annotations only where configured to. |
+| `hostname` | Not supported | A compose service's pod hostname is its service name, which service DNS needs: ignored with a warning. (`docker run --hostname` sets the pod hostname.) |
 | `domainname` | Not supported |  |
 | `mac_address` | Not supported | The cluster network assigns pod addresses. |
 | `platform` | Not supported | The node's container runtime picks the image platform. |
@@ -77,14 +77,15 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `pids_limit` | Not supported | A kubelet setting, not a pod one. |
 | `blkio_config` | Not supported |  |
 | `ulimits` | Not supported | Kubernetes has no per-container ulimits. |
-| `shm_size` | Not supported | Not yet translated. |
+| `shm_size` | Supported | A memory-backed `emptyDir` at `/dev/shm` with that size limit. |
 | `cap_add` | Supported |  |
 | `cap_drop` | Supported |  |
 | `privileged` | Supported | Subject to the namespace's pod security policy. |
 | `read_only` | Supported |  |
-| `security_opt` | Not supported | Not yet translated. |
-| `group_add` | Not supported | Not yet translated. |
-| `sysctls` | Not supported | Not yet translated. |
+| `security_opt` | Partial | `no-new-privileges` sets `allowPrivilegeEscalation: false`; `seccomp=unconfined`, `apparmor=<profile>` and `label=user|role|type|level:<value>` set the matching profiles and SELinux options. Seccomp profile files and other options are ignored with a warning: Kubernetes loads profiles from the node. |
+| `security_opt.seccomp_profile` | Partial | See `security_opt`. |
+| `group_add` | Partial | Numeric groups become `supplementalGroups`; group names are ignored with a warning. |
+| `sysctls` | Supported | Pod `sysctls`. Kubernetes allows its safe sysctls; others need the kubelet's allowlist, or the container fails to start with an error. |
 | `userns_mode` | Not supported |  |
 | `credential_spec` | Not supported | Windows only; compose does not send it to a Linux engine. |
 | `isolation` | Not supported | Windows only. |
@@ -112,17 +113,17 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `links` | Not supported | Use the service name, which resolves within the project. |
 | `external_links` | Not supported |  |
 | `extra_hosts` | Supported | Becomes `hostAliases`. `host-gateway` is ignored with a warning. |
-| `dns` | Not supported | Not yet translated. |
-| `dns_opt` | Not supported | Not yet translated. |
-| `dns_search` | Not supported | Not yet translated. |
-| `volumes` | Partial | Named volumes are PersistentVolumeClaims. Bind mounts, `tmpfs`, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files. |
+| `dns` | Not supported | The cluster DNS server must answer first for service names to resolve: ignored with a warning. |
+| `dns_opt` | Supported | Added to the pod's DNS options, after d2k's own. |
+| `dns_search` | Supported | Searched after the compose project's and the namespace's domains. |
+| `volumes` | Partial | Named volumes are PersistentVolumeClaims; `tmpfs` mounts are memory-backed `emptyDir`s. Bind, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files. |
 | `volumes.bind` | Not supported | See `volumes`. |
-| `volumes.tmpfs` | Not supported | Not yet translated. |
+| `volumes.tmpfs` | Supported | A memory-backed `emptyDir`, with `tmpfs.size` as its size limit. |
 | `volumes.image` | Not supported |  |
-| `volumes.subpath` | Not supported | Not yet translated: the whole volume is mounted. |
+| `volumes.subpath` | Supported | Becomes the mount's `subPath`. |
 | `volumes.nocopy` | Supported | d2k never copies image content into a new volume, so every volume behaves as `nocopy`. |
 | `volumes_from` | Not supported |  |
-| `tmpfs` | Not supported | Not yet translated. |
+| `tmpfs` | Partial | Memory-backed `emptyDir`s; a `size=` option is the size limit, other options are ignored with a warning. |
 | `secrets` | Partial | Not yet: secrets from `environment` fail. Secrets from a `file` are ignored with a warning: the file is on the client. |
 | `secrets.file` | Not supported | See `secrets`. |
 | `configs` | Partial | Not yet: configs from `content` or `environment` fail. Configs from a `file` are ignored with a warning. |
