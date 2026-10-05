@@ -192,6 +192,12 @@ standalone_cases() {
   check "creating an existing volume returns it" bash -c '[ "$(docker volume create e2e_vol_u)" = e2e_vol_u ]'
   check "volume rm" bash -c 'docker volume rm e2e-vol e2e-vol-raw e2e_vol_u >/dev/null'
 
+  # Images: d2k stores none; the kubelet pulls them.
+  check "docker pull is acknowledged" bash -c 'docker pull nginx:alpine 2>&1 | grep -q "the kubelet pulls it"'
+  check "docker images lists none" bash -c '[ -z "$(docker images -q)" ]'
+  check "image inspect reports the reference only" bash -c '[ "$(docker image inspect -f "{{.RepoTags}} {{.Config}}" nginx:alpine)" = "[nginx:alpine] <nil>" ]'
+  check "docker rmi is not supported" bash -c 'docker rmi nginx:alpine 2>&1 | grep -q "not supported by d2k"'
+
   # Docker Engine API operations d2k does not implement answer 501.
   check "unsupported operation returns 501" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/v1.52/system/df)" = 501 ]'
   check "docker reports an unsupported operation" bash -c 'docker system df 2>&1 | grep -q "not supported by d2k"'

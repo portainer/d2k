@@ -364,6 +364,8 @@ These features are absent by design. They reflect fundamental differences betwee
 
 `docker build`, `docker commit`, `docker tag`, `docker push`, `docker save`, `docker load`, `docker image prune`, and all `docker buildx` commands are not supported. d2k is a runtime translator. Image build and registry operations operate below the Kubernetes layer — Kubernetes pulls images at schedule time from a registry and has no equivalent concept of a local image daemon. Use a standard CI pipeline and container registry to build and push images before running them through d2k.
 
+d2k stores no images. `docker images` lists none, `docker pull` is acknowledged without pulling, and `docker image inspect` reports only the reference: the kubelet pulls the image when a container starts, and a failed pull shows as the container's state. `docker rmi` is not supported. d2k ignores the registry credentials a client sends (`X-Registry-Auth`); give the namespace pull secrets instead, for example on its default ServiceAccount or through a Portainer policy.
+
 ### Advanced networking
 
 `docker network create --driver macvlan` and `--driver ipvlan` are not supported and will not be. macvlan and ipvlan require direct Layer 2 hardware access, assigning real MAC and IP addresses to container interfaces. Kubernetes networking is CNI-managed and operates above this level — there is no Kubernetes equivalent. If your workload requires macvlan (e.g. direct access to a physical LAN segment), it cannot be translated and must remain on a native Docker host.

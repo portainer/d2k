@@ -152,7 +152,8 @@ func TestContract(t *testing.T) {
 		{"GET", "/containers/json?all=1", 200, ""},
 		{"GET", "/containers/" + created.ID + "/json", 200, ""},
 		{"GET", "/containers/nope/json", 404, ""},
-		{"GET", "/images/json", 200, "Phase 5: required image summary fields missing"},
+		{"GET", "/images/json", 200, ""},
+		{"GET", "/images/nginx:alpine/json", 200, ""},
 		{"GET", "/networks", 200, ""},
 		{"GET", "/networks/bridge", 200, ""},
 	}
@@ -187,6 +188,7 @@ func TestUnsupportedOperations(t *testing.T) {
 		{"POST", "/containers/web/pause", http.StatusNotImplemented},
 		{"GET", "/containers/web/top", http.StatusNotImplemented},
 		{"GET", "/images/library/nginx:latest/history", http.StatusNotImplemented},
+		{"DELETE", "/images/nginx:alpine", http.StatusNotImplemented},
 		// Swarm operations when swarm mode is off.
 		{"GET", "/services", http.StatusNotImplemented},
 		{"GET", "/not/docker", http.StatusNotFound},
