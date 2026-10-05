@@ -88,12 +88,60 @@ func TestUntranslatedSettingsWarn(t *testing.T) {
 	_, warnings := RunOptionsFromRequest("web", req)
 	text := strings.Join(warnings, "\n")
 	for _, want := range []string{
-		`user "nginx" ignored`, "Hostname is not supported", "Healthcheck is not supported", "Volumes is not supported",
+		`user "nginx" ignored`, "Hostname is not supported", "Volumes is not supported",
 		"HostConfig.AutoRemove is not supported", "HostConfig.Dns is not supported", "HostConfig.PidsLimit is not supported",
 		"on-failure is not supported", `log driver "syslog"`, `extra host "gw:host-gateway" ignored`, `bind mount at "/srv" ignored`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("warnings missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestHealthcheckBecomesReadinessProbe(t *testing.T) {
+	tests := []struct {
+		name, body  string
+		wantCommand []string
+		wantWarning string
+	}{
+		{name: "CMD", body: `{"Test":["CMD","redis-cli","ping"],"Interval":5000000000,"Timeout":2000000000,"Retries":5,"StartPeriod":10000000000}`,
+			wantCommand: []string{"redis-cli", "ping"}},
+		{name: "CMD-SHELL", body: `{"Test":["CMD-SHELL","curl -f localhost || exit 1"]}`,
+			wantCommand: []string{"/bin/sh", "-c", "curl -f localhost || exit 1"}},
+		{name: "NONE", body: `{"Test":["NONE"]}`},
+		{name: "inherited from the image", body: `{"Interval":5000000000}`, wantWarning: "image"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, warnings := RunOptionsFromRequest("db", request(t, `{"Image":"redis","Healthcheck":`+tt.body+`}`))
+			if tt.wantWarning != "" {
+				if opts.Healthcheck != nil || len(warnings) != 1 || !strings.Contains(warnings[0], tt.wantWarning) {
+					t.Fatalf("probe = %+v, warnings = %q", opts.Healthcheck, warnings)
+				}
+				return
+			}
+			if len(warnings) != 0 {
+				t.Fatalf("warnings = %q", warnings)
+			}
+			if tt.wantCommand == nil {
+				if opts.Healthcheck != nil {
+					t.Fatalf("probe = %+v, want none", opts.Healthcheck)
+				}
+				return
+			}
+			if !slices.Equal(opts.Healthcheck.Exec.Command, tt.wantCommand) {
+				t.Fatalf("probe command = %q, want %q", opts.Healthcheck.Exec.Command, tt.wantCommand)
+			}
+		})
+	}
+
+	opts, _ := RunOptionsFromRequest("db", request(t, `{"Image":"redis","Healthcheck":{"Test":["CMD","true"],"Interval":5000000000,"Timeout":2000000000,"Retries":5,"StartPeriod":10000000000}}`))
+	p := opts.Healthcheck
+	if p.PeriodSeconds != 5 || p.TimeoutSeconds != 2 || p.FailureThreshold != 5 || p.InitialDelaySeconds != 10 {
+		t.Errorf("probe timing = %+v", p)
+	}
+	opts, _ = RunOptionsFromRequest("db", request(t, `{"Image":"redis","Healthcheck":{"Test":["CMD","true"]}}`))
+	if p := opts.Healthcheck; p.PeriodSeconds != 30 || p.TimeoutSeconds != 30 || p.FailureThreshold != 3 {
+		t.Errorf("default probe timing = %+v, want Docker's 30s/30s/3", p)
 	}
 }

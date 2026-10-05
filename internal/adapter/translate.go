@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
@@ -22,6 +23,7 @@ var (
 		"AttachStdin": true, "AttachStdout": true, "AttachStderr": true, "ArgsEscaped": true,
 		"Image": true, "Entrypoint": true, "Cmd": true, "Env": true, "Labels": true, "ExposedPorts": true,
 		"User": true, "WorkingDir": true, "Tty": true, "OpenStdin": true, "StdinOnce": true, "StopTimeout": true,
+		"Healthcheck": true,
 	}
 	hostConfigHandled = map[string]bool{
 		"Binds": true, "Mounts": true, "NetworkMode": true, "PortBindings": true, "PublishAllPorts": true,
@@ -100,6 +102,10 @@ func RunOptionsFromRequest(name string, req container.CreateRequest) (RunOptions
 	var hostWarnings []string
 	opts.HostAliases, hostWarnings = hostAliases(host.ExtraHosts)
 	warnings = append(warnings, hostWarnings...)
+
+	var healthWarnings []string
+	opts.Healthcheck, healthWarnings = healthProbe(cfg.Healthcheck)
+	warnings = append(warnings, healthWarnings...)
 
 	opts.Resources = resources(host.Resources)
 	opts.GPUCount = gpuCount(host.DeviceRequests)
@@ -257,6 +263,58 @@ func resources(r container.Resources) corev1.ResourceRequirements {
 		out.Requests = requests
 	}
 	return out
+}
+
+// Docker's healthcheck defaults.
+const (
+	defaultHealthInterval = 30 * time.Second
+	defaultHealthTimeout  = 30 * time.Second
+	defaultHealthRetries  = 3
+)
+
+// healthProbe translates a Docker healthcheck into a readiness probe, whose
+// result becomes the container's health. d2k's Services publish unready
+// pods, so as in Docker an unhealthy container keeps its traffic.
+func healthProbe(h *container.HealthConfig) (*corev1.Probe, []string) {
+	if h == nil {
+		return nil, nil
+	}
+	var command []string
+	switch {
+	case len(h.Test) == 0:
+		return nil, []string{"healthcheck inherited from the image ignored: d2k does not read image configurations"}
+	case h.Test[0] == "NONE":
+		return nil, nil
+	case h.Test[0] == "CMD" && len(h.Test) > 1:
+		command = h.Test[1:]
+	case h.Test[0] == "CMD-SHELL" && len(h.Test) == 2:
+		command = []string{"/bin/sh", "-c", h.Test[1]}
+	default:
+		return nil, []string{fmt.Sprintf("healthcheck %q ignored: expected CMD, CMD-SHELL or NONE", h.Test)}
+	}
+
+	seconds := func(d, fallback time.Duration) int32 {
+		if d <= 0 {
+			d = fallback
+		}
+		return int32(max(1, d/time.Second))
+	}
+	retries := h.Retries
+	if retries <= 0 {
+		retries = defaultHealthRetries
+	}
+	var warnings []string
+	if h.StartInterval > 0 {
+		warnings = append(warnings, "healthcheck start interval ignored: Kubernetes probes use one period")
+	}
+	return &corev1.Probe{
+		ProbeHandler:        corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: command}},
+		PeriodSeconds:       seconds(h.Interval, defaultHealthInterval),
+		TimeoutSeconds:      seconds(h.Timeout, defaultHealthTimeout),
+		FailureThreshold:    int32(retries),
+		SuccessThreshold:    1,
+		InitialDelaySeconds: int32(h.StartPeriod / time.Second),
+	}, warnings
 }
 
 // gpuCount returns the GPUs requested with --gpus. Docker sends Count=-1 for

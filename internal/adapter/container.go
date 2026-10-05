@@ -64,6 +64,7 @@ type RunOptions struct {
 	CapDrop     []string
 	Privileged  bool
 	ReadOnly    bool
+	Healthcheck *corev1.Probe // readiness probe; the container's health
 }
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
@@ -193,6 +194,8 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	clusterSpec := corev1.ServiceSpec{
 		Selector: map[string]string{"app": opts.Name},
 		Ports:    clusterPorts,
+		// A failing healthcheck must not take the container out of service.
+		PublishNotReadyAddresses: true,
 	}
 	if len(clusterPorts) == 0 {
 		clusterSpec.ClusterIP = "None"
@@ -487,6 +490,7 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 							Stdin:           opts.Stdin,
 							StdinOnce:       opts.StdinOnce,
 							SecurityContext: containerSecurityContext(opts),
+							ReadinessProbe:  opts.Healthcheck,
 							Resources:       resourceReqs,
 						},
 					},
@@ -530,9 +534,10 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 			Labels:    managedLabels(name),
 		},
 		Spec: corev1.ServiceSpec{
-			Type:     svcType,
-			Selector: map[string]string{"app": name},
-			Ports:    ports,
+			Type:                     svcType,
+			Selector:                 map[string]string{"app": name},
+			Ports:                    ports,
+			PublishNotReadyAddresses: true,
 		},
 	}, nil
 }
@@ -627,8 +632,9 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 // --- converters ---
 
 func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummary {
-	s := containerState(d, pods)
-	state, status := string(s.Status), containerStatus(s, time.Now())
+	now := time.Now()
+	s := containerState(d, pods, now)
+	state, status := string(s.Status), containerStatus(s, now)
 
 	var ports []container.PortSummary
 	rawPorts := d.Annotations[types.AnnotationPortMappings]
@@ -676,7 +682,7 @@ func networkIDs(d appsv1.Deployment) map[string]string {
 }
 
 func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP string) container.InspectResponse {
-	state := containerState(d, pods)
+	state := containerState(d, pods, time.Now())
 
 	var spec corev1.Container
 	if containers := d.Spec.Template.Spec.Containers; len(containers) > 0 {
@@ -745,6 +751,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 			Entrypoint:   spec.Command,
 			Env:          env,
 			Labels:       dockerLabels(d),
+			Healthcheck:  healthConfig(spec.ReadinessProbe),
 		},
 		NetworkSettings: &container.NetworkSettings{
 			Ports:    portMap,
@@ -1008,8 +1015,9 @@ func (a *KubernetesDockerAdapter) ensureProjectDNSService(ctx context.Context, p
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 		},
 		Spec: corev1.ServiceSpec{
-			ClusterIP: corev1.ClusterIPNone,
-			Selector:  map[string]string{types.LabelComposeProject: label},
+			ClusterIP:                corev1.ClusterIPNone,
+			Selector:                 map[string]string{types.LabelComposeProject: label},
+			PublishNotReadyAddresses: true,
 		},
 	}
 	_, err := a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{})

@@ -17,7 +17,7 @@ var waitingWhileCreating = map[string]bool{"ContainerCreating": true, "PodInitia
 
 // containerState derives the Docker state of the container a Deployment
 // backs from the Deployment and its pods.
-func containerState(d appsv1.Deployment, pods []corev1.Pod) container.State {
+func containerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) container.State {
 	state := container.State{Status: container.StateCreated, StartedAt: d.Annotations[types.AnnotationStartedAt]}
 	if d.Spec.Replicas == nil || *d.Spec.Replicas == 0 {
 		if state.StartedAt != "" {
@@ -33,6 +33,7 @@ func containerState(d appsv1.Deployment, pods []corev1.Pod) container.State {
 	case status.State.Running != nil:
 		state.Status, state.Running = container.StateRunning, true
 		state.StartedAt = status.State.Running.StartedAt.UTC().Format(time.RFC3339Nano)
+		state.Health = containerHealth(d, status, now)
 	case status.RestartCount > 0 || status.State.Terminated != nil:
 		// The Deployment restarts the container, as Docker's restart policy would.
 		state.Status, state.Running, state.Restarting = container.StateRestarting, true, true
@@ -43,7 +44,58 @@ func containerState(d appsv1.Deployment, pods []corev1.Pod) container.State {
 	case status.State.Waiting != nil && !waitingWhileCreating[status.State.Waiting.Reason]:
 		state.Error = status.State.Waiting.Reason + ": " + status.State.Waiting.Message
 	}
+	// As in Docker, a started container with a healthcheck is "starting"
+	// until the check has a result, whatever the pod is doing meanwhile.
+	if state.Health == nil && healthProbeOf(d) != nil {
+		state.Health = &container.Health{Status: container.Starting}
+	}
 	return state
+}
+
+// healthProbeOf returns the readiness probe carrying the container's
+// healthcheck, if it has one.
+func healthProbeOf(d appsv1.Deployment) *corev1.Probe {
+	if containers := d.Spec.Template.Spec.Containers; len(containers) > 0 {
+		return containers[0].ReadinessProbe
+	}
+	return nil
+}
+
+// healthConfig reports the healthcheck a readiness probe was translated from.
+func healthConfig(p *corev1.Probe) *container.HealthConfig {
+	if p == nil || p.Exec == nil {
+		return nil
+	}
+	test := append([]string{"CMD"}, p.Exec.Command...)
+	if c := p.Exec.Command; len(c) == 3 && c[0] == "/bin/sh" && c[1] == "-c" {
+		test = []string{"CMD-SHELL", c[2]}
+	}
+	return &container.HealthConfig{
+		Test:        test,
+		Interval:    time.Duration(p.PeriodSeconds) * time.Second,
+		Timeout:     time.Duration(p.TimeoutSeconds) * time.Second,
+		Retries:     int(p.FailureThreshold),
+		StartPeriod: time.Duration(p.InitialDelaySeconds) * time.Second,
+	}
+}
+
+// containerHealth derives Docker's health from the readiness probe that
+// carries the container's healthcheck. Kubernetes reports only readiness,
+// so a container not yet ready is "starting" while the probe could still
+// succeed (start period plus retries), then "unhealthy".
+func containerHealth(d appsv1.Deployment, status *corev1.ContainerStatus, now time.Time) *container.Health {
+	p := healthProbeOf(d)
+	if p == nil {
+		return nil
+	}
+	if status.Ready {
+		return &container.Health{Status: container.Healthy}
+	}
+	window := time.Duration(p.InitialDelaySeconds+p.PeriodSeconds*p.FailureThreshold) * time.Second
+	if now.Sub(status.State.Running.StartedAt.Time) < window {
+		return &container.Health{Status: container.Starting}
+	}
+	return &container.Health{Status: container.Unhealthy, FailingStreak: int(p.FailureThreshold)}
 }
 
 // newestContainerStatus returns the status of the container in the most
@@ -81,10 +133,17 @@ func containerStatus(s container.State, now time.Time) string {
 	}
 	switch s.Status {
 	case container.StateRunning:
+		up := "Up"
 		if t, err := time.Parse(time.RFC3339Nano, s.StartedAt); err == nil {
-			return "Up " + humanizeDuration(now.Sub(t))
+			up += " " + humanizeDuration(now.Sub(t))
 		}
-		return "Up"
+		if s.Health == nil {
+			return up
+		}
+		if s.Health.Status == container.Starting {
+			return up + " (health: starting)"
+		}
+		return up + " (" + string(s.Health.Status) + ")"
 	case container.StateRestarting:
 		return fmt.Sprintf("Restarting (%d)%s", s.ExitCode, since(s.FinishedAt))
 	case container.StateExited:

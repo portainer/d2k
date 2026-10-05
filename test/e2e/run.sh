@@ -197,6 +197,38 @@ YAML
   check "compose down -v removes everything" down_removes_everything
 }
 
+# health_cases checks healthchecks: compose waits on service_healthy, and a
+# failing check makes a container unhealthy while it keeps running.
+health_cases() {
+  export DOCKER_HOST=$STANDALONE
+  echo "== healthchecks ($STANDALONE)"
+  local dir=$WORKDIR/health
+  mkdir -p "$dir"
+  cat >"$dir/compose.yaml" <<'YAML'
+services:
+  db:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 5
+  app:
+    image: nginx:alpine
+    depends_on:
+      db:
+        condition: service_healthy
+YAML
+  check "compose waits for service_healthy" bash -c "cd $dir && perl -e 'alarm 180; exec @ARGV' docker compose -p e2eh up -d"
+  check "healthy container reports healthy" bash -c '[ "$(docker inspect -f {{.State.Health.Status}} e2eh-db-1)" = healthy ] && docker ps --filter name=e2eh-db-1 --format {{.Status}} | grep -q "(healthy)"'
+  check "failing healthcheck reports unhealthy" bash -c '
+    docker run -d --name e2e-sick --health-cmd false --health-interval 1s --health-retries 1 nginx:alpine >/dev/null &&
+    for _ in $(seq 60); do [ "$(docker inspect -f {{.State.Health.Status}} e2e-sick 2>/dev/null)" = unhealthy ] && break; sleep 2; done &&
+    [ "$(docker inspect -f "{{.State.Status}} {{.State.Health.Status}}" e2e-sick)" = "running unhealthy" ]'
+  docker rm -f e2e-sick >/dev/null 2>&1
+  (cd "$dir" && to 120 docker compose -p e2eh down) >/dev/null 2>&1
+}
+
 # dc <args...>: docker compose for the e2ec lifecycle project, with a timeout.
 dc() { (cd "$COMPOSE_DIR" && to 180 docker compose -p e2ec "$@"); }
 running() { [ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" = running ]; }
@@ -301,6 +333,7 @@ YAML
 reset
 standalone_cases
 compose_cases
+health_cases
 swarm_cases
 reset
 

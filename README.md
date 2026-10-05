@@ -36,6 +36,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `docker events` | Kubernetes resource watch + event history |
 | `--gpus all` / `--gpus N` | Pod resource limits via device plugin (opt-in) |
 | `-u`, `-w`, `-t`, `-i`, `-m`, `--cpus`, `--cpu-shares`, `--memory-reservation`, `--add-host`, `--cap-add/--cap-drop`, `--read-only`, `--privileged`, `--stop-timeout` | Container and pod settings (`-u` must be numeric) |
+| `--health-*`, compose `healthcheck:` | Readiness probe; `State.Health` reports starting/healthy/unhealthy. Traffic is not affected, as in Docker. A `HEALTHCHECK` defined only in the image is not seen |
 | `--restart` | A Deployment always restarts its container: `no` (the default) and `unless-stopped` behave like `always`, `on-failure` returns a warning |
 | Any other setting | Ignored, and named in a warning on create (`docker run` prints it) |
 
