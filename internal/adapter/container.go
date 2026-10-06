@@ -69,6 +69,8 @@ type RunOptions struct {
 	// RestartPolicy is Docker's: "no" and "on-failure" containers run as
 	// pods, "always" and "unless-stopped" ones as Deployment replicas.
 	RestartPolicy string
+	// AutoRemove removes the container when its run ends.
+	AutoRemove bool
 
 	// Hostname is the pod's hostname. Compose services keep their service
 	// name, which their DNS needs.
@@ -117,6 +119,9 @@ type ContainerSummary struct {
 func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunOptions) (string, []string, error) {
 	if opts.Name == "" {
 		return "", nil, errdefs.InvalidParameter(fmt.Errorf("container name is required"))
+	}
+	if opts.AutoRemove && opts.RestartPolicy != "" && opts.RestartPolicy != string(container.RestartPolicyDisabled) {
+		return "", nil, errdefs.InvalidParameter(fmt.Errorf("can't create 'AutoRemove' container with restart policy"))
 	}
 
 	dockerName := strings.TrimPrefix(opts.Name, "/")
@@ -185,6 +190,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	deployment.Annotations[types.AnnotationDockerName] = dockerName
 	if opts.RestartPolicy != "" {
 		deployment.Annotations[types.AnnotationRestartPolicy] = opts.RestartPolicy
+	}
+	if opts.AutoRemove {
+		deployment.Annotations[types.AnnotationAutoRemove] = "true"
 	}
 	if len(opts.Labels) > 0 {
 		dockerLabels, err := json.Marshal(opts.Labels)
@@ -823,6 +831,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 			Type: "json-file",
 		},
 		RestartPolicy: container.RestartPolicy{Name: restartPolicyOf(d)},
+		AutoRemove:    d.Annotations[types.AnnotationAutoRemove] == "true",
 		// Each pod has its own cgroup namespace, as with Docker's default on cgroup v2.
 		CgroupnsMode: container.CgroupnsModePrivate,
 	}

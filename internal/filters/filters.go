@@ -155,6 +155,28 @@ func (args Args) Contains(field string) bool {
 	return ok
 }
 
+// GetBoolOrDefault returns a boolean value of the key if the key is present
+// and is interpretable as a boolean value. Otherwise the default value is returned.
+// Error is not nil only if the filter values are not valid boolean or are conflicting.
+func (args Args) GetBoolOrDefault(key string, defaultValue bool) (bool, error) {
+	fieldValues, ok := args.fields[key]
+	if !ok {
+		return defaultValue, nil
+	}
+
+	if len(fieldValues) == 0 {
+		return defaultValue, &invalidFilter{key, nil}
+	}
+
+	isFalse := fieldValues["0"] || fieldValues["false"]
+	isTrue := fieldValues["1"] || fieldValues["true"]
+	if isFalse == isTrue {
+		// Either no or conflicting truthy/falsy value were provided
+		return defaultValue, &invalidFilter{key, args.Get(key)}
+	}
+	return isTrue, nil
+}
+
 // Validate compared the set of accepted keys against the keys in the mapping.
 // An error is returned if any mapping keys are not in the accepted set.
 func (args Args) Validate(accepted map[string]bool) error {

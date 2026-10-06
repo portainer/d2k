@@ -16,6 +16,7 @@ package containers
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -112,8 +113,15 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// As in the Docker daemon, a status filter implies all containers.
-	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true" || args.Contains("status")
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if limit, err = strconv.Atoi(v); err != nil {
+			httputils.WriteErrorFrom(w, errdefs.InvalidParameter(fmt.Errorf("invalid limit %q: %w", v, err)))
+			return
+		}
+	}
+	// As in the Docker daemon, a status filter or a limit implies all containers.
+	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true" || args.Contains("status") || limit > 0
 
 	ctrs, err := h.adapter.ListContainers(r.Context(), all)
 	if err != nil {
@@ -122,6 +130,10 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctrs = filterContainers(ctrs, args)
+	slices.SortStableFunc(ctrs, func(a, b adapter.ContainerSummary) int { return cmp.Compare(b.Created, a.Created) })
+	if limit > 0 && len(ctrs) > limit {
+		ctrs = ctrs[:limit]
+	}
 
 	type endpoint struct {
 		NetworkID string `json:"NetworkID"`
@@ -168,7 +180,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // containerFilters are the `filters` keys d2k supports on GET /containers/json.
-var containerFilters = map[string]bool{"id": true, "name": true, "label": true, "status": true}
+var containerFilters = map[string]bool{"id": true, "name": true, "label": true, "status": true, "network": true, "volume": true}
 
 // filterContainers applies list filters with the Docker daemon's matching rules.
 func filterContainers(ctrs []adapter.ContainerSummary, args filters.Args) []adapter.ContainerSummary {
@@ -180,6 +192,26 @@ func filterContainers(ctrs []adapter.ContainerSummary, args filters.Args) []adap
 			continue
 		}
 		if !args.Match("id", c.ID) || !args.MatchKVList("label", c.Labels) || !args.Match("status", c.State) {
+			continue
+		}
+		if args.Contains("network") && !slices.ContainsFunc(args.Get("network"), func(v string) bool {
+			if _, ok := c.Networks[v]; ok {
+				return true
+			}
+			for _, id := range c.Networks {
+				if strings.HasPrefix(id, v) {
+					return true
+				}
+			}
+			return false
+		}) {
+			continue
+		}
+		if args.Contains("volume") && !slices.ContainsFunc(args.Get("volume"), func(v string) bool {
+			return slices.ContainsFunc(c.Mounts, func(m container.MountPoint) bool {
+				return m.Name == v || m.Destination == v
+			})
+		}) {
 			continue
 		}
 		result = append(result, c)
@@ -276,6 +308,8 @@ func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
 		respond(ctr.State.ExitCode)
 		return
 	}
+	// A container removed after its run ends answers with the run's code.
+	exitCode := ctr.State.ExitCode
 	for {
 		select {
 		case <-r.Context().Done():
@@ -286,12 +320,14 @@ func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
 			}
 			switch {
 			case m.Action == events.ActionDestroy:
-				respond(0)
+				respond(exitCode)
 				return
-			case condition != "removed" && m.Action == events.ActionDie:
-				code, _ := strconv.Atoi(m.Actor.Attributes["exitCode"])
-				respond(code)
-				return
+			case m.Action == events.ActionDie:
+				exitCode, _ = strconv.Atoi(m.Actor.Attributes["exitCode"])
+				if condition != "removed" {
+					respond(exitCode)
+					return
+				}
 			case condition != "removed" && m.Action == events.ActionStop:
 				respond(0)
 				return
@@ -341,6 +377,17 @@ func (h *Handler) Restart(w http.ResponseWriter, r *http.Request) {
 // Remove handles DELETE /containers/{id}.
 func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "")
+	if !boolParam(r.URL.Query().Get("force")) {
+		ctr, err := h.adapter.InspectContainer(r.Context(), name)
+		if err != nil {
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		if ctr.State.Running || adapter.IsStarting(ctr.State) {
+			httputils.WriteErrorFrom(w, errdefs.Conflict(fmt.Errorf("cannot remove container %q: container is %s: stop the container before removing or force remove", name, ctr.State.Status)))
+			return
+		}
+	}
 	if err := h.adapter.RemoveContainer(r.Context(), name); err != nil {
 		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("RemoveContainer failed")
 		httputils.WriteErrorFrom(w, err)

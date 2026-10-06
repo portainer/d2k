@@ -10,7 +10,11 @@
 package volumes
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/moby/moby/api/types/volume"
@@ -47,11 +51,26 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	vols = filterVolumes(vols, args)
 
+	if args.Contains("dangling") {
+		dangling, err := args.GetBoolOrDefault("dangling", false)
+		if err != nil {
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		referenced, err := h.adapter.ReferencedVolumes(r.Context())
+		if err != nil {
+			log.Error().Str("context", "VolumesAPI").Err(err).Msg("ReferencedVolumes failed")
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		vols = slices.DeleteFunc(vols, func(v volume.Volume) bool { return referenced[v.Name] == dangling })
+	}
+
 	httputils.WriteJSON(w, http.StatusOK, volume.ListResponse{Volumes: vols, Warnings: []string{}})
 }
 
 // volumeFilters are the `filters` keys d2k supports on GET /volumes.
-var volumeFilters = map[string]bool{"name": true, "label": true, "driver": true}
+var volumeFilters = map[string]bool{"name": true, "label": true, "driver": true, "dangling": true}
 
 // filterVolumes applies list filters with the Docker daemon's matching rules.
 func filterVolumes(vols []volume.Volume, args filters.Args) []volume.Volume {
@@ -70,6 +89,18 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if err := httputils.ParseJSON(r, &body); err != nil {
 		httputils.WriteError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// As in Docker, a volume created without a name gets a random one.
+	if body.Name == "" {
+		b := make([]byte, 32)
+		_, _ = rand.Read(b)
+		body.Name = hex.EncodeToString(b)
+		body.Labels = maps.Clone(body.Labels)
+		if body.Labels == nil {
+			body.Labels = map[string]string{}
+		}
+		body.Labels["com.docker.volume.anonymous"] = ""
 	}
 
 	// Allow size to be passed as a driver option: --opt size=5Gi

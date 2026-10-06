@@ -12,15 +12,18 @@
 package networks
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/moby/moby/api/types/network"
 	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/errdefs"
+	"github.com/portainer/d2k/internal/filters"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
@@ -36,6 +39,18 @@ func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
 
 // List handles GET /networks.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	args, err := httputils.ParseFilters(r, networkFilters)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	for _, t := range args.Get("type") {
+		if t != "builtin" && t != "custom" {
+			httputils.WriteErrorFrom(w, errdefs.InvalidParameter(fmt.Errorf("invalid filter: 'type'='%s'", t)))
+			return
+		}
+	}
+
 	networks, err := h.adapter.ListNetworks(r.Context())
 	if err != nil {
 		log.Error().Str("context", "NetworksAPI").Err(err).Msg("ListNetworks failed")
@@ -43,63 +58,66 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply label filters if present. Docker stack rm sends
-	// filters={"label":["com.docker.stack.namespace=<stack>"]}
-	// Without filtering we return all networks and the CLI deletes them all.
-	if rawFilters := r.URL.Query().Get("filters"); rawFilters != "" {
-		networks = filterNetworksByLabel(networks, rawFilters)
+	if values := args.Get("dangling"); len(values) > 0 {
+		dangling, err := parseDangling(values)
+		if err != nil {
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		ctrs, err := h.adapter.ListContainers(r.Context(), true)
+		if err != nil {
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		inUse := map[string]bool{}
+		for _, c := range ctrs {
+			for name := range c.Networks {
+				inUse[name] = true
+			}
+		}
+		networks = slices.DeleteFunc(networks, func(n adapter.NetworkSummary) bool {
+			return (predefined[n.Name] || inUse[n.Name]) == dangling
+		})
 	}
+	networks = slices.DeleteFunc(networks, func(n adapter.NetworkSummary) bool { return !matches(args, n) })
 
 	httputils.WriteJSON(w, http.StatusOK, networks)
 }
 
-func filterNetworksByLabel(networks []adapter.NetworkSummary, rawFilters string) []adapter.NetworkSummary {
-	// Docker CLI sends label filters as either:
-	//   {"label":["key=value"]}       (array form)
-	//   {"label":{"key=value":true}}  (map form, e.g. docker stack rm)
-	var parsed map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(rawFilters), &parsed); err != nil {
-		return networks
+// networkFilters are the `filters` keys of GET /networks, as in the daemon.
+var networkFilters = map[string]bool{"dangling": true, "driver": true, "id": true, "label": true, "name": true, "scope": true, "type": true}
+
+// predefined are the networks Docker creates itself.
+var predefined = map[string]bool{"bridge": true, "host": true, "none": true, "default": true}
+
+// matches applies the network list filters as the daemon does, but dangling.
+func matches(args filters.Args, n adapter.NetworkSummary) bool {
+	if !args.ExactMatch("driver", n.Driver) || !args.ExactMatch("scope", n.Scope) || !args.MatchKVList("label", n.Labels) {
+		return false
 	}
-	raw, ok := parsed["label"]
-	if !ok {
-		return networks
+	if args.Contains("name") && !args.Match("name", n.Name) {
+		return false
 	}
-	var labelList []string
-	if json.Unmarshal(raw, &labelList) != nil {
-		var labelMap map[string]bool
-		if json.Unmarshal(raw, &labelMap) == nil {
-			for k := range labelMap {
-				labelList = append(labelList, k)
-			}
-		}
+	if args.Contains("id") && !args.Match("id", n.ID) {
+		return false
 	}
-	if len(labelList) == 0 {
-		return networks
+	if types := args.Get("type"); len(types) > 0 && (types[0] == "builtin") != predefined[n.Name] {
+		return false
 	}
-	// Parse required labels into key=value pairs.
-	required := map[string]string{}
-	for _, l := range labelList {
-		if idx := strings.Index(l, "="); idx >= 0 {
-			required[l[:idx]] = l[idx+1:]
-		} else {
-			required[l] = ""
-		}
+	return true
+}
+
+func parseDangling(values []string) (bool, error) {
+	if len(values) > 1 {
+		return false, errdefs.InvalidParameter(errors.New(`got more than one value for filter key "dangling"`))
 	}
-	var result []adapter.NetworkSummary
-	for _, n := range networks {
-		match := true
-		for k, v := range required {
-			if nv, ok := n.Labels[k]; !ok || (v != "" && nv != v) {
-				match = false
-				break
-			}
-		}
-		if match {
-			result = append(result, n)
-		}
+	switch values[0] {
+	case "0", "false":
+		return false, nil
+	case "1", "true":
+		return true, nil
 	}
-	return result
+	return false, errdefs.InvalidParameter(errors.New(`invalid value for filter 'dangling', must be "true" (or "1"), or "false" (or "0")`))
 }
 
 // Create handles POST /networks/create.

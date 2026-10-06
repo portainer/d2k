@@ -23,7 +23,8 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `docker run` | Deployment, the container's record. `--restart always` and `unless-stopped`: its replica runs the container. `--restart no` (the default) and `on-failure`: a pod created from it runs the container |
 | `docker stop` | Scale the Deployment to 0, or delete the pod and record its exit code; returns once the pod is gone |
 | `docker start` | Scale the Deployment to 1, or run a new pod |
-| `docker rm` | Delete the Deployment (and its pod) + Service |
+| `docker run --rm` | As in Docker, the container is removed when its run ends; it cannot have a restart policy |
+| `docker rm` | Delete the Deployment (and its pod) + Service. As in Docker, a running container needs `-f` |
 | `-p <host>:<container>` | LoadBalancer Service |
 | `-P` (publish all) | NodePort Service |
 | No port flags | No Service created |
@@ -174,13 +175,13 @@ For Swarm services, `--endpoint-mode dnsrr` or any port with `mode: host` bypass
 
 Kubernetes namespace networking is flat. All Pods in the namespace can reach each other by IP regardless of which Docker network they are assigned to. `docker network create` is accepted and returns a synthetic network, but no actual network isolation is enforced. Networks created by `docker stack deploy` are removed correctly when `docker stack rm` is run.
 
-A Docker network has no Kubernetes object of its own, so d2k records each one, exactly as it was created (name, labels, options), as a `d2k.portainer.io/network-*` annotation on its namespace. Networks therefore survive d2k restarts and upgrades. RBAC cannot limit which fields d2k patches on the namespace, so `deploy/kubernetes.yaml` installs a ValidatingAdmissionPolicy that lets d2k's ServiceAccount change only those annotations: it can never change the namespace's labels (such as the `pod-security.kubernetes.io/*` labels Portainer's policies manage), other annotations or spec. **This requires Kubernetes 1.30 or later.**
+A Docker network has no Kubernetes object of its own, so d2k records each one, exactly as it was created (name, labels, options), as a `d2k.portainer.io/network-*` annotation on its namespace. A network reports the driver it was created with, `bridge` by default, and Docker's scope for it: `local`, or `swarm` for `overlay`. Networks therefore survive d2k restarts and upgrades. RBAC cannot limit which fields d2k patches on the namespace, so `deploy/kubernetes.yaml` installs a ValidatingAdmissionPolicy that lets d2k's ServiceAccount change only those annotations: it can never change the namespace's labels (such as the `pod-security.kubernetes.io/*` labels Portainer's policies manage), other annotations or spec. **This requires Kubernetes 1.30 or later.**
 
 ---
 
 ## Volumes
 
-`docker volume create` creates a PersistentVolumeClaim using the cluster's default StorageClass with `ReadWriteOnce` access mode. Size defaults to `1Gi` and can be overridden with `--opt size=5Gi`. The PVC name is the volume name with underscores replaced by hyphens, as Kubernetes requires; Docker clients keep seeing the original name, labels and options, which d2k records on the PVC. Two volume names that map to the same PVC name (`app_data` and `app-data`) cannot both exist. Creating a volume that already exists returns it, as in Docker.
+`docker volume create` creates a PersistentVolumeClaim using the cluster's default StorageClass with `ReadWriteOnce` access mode. Size defaults to `1Gi` and can be overridden with `--opt size=5Gi`. The PVC name is the volume name with underscores replaced by hyphens, as Kubernetes requires; Docker clients keep seeing the original name, labels and options, which d2k records on the PVC. Two volume names that map to the same PVC name (`app_data` and `app-data`) cannot both exist. Creating a volume that already exists returns it, as in Docker; a volume created without a name gets a random one.
 
 ### NFS volumes
 
@@ -369,6 +370,10 @@ These features are absent by design. They reflect fundamental differences betwee
 `docker build`, `docker commit`, `docker tag`, `docker push`, `docker save`, `docker load`, `docker image prune`, and all `docker buildx` commands are not supported. d2k is a runtime translator. Image build and registry operations operate below the Kubernetes layer — Kubernetes pulls images at schedule time from a registry and has no equivalent concept of a local image daemon. Use a standard CI pipeline and container registry to build and push images before running them through d2k.
 
 d2k stores no images. `docker images` lists none, `docker pull` is acknowledged without pulling, and `docker image inspect` reports only the reference: the kubelet pulls the image when a container starts, and a failed pull shows as the container's state. `docker rmi` is not supported. d2k ignores the registry credentials a client sends (`X-Registry-Auth`); give the namespace pull secrets instead, for example on its default ServiceAccount or through a Portainer policy.
+
+### Container operations
+
+These answer `501 Not Implemented`: `docker kill`, `docker pause` and `docker unpause`, `docker top`, `docker update`, `docker export`, `docker diff`, `docker container prune`, and `docker cp` (which first stats the path in the container; copying into a container through the API, as compose does for secrets and configs, works). Use `docker stop`, `docker rm` and re-create the container instead.
 
 ### Advanced networking
 
