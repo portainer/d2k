@@ -278,8 +278,12 @@ spec:
           # expected to have converged.
           lifecycle:
             preStop:
+              # The image is FROM scratch: no shell, no coreutils. /d2k is
+              # the only executable in it, hence "d2k sleep" rather than a
+              # bare "sleep" (which fails: exec: "sleep": executable file
+              # not found in $PATH, and the hook returns immediately).
               exec:
-                command: ["sleep", "5"]
+                command: ["/d2k", "sleep", "5"]
           # The Docker API requires a client certificate, so probes use the
           # plain health port, which serves /healthz only.
           livenessProbe:
