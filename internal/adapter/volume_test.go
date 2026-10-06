@@ -2,10 +2,13 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 	"maps"
+	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/portainer/d2k/internal/errdefs"
@@ -97,4 +100,24 @@ func TestRemoveVolumeInUse(t *testing.T) {
 	if err := a.RemoveVolume(ctx, "db_data"); err != nil {
 		t.Fatalf("remove of a volume no longer in use = %v", err)
 	}
+}
+
+// Several clients, or compose projects, create NFS volumes at once. The
+// StorageClass was not there when d2k started. Run with -race.
+func TestConcurrentNFSVolumes(t *testing.T) {
+	sc := &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "nfs"}, Provisioner: nfsCsiProvisioner,
+		Parameters: map[string]string{"server": "10.0.0.9"}}
+	a, _ := newTestAdapter(t, sc)
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			opts := CreateVolumeOptions{Name: fmt.Sprintf("data%d", i), DriverOpts: map[string]string{"type": "nfs", "o": "addr=10.0.0.9"}}
+			if _, err := a.CreateVolume(context.Background(), opts); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
 }
