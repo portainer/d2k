@@ -272,11 +272,13 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		},
 		Spec: clusterSpec,
 	}
-	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
-		if !errors.IsAlreadyExists(svcErr) {
-			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			return "", nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
-		}
+	_, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{})
+	if errors.IsAlreadyExists(svcErr) && a.ownService(ctx, clusterSvc.Name, opts.Name) == nil {
+		svcErr = errdefs.Conflict(fmt.Errorf("the name %q is taken by Service %q, which is not this container's", dockerName, clusterSvc.Name))
+	}
+	if svcErr != nil && !errors.IsAlreadyExists(svcErr) {
+		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+		return "", nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
 	}
 
 	// Create a LoadBalancer or NodePort Service for externally published ports.
@@ -288,7 +290,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		if _, svcErr = a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{}); svcErr != nil {
 			// Roll back the Deployment and ClusterIP service so we don't leave orphans.
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(opts.Name), metav1.DeleteOptions{})
+			a.deleteOwnService(ctx, serviceName(opts.Name), opts.Name)
 			return "", nil, fmt.Errorf("unable to create service for %q: %w", opts.Name, svcErr)
 		}
 	}
@@ -296,8 +298,8 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	if scoped {
 		if err := a.ensureProjectDNSService(ctx, project, created); err != nil {
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(opts.Name), metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, publishedServiceName(opts.Name), metav1.DeleteOptions{})
+			a.deleteOwnService(ctx, serviceName(opts.Name), opts.Name)
+			a.deleteOwnService(ctx, publishedServiceName(opts.Name), opts.Name)
 			return "", nil, err
 		}
 	}
@@ -407,8 +409,8 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	}
 
 	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, publishedServiceName(resolved), metav1.DeleteOptions{})
+	a.deleteOwnService(ctx, serviceName(resolved), resolved)
+	a.deleteOwnService(ctx, publishedServiceName(resolved), resolved)
 
 	return nil
 }
@@ -639,6 +641,26 @@ func serviceName(name string) string {
 		name = name[:63]
 	}
 	return strings.TrimRight(name, "-")
+}
+
+// ownService returns the named Service if d2k created it for the container
+// whose Deployment is named deployment, and nil otherwise: another
+// container's published Service, or another workload's Service, may have
+// its name.
+func (a *KubernetesDockerAdapter) ownService(ctx context.Context, name, deployment string) *corev1.Service {
+	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, name, metav1GetOptions())
+	if err != nil || svc.Labels[types.LabelManagedBy] != types.LabelManagedByValue || svc.Labels[types.LabelWorkloadName] != deployment {
+		return nil
+	}
+	return svc
+}
+
+// deleteOwnService deletes the named Service, best effort, if it is the
+// container's.
+func (a *KubernetesDockerAdapter) deleteOwnService(ctx context.Context, name, deployment string) {
+	if svc := a.ownService(ctx, name, deployment); svc != nil {
+		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, name, metav1.DeleteOptions{Preconditions: metav1.NewUIDPreconditions(string(svc.UID))})
+	}
 }
 
 // --- name/ID resolution ---
