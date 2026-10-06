@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -77,7 +78,7 @@ func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts Crea
 		for _, sc := range storageClasses.Items {
 			if sc.Provisioner == nfsCsiProvisioner && sc.Parameters["server"] == nfsServer {
 				matchedSC = sc.Name
-				a.nfsStorageClasses[nfsServer] = sc.Name
+				a.cacheNFSStorageClass(nfsServer, sc.Name)
 				break
 			}
 		}
@@ -159,11 +160,7 @@ func (a *KubernetesDockerAdapter) createPVCVolume(ctx context.Context, opts Crea
 func (a *KubernetesDockerAdapter) volumeMeta(opts CreateVolumeOptions) (metav1.ObjectMeta, error) {
 	name := sanitiseResourceName(opts.Name)
 	labels := managedLabels(name)
-	for k, v := range opts.Labels {
-		if clean, ok := sanitiseLabelValue(v); ok {
-			labels[k] = clean
-		}
-	}
+	addDockerLabels(labels, opts.Labels)
 	annotations := map[string]string{types.AnnotationDockerName: opts.Name}
 	for key, value := range map[string]map[string]string{types.AnnotationDockerLabels: opts.Labels, types.AnnotationDriverOpts: opts.DriverOpts} {
 		if len(value) == 0 {
@@ -236,8 +233,26 @@ func (a *KubernetesDockerAdapter) RemoveVolume(ctx context.Context, name string)
 	if _, err := a.InspectVolume(ctx, name); err != nil {
 		return err
 	}
+	claim := sanitiseResourceName(name)
 
-	if err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Delete(ctx, sanitiseResourceName(name), metav1.DeleteOptions{}); err != nil {
+	// As in Docker, a volume a container uses, even a stopped one, stays.
+	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return fmt.Errorf("unable to list deployments: %w", err)
+	}
+	var users []string
+	for _, d := range deployments.Items {
+		if slices.ContainsFunc(d.Spec.Template.Spec.Volumes, func(v corev1.Volume) bool {
+			return v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == claim
+		}) {
+			users = append(users, containerID(d.UID))
+		}
+	}
+	if len(users) > 0 {
+		return errdefs.Conflict(fmt.Errorf("remove %s: volume is in use - [%s]", name, strings.Join(users, ", ")))
+	}
+
+	if err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Delete(ctx, claim, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete PVC %q: %w", name, err)
 	}
 
@@ -286,7 +301,7 @@ func (a *KubernetesDockerAdapter) LogNFSStorageClasses(ctx context.Context) {
 			continue
 		}
 		found = append(found, nfsEntry{storageClass: sc.Name, server: server})
-		a.nfsStorageClasses[server] = sc.Name
+		a.cacheNFSStorageClass(server, sc.Name)
 	}
 
 	if len(found) == 0 {
@@ -302,6 +317,8 @@ func (a *KubernetesDockerAdapter) LogNFSStorageClasses(ctx context.Context) {
 // nfsStorageClassForServer returns the StorageClass name for a given NFS server
 // address, or ("", false) if none is cached.
 func (a *KubernetesDockerAdapter) nfsStorageClassForServer(server string) (string, bool) {
+	a.nfsMu.Lock()
+	defer a.nfsMu.Unlock()
 	sc, ok := a.nfsStorageClasses[server]
 	return sc, ok
 }
@@ -309,8 +326,17 @@ func (a *KubernetesDockerAdapter) nfsStorageClassForServer(server string) (strin
 // anyNFSStorageClass returns the first cached NFS StorageClass name, or ("", false)
 // if none are available. Used when server address is unknown at service create time.
 func (a *KubernetesDockerAdapter) anyNFSStorageClass() (string, bool) {
+	a.nfsMu.Lock()
+	defer a.nfsMu.Unlock()
 	for _, sc := range a.nfsStorageClasses {
 		return sc, true
 	}
 	return "", false
+}
+
+// cacheNFSStorageClass records the StorageClass for an NFS server address.
+func (a *KubernetesDockerAdapter) cacheNFSStorageClass(server, storageClass string) {
+	a.nfsMu.Lock()
+	defer a.nfsMu.Unlock()
+	a.nfsStorageClasses[server] = storageClass
 }

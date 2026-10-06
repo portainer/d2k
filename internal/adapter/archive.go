@@ -47,7 +47,7 @@ func (a *KubernetesDockerAdapter) CopyToContainer(ctx context.Context, nameOrID,
 	}
 	started := replicasOf(d) > 0
 	if runsAsPod(*d) {
-		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + name})
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(name))
 		if err != nil {
 			return fmt.Errorf("unable to list the pods of %q: %w", name, err)
 		}
@@ -146,15 +146,22 @@ func (a *KubernetesDockerAdapter) storeCopiedFiles(ctx context.Context, d *appsv
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		secret, err := secrets.Get(ctx, name, metav1GetOptions())
 		create := apierrors.IsNotFound(err)
+		owner := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "Deployment", Name: d.Name, UID: d.UID}
 		switch {
 		case create:
 			secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
 				Name: name, Namespace: a.namespace,
 				Labels:          map[string]string{types.LabelManagedBy: types.LabelManagedByValue},
-				OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: d.Name, UID: d.UID}},
+				OwnerReferences: []metav1.OwnerReference{owner},
 			}}
 		case err != nil:
 			return err
+		case secret.Labels[types.LabelManagedBy] != types.LabelManagedByValue:
+			return errdefs.Conflict(fmt.Errorf("secret %q, needed for the files copied into the container, is not d2k's", name))
+		case len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].UID != d.UID:
+			// Left by a removed container of the same name, whose owner is
+			// gone: the garbage collector deletes it.
+			secret.OwnerReferences, secret.Data = []metav1.OwnerReference{owner}, nil
 		}
 		if secret.Data == nil {
 			secret.Data = map[string][]byte{}

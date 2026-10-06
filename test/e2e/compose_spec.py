@@ -203,7 +203,8 @@ CASES = [
          "use_api_socket: true", warns("host paths are not supported")),
 
     # --- services: networking -----------------------------------------------
-    case("ports", PARTIAL, "Published ports get a LoadBalancer Service. A `host_ip` is ignored with a warning.",
+    case("ports", PARTIAL, "Published ports get a LoadBalancer Service. A port with no published port is "
+         "published on its container port. A `host_ip` is ignored with a warning.",
          "ports: ['18081:80']", ok(lambda d: ctr(d)["ports"] == [{"containerPort": 80, "protocol": "TCP"}])),
     case("ports.range", YES, "", "ports: ['18090-18091:80-81']", ok(lambda d: len(ctr(d)["ports"]) == 2)),
     case("ports.host_ip", PARTIAL, "See `ports`.", "ports: [{target: 80, published: '18082', protocol: udp, host_ip: 127.0.0.1}]",
@@ -234,7 +235,8 @@ CASES = [
 
     # --- services: storage --------------------------------------------------
     case("volumes", PARTIAL, "Named volumes are PersistentVolumeClaims; `tmpfs` mounts are memory-backed `emptyDir`s. "
-         "Bind, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files.", "volumes: [data:/data]",
+         "Bind, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files. "
+         "Anonymous volumes (`volumes: [/data]`) are ignored with a warning: their data stays in the container.", "volumes: [data:/data]",
          ok(lambda d: pod(d)["volumes"][0]["persistentVolumeClaim"]["claimName"].endswith("data")), top="volumes: {data: {}}"),
     case("volumes.bind", NO, "See `volumes`.", "volumes: [./src:/src]", warns("host paths are not supported")),
     case("volumes.tmpfs", YES, "A memory-backed `emptyDir`, with `tmpfs.size` as its size limit.",

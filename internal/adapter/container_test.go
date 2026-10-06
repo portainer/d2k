@@ -7,11 +7,16 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/types"
@@ -523,5 +528,185 @@ func TestCreateContainerNativeSettings(t *testing.T) {
 	}
 	if s := d.Spec.Template.Spec.DNSConfig.Searches; s[len(s)-1] != "example.com" || !strings.HasPrefix(s[0], "compose-p.") {
 		t.Errorf("compose DNS searches = %q", s)
+	}
+}
+
+func TestUDPPortsKeepTheirProtocol(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	// pihole's ports: DNS on 53 over TCP and UDP.
+	req := request(t, `{"Image":"pihole/pihole","ExposedPorts":{"53/tcp":{},"53/udp":{},"80/tcp":{}},
+		"HostConfig":{"PortBindings":{"53/tcp":[{"HostPort":"53"}],"53/udp":[{"HostPort":"53"}],"80/tcp":[{"HostPort":"8080"}]}}}`)
+	opts, _ := RunOptionsFromRequest("pihole", req)
+	mustCreate(t, a, opts)
+
+	for _, name := range []string{serviceName("pihole"), publishedServiceName("pihole")} {
+		svc, err := client.CoreV1().Services(testNamespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, p := range svc.Spec.Ports {
+			key := fmt.Sprintf("%d/%s", p.Port, p.Protocol)
+			if seen[key] {
+				t.Errorf("Service %s: duplicate port %s, which Kubernetes rejects", name, key)
+			}
+			seen[key] = true
+		}
+		if !seen["53/UDP"] || !seen["53/TCP"] {
+			t.Errorf("Service %s ports = %v, want 53/TCP and 53/UDP", name, seen)
+		}
+	}
+
+	ctrs, err := a.ListContainers(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(ctrs[0].Ports, func(p container.PortSummary) bool {
+		return p.PrivatePort == 53 && p.PublicPort == 53 && p.Type == "udp"
+	}) {
+		t.Errorf("list Ports = %+v, want 53->53/udp", ctrs[0].Ports)
+	}
+	inspect, err := a.InspectContainer(ctx, "pihole")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := inspect.HostConfig.PortBindings[network.MustParsePort("53/udp")]; len(b) != 1 || b[0].HostPort != "53" {
+		t.Errorf("inspect PortBindings = %v, want 53/udp -> 53", inspect.HostConfig.PortBindings)
+	}
+}
+
+// Docker publishes a port given without a host port on a port it picks:
+// compose's `ports: ["80"]` and `docker run -p 80`. d2k publishes it on the
+// container port.
+func TestPortWithoutHostPort(t *testing.T) {
+	a, client := newTestAdapter(t)
+	req := request(t, `{"Image":"nginx","ExposedPorts":{"80/tcp":{}},"HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"","HostPort":""}]}}}`)
+	opts, _ := RunOptionsFromRequest("web", req)
+	if _, _, err := a.CreateContainer(context.Background(), opts); err != nil {
+		t.Fatalf("create with port 80 and no host port: %v", err)
+	}
+	svc, err := client.CoreV1().Services(testNamespace).Get(context.Background(), publishedServiceName("web"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != 80 || svc.Spec.Ports[0].TargetPort.IntValue() != 80 {
+		t.Fatalf("published ports = %+v, want 80 -> 80", svc.Spec.Ports)
+	}
+	ctrs, _ := a.ListContainers(context.Background(), true)
+	if len(ctrs[0].Ports) != 1 || ctrs[0].Ports[0].PublicPort != 80 {
+		t.Fatalf("list Ports = %+v, want 80 published on 80", ctrs[0].Ports)
+	}
+}
+
+// A container acts only on its own Services: a Service of the same name
+// that belongs to another container, or not to d2k, is neither taken over
+// nor deleted.
+func TestContainerLeavesOtherServicesAlone(t *testing.T) {
+	foreign := func(name string) *corev1.Service {
+		return &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "helm-" + name}}}
+	}
+	a, client := newTestAdapter(t, foreign("db"), foreign("cache-lb"))
+	ctx := context.Background()
+	exists := func(name string) bool {
+		_, err := client.CoreV1().Services(testNamespace).Get(ctx, name, metav1.GetOptions{})
+		return err == nil
+	}
+
+	// "cache" has no published ports, so "cache-lb" is not its Service.
+	mustCreate(t, a, RunOptions{Name: "cache", Image: "redis"})
+	if err := a.RemoveContainer(ctx, "cache"); err != nil {
+		t.Fatal(err)
+	}
+	if !exists("cache-lb") {
+		t.Error("docker rm cache deleted Service cache-lb, which is not its")
+	}
+
+	// "db" would resolve to the other workload's pods.
+	if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "db", Image: "postgres"}); !errdefs.IsConflict(err) {
+		t.Errorf("create over another workload's Service = %v, want conflict", err)
+	}
+	if svc, err := client.CoreV1().Services(testNamespace).Get(ctx, "db", metav1.GetOptions{}); err != nil || svc.Spec.Selector["app"] != "helm-db" {
+		t.Errorf("Service db after the refused create = %+v, %v; want it unchanged", svc, err)
+	}
+
+	// "web-lb" is the name of web's published Service.
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", PortBindings: []string{"8080:80/tcp"}})
+	if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "web-lb", Image: "nginx"}); !errdefs.IsConflict(err) {
+		t.Errorf("create of web-lb over web's published Service = %v, want conflict", err)
+		_ = a.RemoveContainer(ctx, "web-lb")
+	}
+	if !exists("web-lb") {
+		t.Error("web's published Service web-lb was deleted")
+	}
+}
+
+// Docker label keys need not be Kubernetes label keys: Traefik's are often
+// longer than 63 characters. They are kept as the container's and volume's
+// Docker labels, and only valid keys become Kubernetes labels, which the
+// API server would otherwise reject.
+func TestLabelKeysKubernetesRejects(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	labels := map[string]string{
+		"traefik.http.middlewares.redirect-to-https.redirectscheme.scheme": "https",
+		"traefik.enable": "true",
+	}
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Labels: labels})
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if errs := metav1validation.ValidateLabels(d.Labels, field.NewPath("metadata", "labels")); len(errs) > 0 {
+		t.Errorf("Deployment labels the API server rejects: %v", errs)
+	}
+	if d.Labels["traefik.enable"] != "true" {
+		t.Errorf("Deployment labels = %v, want the valid Docker label kept", d.Labels)
+	}
+	if ctr, _ := a.InspectContainer(ctx, "web"); !maps.Equal(ctr.Config.Labels, labels) {
+		t.Errorf("Docker labels = %v, want %v", ctr.Config.Labels, labels)
+	}
+
+	if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: "data", Labels: labels}); err != nil {
+		t.Fatal(err)
+	}
+	pvc, _ := client.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "data", metav1.GetOptions{})
+	if errs := metav1validation.ValidateLabels(pvc.Labels, field.NewPath("metadata", "labels")); len(errs) > 0 {
+		t.Errorf("PVC labels the API server rejects: %v", errs)
+	}
+}
+
+// As in Docker, docker stop returns once the container has stopped: compose
+// recreates a service by stopping the old container, then starting the new
+// one on the same volumes.
+func TestStopWaitsForThePod(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: "always"})
+	if err := a.StartContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-abc", Namespace: testNamespace,
+		Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}}}
+	if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- a.StopContainer(ctx, "db") }()
+	select {
+	case err := <-stopped:
+		t.Fatalf("stop returned (%v) while the container's pod still runs", err)
+	case <-time.After(700 * time.Millisecond):
+	}
+	// The ReplicaSet deletes the pod once its process ends.
+	if err := client.CoreV1().Pods(testNamespace).Delete(ctx, "db-abc", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not return once the pod was gone")
 	}
 }

@@ -101,7 +101,7 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `device_cgroup_rules` | Not supported |  |
 | `storage_opt` | Not supported |  |
 | `use_api_socket` | Not supported | There is no Docker socket to share: compose's bind mount of it is ignored with a warning. |
-| `ports` | Partial | Published ports get a LoadBalancer Service. A `host_ip` is ignored with a warning. |
+| `ports` | Partial | Published ports get a LoadBalancer Service. A port with no published port is published on its container port. A `host_ip` is ignored with a warning. |
 | `ports.range` | Supported |  |
 | `ports.host_ip` | Partial | See `ports`. |
 | `expose` | Supported | The ports are reachable within the namespace. |
@@ -118,7 +118,7 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `dns` | Not supported | The cluster DNS server must answer first for service names to resolve: ignored with a warning. |
 | `dns_opt` | Supported | Added to the pod's DNS options, after d2k's own. |
 | `dns_search` | Supported | Searched after the compose project's and the namespace's domains. |
-| `volumes` | Partial | Named volumes are PersistentVolumeClaims; `tmpfs` mounts are memory-backed `emptyDir`s. Bind, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files. |
+| `volumes` | Partial | Named volumes are PersistentVolumeClaims; `tmpfs` mounts are memory-backed `emptyDir`s. Bind, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files. Anonymous volumes (`volumes: [/data]`) are ignored with a warning: their data stays in the container. |
 | `volumes.bind` | Not supported | See `volumes`. |
 | `volumes.tmpfs` | Supported | A memory-backed `emptyDir`, with `tmpfs.size` as its size limit. |
 | `volumes.image` | Not supported |  |

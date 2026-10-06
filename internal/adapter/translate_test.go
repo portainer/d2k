@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"encoding/json"
 	"maps"
 	"os"
@@ -66,7 +67,7 @@ func TestTranslatedSettings(t *testing.T) {
 		t.Errorf("CPU request = %dm, want 500m (512 shares)", got)
 	}
 	slices.Sort(opts.PortBindings)
-	if !slices.Equal(opts.PortBindings, []string{"127.0.0.1:5353:53", "8080:80"}) {
+	if !slices.Equal(opts.PortBindings, []string{"127.0.0.1:5353:53/udp", "8080:80/tcp"}) {
 		t.Errorf("port bindings = %q", opts.PortBindings)
 	}
 	if _, ok := opts.ExposedPorts["80/tcp"]; !ok {
@@ -243,5 +244,23 @@ func TestNativeTranslations(t *testing.T) {
 	_, warnings = RunOptionsFromRequest("web", request(t, `{"Image":"app","HostConfig":{"SecurityOpt":["seccomp={\"defaultAction\":\"SCMP_ACT_ERRNO\"}","apparmor=docker-default","label=disable"]}}`))
 	if text := strings.Join(warnings, "\n"); !strings.Contains(text, "seccomp profile") || !strings.Contains(text, `"label=disable"`) || strings.Contains(text, "apparmor") {
 		t.Errorf("warnings = %q, want the seccomp profile and label=disable to warn", warnings)
+	}
+}
+
+// compose sends an anonymous volume (volumes: ["/data"]) as a volume mount
+// with no source. It must not fail the create: it is ignored with a
+// warning, as docker run's anonymous volumes (Config.Volumes) are.
+func TestAnonymousVolumeWarns(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	req := request(t, `{"Image":"app","HostConfig":{"Mounts":[{"Type":"volume","Target":"/data"},{"Type":"volume","Source":"named","Target":"/named"}]}}`)
+	opts, warnings := RunOptionsFromRequest("app", req)
+	if !slices.Equal(opts.Binds, []string{"named:/named"}) {
+		t.Errorf("binds = %q, want the named volume only", opts.Binds)
+	}
+	if text := strings.Join(warnings, "\n"); !strings.Contains(text, `anonymous volume at "/data" ignored`) {
+		t.Errorf("warnings = %q, want the anonymous volume named", warnings)
+	}
+	if _, _, err := a.CreateContainer(context.Background(), opts); err != nil {
+		t.Fatalf("create with an anonymous volume: %v", err)
 	}
 }

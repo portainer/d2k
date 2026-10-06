@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/rs/zerolog/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,6 +54,7 @@ type KubernetesDockerAdapter struct {
 	// startup, keyed by NFS server address. Used by SwarmCreateService to create
 	// NFS-backed PVCs inline when docker stack deploy doesn't call volume create.
 	nfsStorageClasses map[string]string // server -> storageClassName
+	nfsMu             sync.Mutex        // guards nfsStorageClasses
 
 	// clusterDNS and clusterDomain are the cluster DNS server and domain, read
 	// from d2k's own resolv.conf. Pods of compose projects use them to resolve

@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -41,9 +42,13 @@ func restartPolicyOf(d appsv1.Deployment) container.RestartPolicyMode {
 // startPod runs a new pod for the container, replacing any previous one.
 func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deployment) error {
 	pods := a.client.CoreV1().Pods(a.namespace)
-	previous, err := pods.List(ctx, metav1.ListOptions{LabelSelector: "app=" + d.Name})
+	previous, err := pods.List(ctx, podsOf(d.Name))
 	if err != nil {
 		return fmt.Errorf("unable to list the pods of %q: %w", d.Name, err)
+	}
+	// As in Docker, a container that is running, or starting, keeps its run.
+	if slices.ContainsFunc(previous.Items, func(p corev1.Pod) bool { return p.DeletionTimestamp == nil && !podEnded(p) }) {
+		return nil
 	}
 	for _, p := range previous.Items {
 		if err := pods.Delete(ctx, p.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
@@ -85,7 +90,7 @@ func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deploy
 // its logs.
 func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deployment) error {
 	pods := a.client.CoreV1().Pods(a.namespace)
-	list, err := pods.List(ctx, metav1.ListOptions{LabelSelector: "app=" + d.Name})
+	list, err := pods.List(ctx, podsOf(d.Name))
 	if err != nil {
 		return fmt.Errorf("unable to list the pods of %q: %w", d.Name, err)
 	}
@@ -129,6 +134,23 @@ func (a *KubernetesDockerAdapter) waitForPodGone(ctx context.Context, name strin
 		select {
 		case <-ctx.Done():
 			return code, seen
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// waitForPodsGone waits until the Deployment has no pods left.
+func (a *KubernetesDockerAdapter) waitForPodsGone(ctx context.Context, deployment string, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(deployment))
+		if err != nil || len(pods.Items) == 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
 		case <-time.After(500 * time.Millisecond):
 		}
 	}

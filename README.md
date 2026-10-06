@@ -21,7 +21,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | Docker concept | Kubernetes translation |
 |---|---|
 | `docker run` | Deployment, the container's record. `--restart always` and `unless-stopped`: its replica runs the container. `--restart no` (the default) and `on-failure`: a pod created from it runs the container |
-| `docker stop` | Scale the Deployment to 0, or delete the pod and record its exit code |
+| `docker stop` | Scale the Deployment to 0, or delete the pod and record its exit code; returns once the pod is gone |
 | `docker start` | Scale the Deployment to 1, or run a new pod |
 | `docker rm` | Delete the Deployment (and its pod) + Service |
 | `-p <host>:<container>` | LoadBalancer Service |
@@ -233,7 +233,7 @@ Note: only `nfs.csi.k8s.io` is supported for automatic matching. Other NFS provi
 
 ### Volume lifecycle
 
-Volumes (PVCs) are not deleted when a stack is removed with `docker stack rm`. This matches Docker Swarm behaviour; named volumes are intentionally preserved across stack teardown to prevent accidental data loss. Data persists and reattaches automatically if the stack is redeployed. To remove a volume explicitly, use `docker volume rm <name>`.
+Volumes (PVCs) are not deleted when a stack is removed with `docker stack rm`. This matches Docker Swarm behaviour; named volumes are intentionally preserved across stack teardown to prevent accidental data loss. Data persists and reattaches automatically if the stack is redeployed. To remove a volume explicitly, use `docker volume rm <name>`. As in Docker, `docker volume rm` refuses a volume that a container, running or stopped, still uses (409, "volume is in use"): remove the container first.
 
 The NFS subdirectory created by the CSI provisioner is named after the PVC UID (e.g. `pvc-92f50b38-...`), not the pod. This means pod rescheduling, rolling updates, and replica scaling all reattach to the same data automatically without any intervention.
 

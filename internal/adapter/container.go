@@ -272,11 +272,13 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		},
 		Spec: clusterSpec,
 	}
-	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
-		if !errors.IsAlreadyExists(svcErr) {
-			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			return "", nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
-		}
+	_, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{})
+	if errors.IsAlreadyExists(svcErr) && a.ownService(ctx, clusterSvc.Name, opts.Name) == nil {
+		svcErr = errdefs.Conflict(fmt.Errorf("the name %q is taken by Service %q, which is not this container's", dockerName, clusterSvc.Name))
+	}
+	if svcErr != nil && !errors.IsAlreadyExists(svcErr) {
+		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+		return "", nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
 	}
 
 	// Create a LoadBalancer or NodePort Service for externally published ports.
@@ -288,7 +290,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		if _, svcErr = a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{}); svcErr != nil {
 			// Roll back the Deployment and ClusterIP service so we don't leave orphans.
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(opts.Name), metav1.DeleteOptions{})
+			a.deleteOwnService(ctx, serviceName(opts.Name), opts.Name)
 			return "", nil, fmt.Errorf("unable to create service for %q: %w", opts.Name, svcErr)
 		}
 	}
@@ -296,8 +298,8 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	if scoped {
 		if err := a.ensureProjectDNSService(ctx, project, created); err != nil {
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(opts.Name), metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, publishedServiceName(opts.Name), metav1.DeleteOptions{})
+			a.deleteOwnService(ctx, serviceName(opts.Name), opts.Name)
+			a.deleteOwnService(ctx, publishedServiceName(opts.Name), opts.Name)
 			return "", nil, err
 		}
 	}
@@ -367,7 +369,17 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 	if getErr == nil && runsAsPod(*d) {
 		return a.stopPod(ctx, d)
 	}
-	return a.scaleDeployment(ctx, name, 0)
+	if err := a.scaleDeployment(ctx, name, 0); err != nil {
+		return err
+	}
+	// As Docker's stop does, return once the container has stopped: compose
+	// starts its replacement, on the same volumes, right after.
+	grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
+	if getErr == nil && d.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
+		grace = *d.Spec.Template.Spec.TerminationGracePeriodSeconds
+	}
+	a.waitForPodsGone(ctx, resolved, time.Duration(grace+30)*time.Second)
+	return nil
 }
 
 // StartContainer implements docker start: it runs a pod for a container that
@@ -407,8 +419,8 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	}
 
 	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, publishedServiceName(resolved), metav1.DeleteOptions{})
+	a.deleteOwnService(ctx, serviceName(resolved), resolved)
+	a.deleteOwnService(ctx, publishedServiceName(resolved), resolved)
 
 	return nil
 }
@@ -463,7 +475,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 		}
 	}
 
-	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + d.Name})
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(d.Name))
 	if err != nil {
 		return nil, fmt.Errorf("unable to list pods of %q: %w", resolved, err)
 	}
@@ -476,11 +488,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 
 func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, error) {
 	labels := managedLabels(opts.Name)
-	for k, v := range opts.Labels {
-		if clean, ok := sanitiseLabelValue(v); ok {
-			labels[k] = clean
-		}
-	}
+	addDockerLabels(labels, opts.Labels)
 
 	portAnnotation, err := encodePortMappings(opts.PortBindings, opts.PublishAll)
 	if err != nil {
@@ -641,6 +649,26 @@ func serviceName(name string) string {
 	return strings.TrimRight(name, "-")
 }
 
+// ownService returns the named Service if d2k created it for the container
+// whose Deployment is named deployment, and nil otherwise: another
+// container's published Service, or another workload's Service, may have
+// its name.
+func (a *KubernetesDockerAdapter) ownService(ctx context.Context, name, deployment string) *corev1.Service {
+	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, name, metav1GetOptions())
+	if err != nil || svc.Labels[types.LabelManagedBy] != types.LabelManagedByValue || svc.Labels[types.LabelWorkloadName] != deployment {
+		return nil
+	}
+	return svc
+}
+
+// deleteOwnService deletes the named Service, best effort, if it is the
+// container's.
+func (a *KubernetesDockerAdapter) deleteOwnService(ctx context.Context, name, deployment string) {
+	if svc := a.ownService(ctx, name, deployment); svc != nil {
+		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, name, metav1.DeleteOptions{Preconditions: metav1.NewUIDPreconditions(string(svc.UID))})
+	}
+}
+
 // --- name/ID resolution ---
 
 func (a *KubernetesDockerAdapter) resolveDeploymentName(ctx context.Context, nameOrID string) (string, error) {
@@ -723,24 +751,13 @@ func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummar
 	state, status := string(s.Status), containerStatus(s, now)
 
 	var ports []container.PortSummary
-	rawPorts := d.Annotations[types.AnnotationPortMappings]
-	if rawPorts != "" {
-		var bindings []string
-		if err := json.Unmarshal([]byte(rawPorts), &bindings); err == nil {
-			for _, raw := range bindings {
-				parts := strings.SplitN(raw, ":", 2)
-				if len(parts) == 2 {
-					containerPort, _ := strconv.ParseUint(parts[1], 10, 16)
-					hostPort, _ := strconv.ParseUint(parts[0], 10, 16)
-					ports = append(ports, container.PortSummary{
-						IP:          netip.IPv4Unspecified(),
-						PrivatePort: uint16(containerPort),
-						PublicPort:  uint16(hostPort),
-						Type:        "tcp",
-					})
-				}
-			}
-		}
+	for _, m := range publishedPorts(d) {
+		ports = append(ports, container.PortSummary{
+			IP:          netip.IPv4Unspecified(),
+			PrivatePort: uint16(m.ContainerPort),
+			PublicPort:  uint16(m.HostPort),
+			Type:        strings.ToLower(m.Protocol),
+		})
 	}
 
 	return ContainerSummary{
@@ -756,6 +773,22 @@ func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummar
 		Networks: networkIDs(d),
 		Mounts:   containerMounts(d),
 	}
+}
+
+// publishedPorts returns the container's explicit port bindings, as
+// recorded when it was created.
+func publishedPorts(d appsv1.Deployment) []portmapper.PortMapping {
+	var bindings []string
+	if raw := d.Annotations[types.AnnotationPortMappings]; raw == "" || json.Unmarshal([]byte(raw), &bindings) != nil {
+		return nil
+	}
+	var mappings []portmapper.PortMapping
+	for _, b := range bindings {
+		if _, m, _, err := portmapper.Resolve(portmapper.Request{PortBindings: []string{b}}); err == nil {
+			mappings = append(mappings, m...)
+		}
+	}
+	return mappings
 }
 
 // networkIDs maps the names of a container's networks to their IDs.
@@ -801,19 +834,12 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 	}
 
 	portMap := network.PortMap{}
-	rawPorts := d.Annotations[types.AnnotationPortMappings]
-	if rawPorts != "" {
-		var bindings []string
-		if err := json.Unmarshal([]byte(rawPorts), &bindings); err == nil {
-			for _, raw := range bindings {
-				parts := strings.SplitN(raw, ":", 2)
-				if len(parts) == 2 {
-					if p, err := network.ParsePort(parts[1] + "/tcp"); err == nil {
-						portMap[p] = []network.PortBinding{{HostPort: parts[0]}}
-					}
-				}
-			}
+	for _, m := range publishedPorts(d) {
+		if p, err := network.ParsePort(fmt.Sprintf("%d/%s", m.ContainerPort, strings.ToLower(m.Protocol))); err == nil {
+			portMap[p] = append(portMap[p], network.PortBinding{HostPort: strconv.Itoa(m.HostPort)})
 		}
+	}
+	if d.Annotations[types.AnnotationPortMappings] != "" {
 		hostConfig.PortBindings = portMap
 	}
 
