@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 
 	"github.com/portainer/d2k/internal/errdefs"
@@ -75,8 +76,14 @@ func (a *KubernetesDockerAdapter) SubscribeEvents() ([]events.Message, <-chan ev
 // RecordEvents watches the namespace and records Docker events until ctx
 // ends. Watches that end, as Kubernetes ends them periodically, restart.
 func (a *KubernetesDockerAdapter) RecordEvents(ctx context.Context) {
+	state := &eventState{
+		known:        map[string]*appsv1.Deployment{},
+		restarts:     map[string]int32{},
+		terminations: map[string]int32{},
+		volumes:      map[string]bool{},
+	}
 	for ctx.Err() == nil {
-		if err := a.watchEvents(ctx); err != nil && ctx.Err() == nil {
+		if err := a.watchEvents(ctx, state); err != nil && ctx.Err() == nil {
 			log.Warn().Str("context", "KubernetesAdapter").Err(err).Msg("Event watch ended; restarting")
 		}
 		select {
@@ -86,9 +93,20 @@ func (a *KubernetesDockerAdapter) RecordEvents(ctx context.Context) {
 	}
 }
 
-// watchEvents lists the current state, so that only changes become events,
-// then watches Deployments, Pods and PVCs from there.
-func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context) error {
+// eventState is the namespace as the events last reported it. It outlives
+// each watch, so that what changes while a watch restarts still becomes
+// events.
+type eventState struct {
+	listed       bool
+	known        map[string]*appsv1.Deployment
+	restarts     map[string]int32
+	terminations map[string]int32
+	volumes      map[string]bool
+}
+
+// watchEvents lists the current state, reporting what changed since the
+// last watch ended, then watches Deployments, Pods and PVCs from there.
+func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context, state *eventState) error {
 	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
 	if err != nil {
 		return fmt.Errorf("unable to list deployments: %w", err)
@@ -101,15 +119,11 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("unable to list volumes: %w", err)
 	}
-
-	known := map[string]*appsv1.Deployment{}
-	for i := range deps.Items {
-		known[deps.Items[i].Name] = &deps.Items[i]
-	}
-	restarts, terminations := map[string]int32{}, map[string]int32{}
-	for i := range pods.Items {
-		restarts[pods.Items[i].Name] = restartCount(&pods.Items[i])
-		terminations[pods.Items[i].Name] = terminationCount(&pods.Items[i])
+	for _, m := range state.relist(deps.Items, pods.Items, pvcs.Items, time.Now()) {
+		a.events.publish(m)
+		if m.Type == events.ContainerEventType && (m.Action == events.ActionDie || m.Action == events.ActionStop) && autoRemoves(state.known, m.Actor.ID) {
+			go a.autoRemove(ctx, m.Actor.ID)
+		}
 	}
 
 	opts := metav1ListOptions()
@@ -142,26 +156,26 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context) error {
 				return fmt.Errorf("deployment watch closed")
 			}
 			if d, isDeployment := e.Object.(*appsv1.Deployment); isDeployment {
-				msgs = deploymentEvents(known, e.Type, d, time.Now())
+				msgs = deploymentEvents(state.known, e.Type, d, time.Now())
 			}
 		case e, ok := <-podWatch.ResultChan():
 			if !ok {
 				return fmt.Errorf("pod watch closed")
 			}
 			if p, isPod := e.Object.(*corev1.Pod); isPod {
-				msgs = podEvents(known, restarts, terminations, e.Type, p, time.Now())
+				msgs = podEvents(state.known, state.restarts, state.terminations, e.Type, p, time.Now())
 			}
 		case e, ok := <-pvcWatch.ResultChan():
 			if !ok {
 				return fmt.Errorf("volume watch closed")
 			}
 			if pvc, isPVC := e.Object.(*corev1.PersistentVolumeClaim); isPVC {
-				msgs = volumeEvents(e.Type, pvc, time.Now())
+				msgs = volumeEvents(state.volumes, e.Type, pvc, time.Now())
 			}
 		}
 		for _, m := range msgs {
 			a.events.publish(m)
-			if m.Type == events.ContainerEventType && (m.Action == events.ActionDie || m.Action == events.ActionStop) && autoRemoves(known, m.Actor.ID) {
+			if m.Type == events.ContainerEventType && (m.Action == events.ActionDie || m.Action == events.ActionStop) && autoRemoves(state.known, m.Actor.ID) {
 				go a.autoRemove(ctx, m.Actor.ID)
 			}
 		}
@@ -184,6 +198,56 @@ func (a *KubernetesDockerAdapter) autoRemove(ctx context.Context, id string) {
 	if err := a.RemoveContainer(ctx, id); err != nil && !errdefs.IsNotFound(err) {
 		log.Warn().Str("context", "KubernetesAdapter").Str("id", id).Err(err).Msg("Unable to remove a container whose run ended")
 	}
+}
+
+// relist records the listed state and returns the events for what changed
+// since the last watch, in Docker's order: create, die, start or stop,
+// destroy. The first list has none.
+func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []corev1.PersistentVolumeClaim, now time.Time) []events.Message {
+	var msgs, changes []events.Message
+	gone := maps.Clone(s.known)
+	for i := range deps {
+		kind := watch.Added
+		if _, ok := s.known[deps[i].Name]; ok {
+			kind = watch.Modified
+		}
+		delete(gone, deps[i].Name)
+		for _, m := range deploymentEvents(s.known, kind, &deps[i], now) {
+			if m.Action == events.ActionCreate {
+				msgs = append(msgs, m)
+			} else {
+				changes = append(changes, m)
+			}
+		}
+	}
+	listedPods := map[string]bool{}
+	for i := range pods {
+		listedPods[pods[i].Name] = true
+		msgs = append(msgs, podEvents(s.known, s.restarts, s.terminations, watch.Modified, &pods[i], now)...)
+	}
+	for name := range s.restarts {
+		if !listedPods[name] {
+			delete(s.restarts, name)
+			delete(s.terminations, name)
+		}
+	}
+	msgs = append(msgs, changes...)
+	for _, d := range gone {
+		msgs = append(msgs, deploymentEvents(s.known, watch.Deleted, d, now)...)
+	}
+	goneVolumes := maps.Clone(s.volumes)
+	for i := range pvcs {
+		delete(goneVolumes, pvcs[i].Name)
+		msgs = append(msgs, volumeEvents(s.volumes, watch.Added, &pvcs[i], now)...)
+	}
+	for name := range goneVolumes {
+		msgs = append(msgs, volumeEvents(s.volumes, watch.Deleted, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: name}}, now)...)
+	}
+	if !s.listed {
+		s.listed = true
+		return nil
+	}
+	return msgs
 }
 
 // deploymentEvents turns a change to a container's Deployment into the
@@ -266,11 +330,16 @@ func terminationCount(p *corev1.Pod) int32 {
 	return s[0].RestartCount
 }
 
-func volumeEvents(kind watch.EventType, pvc *corev1.PersistentVolumeClaim, now time.Time) []events.Message {
+func volumeEvents(volumes map[string]bool, kind watch.EventType, pvc *corev1.PersistentVolumeClaim, now time.Time) []events.Message {
 	action := events.ActionCreate
 	switch kind {
 	case watch.Added:
+		if volumes[pvc.Name] {
+			return nil
+		}
+		volumes[pvc.Name] = true
 	case watch.Deleted:
+		delete(volumes, pvc.Name)
 		action = events.ActionDestroy
 	default:
 		return nil

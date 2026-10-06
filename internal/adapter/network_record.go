@@ -91,8 +91,7 @@ type patchOp struct {
 var namespaceBackoff = wait.Backoff{Steps: 12, Duration: 20 * time.Millisecond, Factor: 1.5, Jitter: 1, Cap: 2 * time.Second}
 
 // patchNamespace applies the operations ops returns for the namespace's
-// current annotations, retrying when the namespace changed meanwhile: a
-// failed resourceVersion test is a 422 (Invalid).
+// current annotations, retrying when the namespace changed meanwhile.
 func (a *KubernetesDockerAdapter) patchNamespace(ctx context.Context, ops func(map[string]string) ([]patchOp, error)) error {
 	err := retry.OnError(namespaceBackoff, func(err error) bool {
 		return apierrors.IsConflict(err) || apierrors.IsInvalid(err)
@@ -111,6 +110,14 @@ func (a *KubernetesDockerAdapter) patchNamespace(ctx context.Context, ops func(m
 			return err
 		}
 		_, err = a.client.CoreV1().Namespaces().Patch(ctx, a.namespace, k8stypes.JSONPatchType, body, metav1.PatchOptions{})
+		// A failed resourceVersion test is a 422 (Invalid) with no details,
+		// as is a patch the API server rejects, such as one that takes the
+		// annotations past their size limit: only the first is retried.
+		if apierrors.IsInvalid(err) {
+			if now, getErr := a.client.CoreV1().Namespaces().Get(ctx, a.namespace, metav1GetOptions()); getErr == nil && now.ResourceVersion == ns.ResourceVersion {
+				return errdefs.InvalidParameter(fmt.Errorf("unable to record the network on namespace %q: %s", a.namespace, err.Error()))
+			}
+		}
 		return err
 	})
 	if apierrors.IsConflict(err) || apierrors.IsInvalid(err) {

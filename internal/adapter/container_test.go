@@ -15,8 +15,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
+	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/client-go/kubernetes/fake"
+	appsv1client "k8s.io/client-go/kubernetes/typed/apps/v1"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/types"
@@ -708,5 +712,50 @@ func TestStopWaitsForThePod(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("stop did not return once the pod was gone")
+	}
+}
+
+// cancelAwareClient fails Deployment deletes made with a cancelled context,
+// as client-go does; the fake clientset ignores the context.
+type cancelAwareClient struct{ *fake.Clientset }
+
+func (c cancelAwareClient) AppsV1() appsv1client.AppsV1Interface {
+	return cancelAwareApps{c.Clientset.AppsV1()}
+}
+
+type cancelAwareApps struct{ appsv1client.AppsV1Interface }
+
+func (a cancelAwareApps) Deployments(namespace string) appsv1client.DeploymentInterface {
+	return cancelAwareDeployments{a.AppsV1Interface.Deployments(namespace)}
+}
+
+type cancelAwareDeployments struct {
+	appsv1client.DeploymentInterface
+}
+
+func (d cancelAwareDeployments) Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return d.DeploymentInterface.Delete(ctx, name, opts)
+}
+
+// A client that goes away while its container is created, as Ctrl-C on
+// docker run or compose up does, leaves no half-created container behind
+// to hold the name.
+func TestCreateContainerCancelledMidwayLeavesNoDeployment(t *testing.T) {
+	_, client := newTestAdapter(t)
+	a := NewWithClient(cancelAwareClient{client}, testNamespace)
+	ctx, cancel := context.WithCancel(context.Background())
+	client.PrependReactor("create", "services", func(k8stesting.Action) (bool, runtime.Object, error) {
+		cancel()
+		return true, nil, context.Canceled
+	})
+	if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "web", Image: "nginx"}); err == nil {
+		t.Fatal("create succeeded, want the Service's error")
+	}
+	deps, err := client.AppsV1().Deployments(testNamespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil || len(deps.Items) != 0 {
+		t.Fatalf("Deployments left = %d (%v), want none", len(deps.Items), err)
 	}
 }
