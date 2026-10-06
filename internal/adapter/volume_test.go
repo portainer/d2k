@@ -14,6 +14,74 @@ import (
 	"github.com/portainer/d2k/internal/errdefs"
 )
 
+func TestRemoveVolumeNotFound(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	if err := a.RemoveVolume(context.Background(), "nope"); !errdefs.IsNotFound(err) {
+		t.Fatalf("remove of a missing volume = %v, want not found", err)
+	}
+}
+
+func TestCreateVolumeInvalidSize(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	if _, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data", SizeLimit: "not-a-size"}); !errdefs.IsInvalidParameter(err) {
+		t.Fatalf("create with an invalid size = %v, want invalid parameter", err)
+	}
+}
+
+func TestCreateVolumeMissingName(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	if _, err := a.CreateVolume(context.Background(), CreateVolumeOptions{}); !errdefs.IsInvalidParameter(err) {
+		t.Fatalf("create without a name = %v, want invalid parameter", err)
+	}
+}
+
+func TestCreateNFSVolumeMissingAddr(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	_, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data", DriverOpts: map[string]string{"type": "nfs", "o": "nolock,soft,rw"}})
+	if err == nil {
+		t.Fatal("create NFS volume without addr= = nil, want an error")
+	}
+}
+
+func TestCreateNFSVolumeNoMatchingStorageClass(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	_, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data", DriverOpts: map[string]string{"type": "nfs", "o": "addr=10.0.0.9"}})
+	if err == nil {
+		t.Fatal("create NFS volume with no matching StorageClass = nil, want an error")
+	}
+}
+
+// A StorageClass whose provisioner isn't nfs.csi.k8s.io, or whose server
+// doesn't match, is not a match even if it is the only StorageClass present.
+func TestCreateNFSVolumeStorageClassMustMatch(t *testing.T) {
+	sc := &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "other"}, Provisioner: "other.csi.k8s.io",
+		Parameters: map[string]string{"server": "10.0.0.9"}}
+	a, _ := newTestAdapter(t, sc)
+	if _, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data", DriverOpts: map[string]string{"type": "nfs", "o": "addr=10.0.0.9"}}); err == nil {
+		t.Fatal("create NFS volume against a non-NFS StorageClass = nil, want an error")
+	}
+}
+
+func TestCreateNFSVolumeMatchingStorageClass(t *testing.T) {
+	sc := &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "nfs"}, Provisioner: nfsCsiProvisioner,
+		Parameters: map[string]string{"server": "10.0.0.9"}}
+	a, _ := newTestAdapter(t, sc)
+	vol, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data", DriverOpts: map[string]string{"type": "nfs", "o": "addr=10.0.0.9,nolock"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vol.Name != "data" {
+		t.Fatalf("created = %+v", vol)
+	}
+	got, err := a.InspectVolume(context.Background(), "data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Options["type"] != "nfs" {
+		t.Fatalf("inspected = %+v, want the nfs driver option recorded", got)
+	}
+}
+
 func TestVolumeRoundTrip(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	ctx := context.Background()

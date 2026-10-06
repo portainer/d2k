@@ -71,6 +71,46 @@ func TestNetworksSurviveRestart(t *testing.T) {
 	}
 }
 
+// A network created without a driver is a plain bridge network, scoped
+// local, as Docker's own default is; one created with driver overlay is
+// scoped swarm.
+func TestNetworkRecordDriverAndScope(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+	if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "app_default"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "app_overlay", Driver: "overlay"}); err != nil {
+		t.Fatal(err)
+	}
+
+	bridge, err := a.InspectNetwork(ctx, "app_default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bridge.Driver != "bridge" || bridge.Scope != "local" {
+		t.Errorf("no driver: %+v, want driver bridge, scope local", bridge)
+	}
+
+	overlay, err := a.InspectNetwork(ctx, "app_overlay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overlay.Driver != "overlay" || overlay.Scope != "swarm" {
+		t.Errorf("driver overlay: %+v, want scope swarm", overlay)
+	}
+}
+
+// Removing a network that was never created, or already removed, is not an
+// error: d2k has always answered this way, as the Docker CLI's own
+// best-effort `network rm` on a missing name expects.
+func TestRemoveNetworkMissingIsNotAnError(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	if err := a.RemoveNetwork(context.Background(), "nope"); err != nil {
+		t.Fatalf("remove of a missing network = %v, want nil", err)
+	}
+}
+
 func containsNetwork(list []NetworkSummary, name string) bool {
 	for _, n := range list {
 		if n.Name == name {
