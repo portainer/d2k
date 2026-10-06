@@ -268,6 +268,18 @@ spec:
             - name: tls
               mountPath: /etc/d2k/tls
               readOnly: true
+          # Kubernetes removes a Terminating pod from the Service's endpoints
+          # the instant termination starts, but each node's kube-proxy still
+          # needs a few seconds to update its iptables/ipvs rules. Without
+          # this delay, SIGTERM reaches d2k (and it stops accepting
+          # connections) before kube-proxy has caught up everywhere, so a
+          # client that connects in that window gets its connection reset.
+          # Delaying SIGTERM keeps d2k serving normally until kube-proxy is
+          # expected to have converged.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
           # The Docker API requires a client certificate, so probes use the
           # plain health port, which serves /healthz only.
           livenessProbe:

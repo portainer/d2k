@@ -1,0 +1,55 @@
+// Package deploy checks invariants in deploy/kubernetes.yaml that a YAML
+// diff review can easily miss.
+package deploy
+
+import (
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	"sigs.k8s.io/yaml"
+)
+
+// d2kDeployment returns the d2k Deployment from kubernetes.yaml, which holds
+// several documents separated by "---".
+func d2kDeployment(t *testing.T) *appsv1.Deployment {
+	t.Helper()
+	data, err := os.ReadFile("kubernetes.yaml")
+	if err != nil {
+		t.Fatalf("read kubernetes.yaml: %v", err)
+	}
+	for _, doc := range strings.Split(string(data), "\n---") {
+		var d appsv1.Deployment
+		if err := yaml.Unmarshal([]byte(doc), &d); err != nil {
+			continue
+		}
+		if d.Kind == "Deployment" && d.Name == "d2k" {
+			return &d
+		}
+	}
+	t.Fatal("no Deployment named d2k in kubernetes.yaml")
+	return nil
+}
+
+// TestPreStopDelaysSIGTERM guards against the fix for the resilience lane's
+// lead finding: on "kubectl rollout restart" (or any pod delete), SIGTERM
+// reaches d2k before every node's kube-proxy has removed the Terminating pod
+// from the Service's endpoints, so a client that connects in that window
+// gets its connection reset. A preStop sleep delays SIGTERM long enough for
+// kube-proxy to converge while d2k keeps serving normally.
+func TestPreStopDelaysSIGTERM(t *testing.T) {
+	c := d2kDeployment(t).Spec.Template.Spec.Containers[0]
+	if c.Lifecycle == nil || c.Lifecycle.PreStop == nil || c.Lifecycle.PreStop.Exec == nil {
+		t.Fatal("d2k container has no preStop hook: SIGTERM reaches it as soon as termination starts, before kube-proxy stops routing to it")
+	}
+	cmd := c.Lifecycle.PreStop.Exec.Command
+	if len(cmd) < 2 || cmd[0] != "sleep" {
+		t.Fatalf("preStop command = %v, want a sleep", cmd)
+	}
+	seconds, err := strconv.Atoi(cmd[len(cmd)-1])
+	if err != nil || seconds < 5 {
+		t.Fatalf("preStop sleep = %q, want at least 5 seconds", cmd[len(cmd)-1])
+	}
+}
