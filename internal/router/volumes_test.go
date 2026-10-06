@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/moby/moby/api/types/volume"
@@ -52,5 +53,26 @@ func TestVolumeListDangling(t *testing.T) {
 
 	if rec := do(t, h, "GET", "/volumes?filters="+url.QueryEscape(`{"dangling":["maybe"]}`), ""); rec.Code != http.StatusBadRequest {
 		t.Errorf("dangling=maybe: status = %d, want 400: %s", rec.Code, rec.Body)
+	}
+}
+
+// TestVolumeCreateWithoutName checks that, as in Docker, a volume created
+// without a name gets a random one and the anonymous label: docker volume
+// create and Portainer's form leave the name empty.
+func TestVolumeCreateWithoutName(t *testing.T) {
+	h, _ := newTestRouter()
+	rec := do(t, h, "POST", "/volumes/create", `{"Name":""}`)
+	var vol volume.Volume
+	if err := json.Unmarshal(rec.Body.Bytes(), &vol); err != nil || rec.Code != http.StatusCreated {
+		t.Fatalf("volume create = %d %s, want 201", rec.Code, rec.Body)
+	}
+	if len(vol.Name) != 64 || strings.Trim(vol.Name, "0123456789abcdef") != "" {
+		t.Errorf("name = %q, want 64 hex digits", vol.Name)
+	}
+	if _, ok := vol.Labels["com.docker.volume.anonymous"]; !ok {
+		t.Errorf("labels = %v, want com.docker.volume.anonymous", vol.Labels)
+	}
+	if rec := do(t, h, "GET", "/volumes/"+vol.Name, ""); rec.Code != http.StatusOK {
+		t.Errorf("inspect = %d %s", rec.Code, rec.Body)
 	}
 }

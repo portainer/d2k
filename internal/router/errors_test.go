@@ -33,7 +33,7 @@ func TestErrorStatus(t *testing.T) {
 		{"POST", "/containers/create?name=bad", `{"Image":"nginx","HostConfig":{"Binds":["novolumepath"]}}`, http.StatusBadRequest},
 		{"POST", "/containers/create?name=bad", `{not json`, http.StatusBadRequest},
 		{"GET", "/volumes/nope", "", http.StatusNotFound},
-		{"POST", "/volumes/create", `{"Name":""}`, http.StatusBadRequest},
+		{"POST", "/volumes/create", `{"Name":"data","Driver":"rexray"}`, http.StatusBadRequest},
 		{"DELETE", "/networks/bridge", "", http.StatusForbidden},
 		{"GET", "/containers/json?filters={bad", "", http.StatusBadRequest},
 	} {
