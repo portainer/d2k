@@ -66,7 +66,7 @@ func TestTranslatedSettings(t *testing.T) {
 		t.Errorf("CPU request = %dm, want 500m (512 shares)", got)
 	}
 	slices.Sort(opts.PortBindings)
-	if !slices.Equal(opts.PortBindings, []string{"127.0.0.1:5353:53", "8080:80"}) {
+	if !slices.Equal(opts.PortBindings, []string{"127.0.0.1:5353:53/udp", "8080:80/tcp"}) {
 		t.Errorf("port bindings = %q", opts.PortBindings)
 	}
 	if _, ok := opts.ExposedPorts["80/tcp"]; !ok {

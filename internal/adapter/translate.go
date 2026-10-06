@@ -79,11 +79,11 @@ func RunOptionsFromRequest(name string, req container.CreateRequest) (RunOptions
 	}
 	for p, bindings := range host.PortBindings {
 		for _, b := range bindings {
+			binding := fmt.Sprintf("%s:%d/%s", b.HostPort, p.Num(), p.Proto())
 			if b.HostIP.IsValid() && !b.HostIP.IsUnspecified() {
-				opts.PortBindings = append(opts.PortBindings, fmt.Sprintf("%s:%s:%d", b.HostIP, b.HostPort, p.Num()))
-			} else {
-				opts.PortBindings = append(opts.PortBindings, fmt.Sprintf("%s:%d", b.HostPort, p.Num()))
+				binding = b.HostIP.String() + ":" + binding
 			}
+			opts.PortBindings = append(opts.PortBindings, binding)
 		}
 	}
 

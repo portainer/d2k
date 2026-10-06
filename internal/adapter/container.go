@@ -723,24 +723,13 @@ func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummar
 	state, status := string(s.Status), containerStatus(s, now)
 
 	var ports []container.PortSummary
-	rawPorts := d.Annotations[types.AnnotationPortMappings]
-	if rawPorts != "" {
-		var bindings []string
-		if err := json.Unmarshal([]byte(rawPorts), &bindings); err == nil {
-			for _, raw := range bindings {
-				parts := strings.SplitN(raw, ":", 2)
-				if len(parts) == 2 {
-					containerPort, _ := strconv.ParseUint(parts[1], 10, 16)
-					hostPort, _ := strconv.ParseUint(parts[0], 10, 16)
-					ports = append(ports, container.PortSummary{
-						IP:          netip.IPv4Unspecified(),
-						PrivatePort: uint16(containerPort),
-						PublicPort:  uint16(hostPort),
-						Type:        "tcp",
-					})
-				}
-			}
-		}
+	for _, m := range publishedPorts(d) {
+		ports = append(ports, container.PortSummary{
+			IP:          netip.IPv4Unspecified(),
+			PrivatePort: uint16(m.ContainerPort),
+			PublicPort:  uint16(m.HostPort),
+			Type:        strings.ToLower(m.Protocol),
+		})
 	}
 
 	return ContainerSummary{
@@ -756,6 +745,22 @@ func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummar
 		Networks: networkIDs(d),
 		Mounts:   containerMounts(d),
 	}
+}
+
+// publishedPorts returns the container's explicit port bindings, as
+// recorded when it was created.
+func publishedPorts(d appsv1.Deployment) []portmapper.PortMapping {
+	var bindings []string
+	if raw := d.Annotations[types.AnnotationPortMappings]; raw == "" || json.Unmarshal([]byte(raw), &bindings) != nil {
+		return nil
+	}
+	var mappings []portmapper.PortMapping
+	for _, b := range bindings {
+		if _, m, _, err := portmapper.Resolve(portmapper.Request{PortBindings: []string{b}}); err == nil {
+			mappings = append(mappings, m...)
+		}
+	}
+	return mappings
 }
 
 // networkIDs maps the names of a container's networks to their IDs.
@@ -801,19 +806,12 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 	}
 
 	portMap := network.PortMap{}
-	rawPorts := d.Annotations[types.AnnotationPortMappings]
-	if rawPorts != "" {
-		var bindings []string
-		if err := json.Unmarshal([]byte(rawPorts), &bindings); err == nil {
-			for _, raw := range bindings {
-				parts := strings.SplitN(raw, ":", 2)
-				if len(parts) == 2 {
-					if p, err := network.ParsePort(parts[1] + "/tcp"); err == nil {
-						portMap[p] = []network.PortBinding{{HostPort: parts[0]}}
-					}
-				}
-			}
+	for _, m := range publishedPorts(d) {
+		if p, err := network.ParsePort(fmt.Sprintf("%d/%s", m.ContainerPort, strings.ToLower(m.Protocol))); err == nil {
+			portMap[p] = append(portMap[p], network.PortBinding{HostPort: strconv.Itoa(m.HostPort)})
 		}
+	}
+	if d.Annotations[types.AnnotationPortMappings] != "" {
 		hostConfig.PortBindings = portMap
 	}
 
