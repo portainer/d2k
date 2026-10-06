@@ -193,8 +193,17 @@ func autoRemoves(known map[string]*appsv1.Deployment, id string) bool {
 }
 
 // autoRemove removes a container whose run ended, as Docker does for one
-// created with AutoRemove.
+// created with AutoRemove: unless a restart ended the run, or the container
+// runs again.
 func (a *KubernetesDockerAdapter) autoRemove(ctx context.Context, id string) {
+	if resolved, err := a.resolveDeploymentName(ctx, id); err == nil {
+		if _, restarting := a.restarting.Load(resolved); restarting {
+			return
+		}
+	}
+	if ctr, err := a.InspectContainer(ctx, id); err == nil && (ctr.State.Running || IsStarting(ctr.State)) {
+		return
+	}
 	if err := a.RemoveContainer(ctx, id); err != nil && !errdefs.IsNotFound(err) {
 		log.Warn().Str("context", "KubernetesAdapter").Str("id", id).Err(err).Msg("Unable to remove a container whose run ended")
 	}

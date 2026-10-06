@@ -361,13 +361,8 @@ func (h *Handler) Stop(w http.ResponseWriter, r *http.Request) {
 // Restart handles POST /containers/{id}/restart.
 func (h *Handler) Restart(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/restart")
-	if err := h.adapter.StopContainer(r.Context(), name); err != nil {
-		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("Restart/stop failed")
-		httputils.WriteErrorFrom(w, err)
-		return
-	}
-	if err := h.adapter.StartContainer(r.Context(), name); err != nil {
-		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("Restart/start failed")
+	if err := h.adapter.RestartContainer(r.Context(), name); err != nil {
+		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("RestartContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
 	}

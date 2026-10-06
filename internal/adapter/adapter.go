@@ -64,6 +64,10 @@ type KubernetesDockerAdapter struct {
 
 	// events records the namespace's Docker events (RecordEvents).
 	events eventHub
+
+	// restarting holds the Deployment names of the containers being
+	// restarted, whose run's end does not remove them.
+	restarting sync.Map
 }
 
 // Options configures a new KubernetesDockerAdapter.
