@@ -231,6 +231,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	}
 	warnings = append(warnings, ignoredAliases(opts.Aliases, dockerName, service)...)
 
+	// From here the container is created whole or rolled back, even if the
+	// client goes away: a half-created one would hold its name.
+	ctx = context.WithoutCancel(ctx)
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
