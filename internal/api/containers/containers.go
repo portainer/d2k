@@ -592,6 +592,10 @@ func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 	stdin, stdout, stderr := boolParam(q.Get("stdin")), boolParam(q.Get("stdout")), boolParam(q.Get("stderr"))
 	stream, withLogs := boolParam(q.Get("stream")), boolParam(q.Get("logs"))
 
+	// Subscribe before inspecting so a die between the two is not missed.
+	_, live, cancelEvents := h.adapter.SubscribeEvents()
+	defer cancelEvents()
+
 	ctr, err := h.adapter.InspectContainer(r.Context(), name)
 	if err != nil {
 		httputils.WriteErrorFrom(w, err)
@@ -626,6 +630,11 @@ func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 	// client half-closes after sending stdin; it ends with the process.
 	ctx, stop := context.WithCancel(context.WithoutCancel(r.Context()))
 	defer stop()
+	// A pod force-deleted or lost out from under the stream never gets the
+	// kubelet to end it (D2K-038): cancel ctx as soon as the container's own
+	// die event arrives, the same event Wait relies on, rather than wait on
+	// a stream that may never return on its own.
+	go stopOnDeath(ctx, stop, ctr.ID, live)
 	// Register the session first: the Docker CLI resizes right after start,
 	// before the container runs; the queue keeps that size for the attach.
 	var resize *streams.SizeQueue
@@ -699,6 +708,24 @@ func waitUntilStarted(ctx context.Context, a *adapter.KubernetesDockerAdapter, i
 		case <-ctx.Done():
 			return false, false
 		case <-ticker.C:
+		}
+	}
+}
+
+// stopOnDeath cancels an attach as soon as id's container dies, so a stream
+// the kubelet will never end on its own (the pod's own force-delete or loss)
+// still returns, instead of leaving the attach hanging after inspect and
+// wait already report the container dead (D2K-038).
+func stopOnDeath(ctx context.Context, stop context.CancelFunc, id string, live <-chan events.Message) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case m := <-live:
+			if m.Actor.ID == id && m.Action == events.ActionDie {
+				stop()
+				return
+			}
 		}
 	}
 }
