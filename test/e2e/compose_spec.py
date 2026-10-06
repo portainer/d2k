@@ -203,7 +203,8 @@ CASES = [
          "use_api_socket: true", warns("host paths are not supported")),
 
     # --- services: networking -----------------------------------------------
-    case("ports", PARTIAL, "Published ports get a LoadBalancer Service. A `host_ip` is ignored with a warning.",
+    case("ports", PARTIAL, "Published ports get a LoadBalancer Service. A port with no published port is "
+         "published on its container port. A `host_ip` is ignored with a warning.",
          "ports: ['18081:80']", ok(lambda d: ctr(d)["ports"] == [{"containerPort": 80, "protocol": "TCP"}])),
     case("ports.range", YES, "", "ports: ['18090-18091:80-81']", ok(lambda d: len(ctr(d)["ports"]) == 2)),
     case("ports.host_ip", PARTIAL, "See `ports`.", "ports: [{target: 80, published: '18082', protocol: udp, host_ip: 127.0.0.1}]",

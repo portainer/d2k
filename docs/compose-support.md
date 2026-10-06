@@ -101,7 +101,7 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `device_cgroup_rules` | Not supported |  |
 | `storage_opt` | Not supported |  |
 | `use_api_socket` | Not supported | There is no Docker socket to share: compose's bind mount of it is ignored with a warning. |
-| `ports` | Partial | Published ports get a LoadBalancer Service. A `host_ip` is ignored with a warning. |
+| `ports` | Partial | Published ports get a LoadBalancer Service. A port with no published port is published on its container port. A `host_ip` is ignored with a warning. |
 | `ports.range` | Supported |  |
 | `ports.host_ip` | Partial | See `ports`. |
 | `expose` | Supported | The ports are reachable within the namespace. |
