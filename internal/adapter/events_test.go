@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -115,4 +117,58 @@ func TestEventHub(t *testing.T) {
 	cancel()
 	cancel()                                     // idempotent
 	hub.publish(events.Message{Action: "after"}) // no subscriber, must not block
+}
+
+// A container that exits while the namespace's watches are restarting, as
+// Kubernetes ends them every 30 to 60 minutes, still gets its die event:
+// docker wait and an attached docker run wait for it.
+func TestEventsReportDeathsAcrossWatchRestarts(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	id, _, err := a.CreateContainer(ctx, RunOptions{Name: "job", Image: "busybox", RestartPolicy: "no"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	p := podOf(t, a, "job")
+	setStatus(t, a, p, corev1.PodRunning, corev1.ContainerState{Running: &corev1.ContainerStateRunning{}})
+
+	podWatches := make(chan *watch.FakeWatcher, 4)
+	client.PrependWatchReactor("pods", func(k8stesting.Action) (bool, watch.Interface, error) {
+		w := watch.NewFake()
+		podWatches <- w
+		return true, w, nil
+	})
+	_, live, unsubscribe := a.SubscribeEvents()
+	defer unsubscribe()
+	go a.RecordEvents(ctx)
+
+	var first *watch.FakeWatcher
+	select {
+	case first = <-podWatches:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no pod watch")
+	}
+	// The container exits, and the watch ends before reporting it.
+	p = podOf(t, a, "job")
+	setStatus(t, a, p, corev1.PodFailed, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3}})
+	first.Stop()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case m := <-live:
+			if m.Action == events.ActionDie && m.Actor.ID == id {
+				if m.Actor.Attributes["exitCode"] != "3" {
+					t.Fatalf("die event exit code = %q, want 3", m.Actor.Attributes["exitCode"])
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("no die event for the container that exited while the watch restarted")
+		}
+	}
 }
