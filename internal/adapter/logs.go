@@ -61,8 +61,40 @@ func (a *KubernetesDockerAdapter) GetContainerLogs(ctx context.Context, name str
 	if err != nil {
 		return nil, false, err
 	}
+	pod = a.waitForContainerStarted(ctx, pod, 30*time.Second)
 	stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(pod.Name, logOpts).Stream(ctx)
 	return stream, tty, err
+}
+
+// waitForContainerStarted waits for pod's container to leave the transitional
+// states (ContainerCreating, PodInitializing) that Docker has no equivalent
+// of. The kubelet refuses to stream a container's logs during them, unlike
+// Docker, which has nothing to refuse: a created container only starts
+// running. Left waiting past timeout, the pod is returned as is, so the
+// kubelet's error passes through as before.
+func (a *KubernetesDockerAdapter) waitForContainerStarted(ctx context.Context, pod *corev1.Pod, timeout time.Duration) *corev1.Pod {
+	waiting := func(p *corev1.Pod) bool {
+		s := p.Status.ContainerStatuses
+		return len(s) > 0 && s[0].State.Waiting != nil && waitingWhileCreating[s[0].State.Waiting.Reason]
+	}
+	if !waiting(pod) {
+		return pod
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for waiting(pod) {
+		select {
+		case <-ctx.Done():
+			return pod
+		case <-time.After(200 * time.Millisecond):
+		}
+		p, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, pod.Name, metav1GetOptions())
+		if err != nil {
+			return pod
+		}
+		pod = p
+	}
+	return pod
 }
 
 // currentPodForDeployment returns the first Running Pod owned by the named Deployment.
