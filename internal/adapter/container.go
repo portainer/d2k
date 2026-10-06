@@ -853,6 +853,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		AutoRemove:    d.Annotations[types.AnnotationAutoRemove] == "true",
 		// Each pod has its own cgroup namespace, as with Docker's default on cgroup v2.
 		CgroupnsMode: container.CgroupnsModePrivate,
+		Resources:    dockerResources(spec.Resources),
 	}
 	hostConfig.Binds, hostConfig.Mounts = volumeConfig(d)
 	process := append(append([]string{}, spec.Command...), spec.Args...)
