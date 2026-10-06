@@ -350,6 +350,8 @@ Docker host mode requires namespace-scoped permissions only.
 | persistentvolumeclaims | get, list, watch, create, delete |
 | namespaces | get, patch _(its own namespace only; an admission policy limits patch to `d2k.portainer.io/network-*` annotations)_ |
 | events | get, list |
+| resourcequotas | get, list _(a container created without CPU or memory settings gets the requests and limits a quota requires: 10m CPU, 32Mi memory)_ |
+| limitranges | get, list _(optional: a LimitRange's container defaults are left to apply instead of d2k's)_ |
 | metrics.k8s.io/pods | get, list _(optional)_ |
 
 Swarm mode adds a ClusterRole for node and StorageClass access:

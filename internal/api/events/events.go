@@ -4,6 +4,7 @@ package events
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -41,6 +42,10 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 	until, errUntil := httputils.ParseUnixTime(q.Get("until"))
 	if errSince != nil || errUntil != nil {
 		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(firstErr(errSince, errUntil)))
+		return
+	}
+	if !until.IsZero() && until.Before(since) {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(fmt.Errorf("`since` time (%s) cannot be after `until` time (%s)", q.Get("since"), q.Get("until"))))
 		return
 	}
 

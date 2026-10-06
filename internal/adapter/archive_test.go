@@ -167,3 +167,20 @@ func TestCopyToContainerSecretIsTheContainers(t *testing.T) {
 		t.Errorf("api-files data keys = %d, want the new container's file only", len(s.Data))
 	}
 }
+
+func TestCopyToContainerLeavesSwarmSecrets(t *testing.T) {
+	swarmSecret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "db-files", Namespace: testNamespace,
+		Labels: map[string]string{"d2k.portainer.io/managed-by": "d2k", "d2k.portainer.io/swarm-managed-by": "d2k"}},
+		Data: map[string][]byte{"db-files": []byte("swarm secret")}}
+	a, client := newTestAdapter(t, swarmSecret)
+	ctx := context.Background()
+
+	mustCreate(t, a, RunOptions{Name: "db", Image: "postgres"})
+	if err := a.CopyToContainer(ctx, "db", "/", archive(t, file{name: "/run/secrets/pw", content: "s3cret", mode: 0o400})); !errdefs.IsConflict(err) {
+		t.Errorf("copy with the Swarm secret db-files = %v, want conflict", err)
+	}
+	s, _ := client.CoreV1().Secrets(testNamespace).Get(ctx, "db-files", metav1.GetOptions{})
+	if len(s.OwnerReferences) != 0 || len(s.Data) != 1 || string(s.Data["db-files"]) != "swarm secret" {
+		t.Errorf("Secret db-files = owners %+v, data %v, want it unchanged: removing the container would delete it", s.OwnerReferences, s.Data)
+	}
+}

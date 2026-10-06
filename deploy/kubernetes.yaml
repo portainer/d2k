@@ -75,10 +75,11 @@ rules:
     resources: ["namespaces"]
     verbs: ["get", "patch"]
 
-  # ResourceQuotas — read-only, used to inject requests.cpu/memory when the
-  # namespace quota enforces them (Docker has no concept of ResourceQuotas)
+  # ResourceQuotas — read-only, used to inject requests and limits when the
+  # namespace quota enforces them (Docker has no concept of ResourceQuotas);
+  # LimitRanges — read-only, whose container defaults are used instead
   - apiGroups: [""]
-    resources: ["resourcequotas"]
+    resources: ["resourcequotas", "limitranges"]
     verbs: ["get", "list"]
 
   # Metrics — optional, used for docker stats

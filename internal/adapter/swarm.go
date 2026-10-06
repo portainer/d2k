@@ -479,6 +479,13 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// --- configs as volume mounts ---
 	for _, c := range cs.Configs {
 		k8sConfigName := sanitiseResourceName(c.ConfigName)
+		existing, err := a.client.CoreV1().ConfigMaps(a.namespace).Get(ctx, k8sConfigName, metav1.GetOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			return nil, fmt.Errorf("unable to get config %q: %w", c.ConfigName, err)
+		}
+		if err != nil || existing.Labels[types.LabelSwarmManagedBy] != types.LabelSwarmManagedByValue || existing.Name == types.ConfigMapSwarmIdentity {
+			return nil, errdefs.InvalidParameter(fmt.Errorf("config not found: %s", c.ConfigName))
+		}
 		targetName := c.File.Name
 		if targetName == "" {
 			targetName = c.ConfigName // keep original as the mount filename
@@ -2365,6 +2372,27 @@ func (a *KubernetesDockerAdapter) injectQuotaDefaults(ctx context.Context, reqs 
 		}
 		if _, ok := q.Spec.Hard[corev1.ResourceLimitsMemory]; ok {
 			needsMemLimit = true
+		}
+	}
+
+	// The API server sets a LimitRange's container defaults, which satisfy the
+	// quota, on values that are unset only. Without the permission to read
+	// them, d2k injects its own.
+	if ranges, err := a.client.CoreV1().LimitRanges(a.namespace).List(ctx, metav1.ListOptions{}); err == nil {
+		for _, lr := range ranges.Items {
+			for _, item := range lr.Spec.Limits {
+				if item.Type != corev1.LimitTypeContainer {
+					continue
+				}
+				_, cpu := item.Default[corev1.ResourceCPU]
+				_, mem := item.Default[corev1.ResourceMemory]
+				_, cpuReq := item.DefaultRequest[corev1.ResourceCPU]
+				_, memReq := item.DefaultRequest[corev1.ResourceMemory]
+				needsCPULimit = needsCPULimit && !cpu
+				needsMemLimit = needsMemLimit && !mem
+				needsCPUReq = needsCPUReq && !cpuReq && !cpu
+				needsMemReq = needsMemReq && !memReq && !mem
+			}
 		}
 	}
 

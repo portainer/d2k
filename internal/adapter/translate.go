@@ -319,6 +319,26 @@ func resources(r container.Resources) corev1.ResourceRequirements {
 	return out
 }
 
+// dockerResources is the inverse of resources: the Docker memory and CPU
+// settings of a container's resource requirements. A CPU limit is reported
+// as NanoCPUs, however it was set.
+func dockerResources(r corev1.ResourceRequirements) container.Resources {
+	var out container.Resources
+	if q, ok := r.Limits[corev1.ResourceMemory]; ok {
+		out.Memory = q.Value()
+	}
+	if q, ok := r.Requests[corev1.ResourceMemory]; ok {
+		out.MemoryReservation = q.Value()
+	}
+	if q, ok := r.Limits[corev1.ResourceCPU]; ok {
+		out.NanoCPUs = q.MilliValue() * 1_000_000
+	}
+	if q, ok := r.Requests[corev1.ResourceCPU]; ok {
+		out.CPUShares = (q.MilliValue()*1024 + 999) / 1000
+	}
+	return out
+}
+
 // Docker's healthcheck defaults.
 const (
 	defaultHealthInterval = 30 * time.Second

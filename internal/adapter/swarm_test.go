@@ -228,3 +228,25 @@ func TestSwarmCreateServiceSecretMustBeManaged(t *testing.T) {
 		t.Fatalf("SwarmCreateService() with managed secret error: %v", err)
 	}
 }
+
+func TestSwarmCreateServiceConfigMustBeManaged(t *testing.T) {
+	const body = `{"Name":"web","TaskTemplate":{"ContainerSpec":{"Image":"nginx:1.27","Configs":[{"ConfigName":"%s","File":{"Name":"config"}}]}}}`
+
+	a, client := newTestAdapter(t,
+		// An admin's ConfigMap in d2k's namespace: not a Swarm config.
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "settings", Namespace: testNamespace}, Data: map[string]string{"settings": "theirs"}},
+		&corev1.ConfigMap{ObjectMeta: swarmObjectMeta("app-nginx-conf", "66666666-0000-0000-0000-000000000000", "app")},
+	)
+
+	_, err := a.SwarmCreateService(context.Background(), strings.NewReader(fmt.Sprintf(body, "settings")))
+	if !errdefs.IsInvalidParameter(err) {
+		t.Fatalf("SwarmCreateService() with unmanaged config error = %v, want invalid parameter", err)
+	}
+	if _, err := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "web", metav1.GetOptions{}); err == nil {
+		t.Fatal("Deployment was created for a service mounting an unmanaged config")
+	}
+
+	if _, err := a.SwarmCreateService(context.Background(), strings.NewReader(fmt.Sprintf(body, "app_nginx_conf"))); err != nil {
+		t.Fatalf("SwarmCreateService() with managed config error: %v", err)
+	}
+}
