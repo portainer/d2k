@@ -259,6 +259,8 @@ kubectl apply -f deploy/kubernetes.yaml
 
 For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included.
 
+Restarting d2k (`kubectl rollout restart`, a pod delete, a reschedule) takes about 5 seconds longer than it used to: a `preStop` hook delays SIGTERM so kube-proxy has time to stop routing to the terminating pod before d2k stops accepting connections. Without it, a client can hit the pod in that window and see its connection reset.
+
 Connect Portainer or the Docker CLI to the d2k Service:
 
 ```bash
