@@ -132,3 +132,38 @@ func TestCopyToContainerRefuses(t *testing.T) {
 		t.Errorf("copy into a started container = %v, want not implemented", err)
 	}
 }
+
+// The Secret of a container's copied files is the container's own: a
+// Secret of that name that another workload owns is left alone, and one
+// left by a removed container of the same name is replaced, not added to.
+func TestCopyToContainerSecretIsTheContainers(t *testing.T) {
+	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "web-files", Namespace: testNamespace},
+		Data: map[string][]byte{"password": []byte("theirs")}}
+	stale := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "api-files", Namespace: testNamespace,
+		Labels:          map[string]string{"d2k.portainer.io/managed-by": "d2k"},
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "Deployment", Name: "api", UID: "removed-container"}}},
+		Data: map[string][]byte{"file-old": []byte("old")}}
+	a, client := newTestAdapter(t, foreign, stale)
+	ctx := context.Background()
+
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx"})
+	if err := a.CopyToContainer(ctx, "web", "/", archive(t, file{name: "/run/secrets/pw", content: "s3cret", mode: 0o400})); !errdefs.IsConflict(err) {
+		t.Errorf("copy with another workload's Secret web-files = %v, want conflict", err)
+	}
+	if s, _ := client.CoreV1().Secrets(testNamespace).Get(ctx, "web-files", metav1.GetOptions{}); len(s.Data) != 1 || string(s.Data["password"]) != "theirs" {
+		t.Errorf("Secret web-files = %v, want it unchanged", s.Data)
+	}
+
+	mustCreate(t, a, RunOptions{Name: "api", Image: "nginx"})
+	if err := a.CopyToContainer(ctx, "api", "/", archive(t, file{name: "/run/secrets/pw", content: "s3cret", mode: 0o400})); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "api", metav1.GetOptions{})
+	s, _ := client.CoreV1().Secrets(testNamespace).Get(ctx, "api-files", metav1.GetOptions{})
+	if len(s.OwnerReferences) != 1 || s.OwnerReferences[0].UID != d.UID {
+		t.Errorf("owners of api-files = %+v, want the new container's Deployment only: the old owner is gone and the garbage collector would delete it", s.OwnerReferences)
+	}
+	if _, ok := s.Data["file-old"]; ok || len(s.Data) != 1 {
+		t.Errorf("api-files data keys = %d, want the new container's file only", len(s.Data))
+	}
+}
