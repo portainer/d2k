@@ -160,11 +160,7 @@ func (a *KubernetesDockerAdapter) createPVCVolume(ctx context.Context, opts Crea
 func (a *KubernetesDockerAdapter) volumeMeta(opts CreateVolumeOptions) (metav1.ObjectMeta, error) {
 	name := sanitiseResourceName(opts.Name)
 	labels := managedLabels(name)
-	for k, v := range opts.Labels {
-		if clean, ok := sanitiseLabelValue(v); ok {
-			labels[k] = clean
-		}
-	}
+	addDockerLabels(labels, opts.Labels)
 	annotations := map[string]string{types.AnnotationDockerName: opts.Name}
 	for key, value := range map[string]map[string]string{types.AnnotationDockerLabels: opts.Labels, types.AnnotationDriverOpts: opts.DriverOpts} {
 		if len(value) == 0 {

@@ -478,11 +478,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 
 func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, error) {
 	labels := managedLabels(opts.Name)
-	for k, v := range opts.Labels {
-		if clean, ok := sanitiseLabelValue(v); ok {
-			labels[k] = clean
-		}
-	}
+	addDockerLabels(labels, opts.Labels)
 
 	portAnnotation, err := encodePortMappings(opts.PortBindings, opts.PublishAll)
 	if err != nil {

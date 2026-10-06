@@ -2,6 +2,7 @@ package adapter
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -34,6 +35,17 @@ func managedLabels(name string) map[string]string {
 		types.LabelWorkloadName: name,
 		// app label for selector convenience
 		"app": name,
+	}
+}
+
+// addDockerLabels adds the Docker labels that are also valid Kubernetes
+// labels to labels. The others stay Docker labels only: they are recorded
+// verbatim in an annotation.
+func addDockerLabels(labels, docker map[string]string) {
+	for k, v := range docker {
+		if clean, ok := sanitiseLabelValue(v); ok && len(validation.IsQualifiedName(k)) == 0 {
+			labels[k] = clean
+		}
 	}
 }
 
