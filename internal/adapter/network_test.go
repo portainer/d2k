@@ -6,7 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/portainer/d2k/internal/errdefs"
 )
@@ -79,4 +84,25 @@ func slicesOf(seq func(func(string) bool)) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// A namespace patch the API server rejects, as it does once the namespace's
+// annotations pass 256 KiB, fails at once with the API server's reason: only
+// a failed resourceVersion test means the namespace changed meanwhile.
+func TestNetworkCreateRejectedByAPIServerIsNotRetried(t *testing.T) {
+	a, client := newTestAdapter(t)
+	patches := 0
+	client.PrependReactor("patch", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+		patches++
+		return true, nil, apierrors.NewInvalid(schema.GroupKind{Kind: "Namespace"}, testNamespace, field.ErrorList{
+			field.TooLong(field.NewPath("metadata", "annotations"), "", 262144),
+		})
+	})
+	_, _, err := a.CreateNetwork(context.Background(), CreateNetworkOptions{Name: "web_default"})
+	if patches != 1 {
+		t.Errorf("patches = %d, want 1", patches)
+	}
+	if err == nil || errdefs.IsUnavailable(err) || !strings.Contains(err.Error(), "Too long") {
+		t.Errorf("create = %v, want the API server's rejection", err)
+	}
 }
