@@ -78,7 +78,7 @@ func (a *KubernetesDockerAdapter) createNFSVolume(ctx context.Context, opts Crea
 		for _, sc := range storageClasses.Items {
 			if sc.Provisioner == nfsCsiProvisioner && sc.Parameters["server"] == nfsServer {
 				matchedSC = sc.Name
-				a.nfsStorageClasses[nfsServer] = sc.Name
+				a.cacheNFSStorageClass(nfsServer, sc.Name)
 				break
 			}
 		}
@@ -305,7 +305,7 @@ func (a *KubernetesDockerAdapter) LogNFSStorageClasses(ctx context.Context) {
 			continue
 		}
 		found = append(found, nfsEntry{storageClass: sc.Name, server: server})
-		a.nfsStorageClasses[server] = sc.Name
+		a.cacheNFSStorageClass(server, sc.Name)
 	}
 
 	if len(found) == 0 {
@@ -321,6 +321,8 @@ func (a *KubernetesDockerAdapter) LogNFSStorageClasses(ctx context.Context) {
 // nfsStorageClassForServer returns the StorageClass name for a given NFS server
 // address, or ("", false) if none is cached.
 func (a *KubernetesDockerAdapter) nfsStorageClassForServer(server string) (string, bool) {
+	a.nfsMu.Lock()
+	defer a.nfsMu.Unlock()
 	sc, ok := a.nfsStorageClasses[server]
 	return sc, ok
 }
@@ -328,8 +330,17 @@ func (a *KubernetesDockerAdapter) nfsStorageClassForServer(server string) (strin
 // anyNFSStorageClass returns the first cached NFS StorageClass name, or ("", false)
 // if none are available. Used when server address is unknown at service create time.
 func (a *KubernetesDockerAdapter) anyNFSStorageClass() (string, bool) {
+	a.nfsMu.Lock()
+	defer a.nfsMu.Unlock()
 	for _, sc := range a.nfsStorageClasses {
 		return sc, true
 	}
 	return "", false
+}
+
+// cacheNFSStorageClass records the StorageClass for an NFS server address.
+func (a *KubernetesDockerAdapter) cacheNFSStorageClass(server, storageClass string) {
+	a.nfsMu.Lock()
+	defer a.nfsMu.Unlock()
+	a.nfsStorageClasses[server] = storageClass
 }
