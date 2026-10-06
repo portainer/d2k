@@ -16,6 +16,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -23,6 +25,9 @@ const (
 	caValidity   = 10 * 365 * 24 * time.Hour
 	leafValidity = 2 * 365 * 24 * time.Hour
 )
+
+// dnsName matches a DNS name, or a wildcard name such as *.example.com.
+var dnsName = regexp.MustCompile(`^(\*\.)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`)
 
 // Init writes a new CA and certificates to dir:
 //
@@ -60,10 +65,14 @@ func Init(dir string, sans []string) error {
 		NotAfter:    time.Now().Add(leafValidity),
 	}
 	for _, san := range sans {
-		if ip := net.ParseIP(san); ip != nil {
+		san = strings.TrimSpace(san)
+		switch ip := net.ParseIP(san); {
+		case ip != nil:
 			server.IPAddresses = append(server.IPAddresses, ip)
-		} else {
+		case dnsName.MatchString(san):
 			server.DNSNames = append(server.DNSNames, san)
+		default:
+			return fmt.Errorf("%q is not a DNS name or IP address", san)
 		}
 	}
 	serverKey, serverCert, err := newCertificate(server, caCert, caKey)
