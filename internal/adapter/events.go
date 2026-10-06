@@ -81,6 +81,7 @@ func (a *KubernetesDockerAdapter) RecordEvents(ctx context.Context) {
 		known:        map[string]*appsv1.Deployment{},
 		restarts:     map[string]int32{},
 		terminations: map[string]int32{},
+		podApp:       map[string]string{},
 		volumes:      map[string]bool{},
 	}
 	for ctx.Err() == nil {
@@ -102,6 +103,7 @@ type eventState struct {
 	known        map[string]*appsv1.Deployment
 	restarts     map[string]int32
 	terminations map[string]int32
+	podApp       map[string]string
 	volumes      map[string]bool
 }
 
@@ -178,7 +180,7 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context, state *eventS
 				return fmt.Errorf("pod watch closed")
 			}
 			if p, isPod := e.Object.(*corev1.Pod); isPod {
-				msgs = podEvents(state.known, state.restarts, state.terminations, e.Type, p, time.Now())
+				msgs = podEvents(state.known, state.restarts, state.terminations, state.podApp, e.Type, p, time.Now())
 			}
 		case e, ok := <-pvcWatch.ResultChan():
 			if !ok {
@@ -247,13 +249,18 @@ func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []
 	listedPods := map[string]bool{}
 	for i := range pods {
 		listedPods[pods[i].Name] = true
-		msgs = append(msgs, podEvents(s.known, s.restarts, s.terminations, watch.Modified, &pods[i], now)...)
+		msgs = append(msgs, podEvents(s.known, s.restarts, s.terminations, s.podApp, watch.Modified, &pods[i], now)...)
 	}
-	for name := range s.restarts {
-		if !listedPods[name] {
-			delete(s.restarts, name)
-			delete(s.terminations, name)
+	for name, app := range s.podApp {
+		if listedPods[name] {
+			continue
 		}
+		// The pod disappeared while nothing watched: a relist across a watch
+		// restart (D2K-021) sees it gone rather than a Deleted event.
+		msgs = append(msgs, podLostEvent(s.known, s.terminations, app, name, now)...)
+		delete(s.restarts, name)
+		delete(s.terminations, name)
+		delete(s.podApp, name)
 	}
 	msgs = append(msgs, changes...)
 	for _, d := range gone {
@@ -316,13 +323,17 @@ func deploymentEvents(known map[string]*appsv1.Deployment, kind watch.EventType,
 // podEvents reports a container's process dying. A Deployment's pod shows
 // it as its restart count going up; a container's own pod (restart policy
 // "no" or "on-failure") as its container terminating, which terminations
-// counts.
-func podEvents(known map[string]*appsv1.Deployment, restarts, terminations map[string]int32, kind watch.EventType, p *corev1.Pod, now time.Time) []events.Message {
+// counts. podApp remembers each pod's app label, for when it is finally
+// deleted and the event no longer carries one.
+func podEvents(known map[string]*appsv1.Deployment, restarts, terminations map[string]int32, podApp map[string]string, kind watch.EventType, p *corev1.Pod, now time.Time) []events.Message {
 	if kind == watch.Deleted {
+		msgs := podLostEvent(known, terminations, p.Labels["app"], p.Name, now)
 		delete(restarts, p.Name)
 		delete(terminations, p.Name)
-		return nil
+		delete(podApp, p.Name)
+		return msgs
 	}
+	podApp[p.Name] = p.Labels["app"]
 	count, prev := restartCount(p), restarts[p.Name]
 	restarts[p.Name] = count
 	if p.Spec.RestartPolicy != "" && p.Spec.RestartPolicy != corev1.RestartPolicyAlways {
@@ -340,6 +351,21 @@ func podEvents(known map[string]*appsv1.Deployment, restarts, terminations map[s
 		}
 	}
 	return []events.Message{containerEvent(d, events.ActionDie, now, extra)}
+}
+
+// podLostEvent reports a run-once container's pod ending without ever
+// reporting a termination and without d2k having recorded its own stop:
+// force-deleted, evicted, or lost with its node. The kubelet never gets to
+// report such a loss, so without this docker wait, an attached docker run
+// and compose depends_on: service_completed_successfully hang forever even
+// though inspect already shows the container exited (D2K-026, D2K-035). 137
+// is Docker's own convention for a killed container.
+func podLostEvent(known map[string]*appsv1.Deployment, terminations map[string]int32, app, podName string, now time.Time) []events.Message {
+	d, ok := known[app]
+	if !ok || !runsAsPod(*d) || d.Annotations[types.AnnotationStoppedAt] != "" || terminations[podName] != 0 {
+		return nil
+	}
+	return []events.Message{containerEvent(d, events.ActionDie, now, map[string]string{"exitCode": "137"})}
 }
 
 // terminationCount is how many times the pod's container has terminated.
