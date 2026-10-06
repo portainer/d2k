@@ -134,6 +134,23 @@ func (a *KubernetesDockerAdapter) waitForPodGone(ctx context.Context, name strin
 	}
 }
 
+// waitForPodsGone waits until the Deployment has no pods left.
+func (a *KubernetesDockerAdapter) waitForPodsGone(ctx context.Context, deployment string, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(deployment))
+		if err != nil || len(pods.Items) == 0 {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
 // podEnded reports whether the pod's container has exited for good.
 func podEnded(p corev1.Pod) bool {
 	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed

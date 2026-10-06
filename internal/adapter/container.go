@@ -369,7 +369,17 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 	if getErr == nil && runsAsPod(*d) {
 		return a.stopPod(ctx, d)
 	}
-	return a.scaleDeployment(ctx, name, 0)
+	if err := a.scaleDeployment(ctx, name, 0); err != nil {
+		return err
+	}
+	// As Docker's stop does, return once the container has stopped: compose
+	// starts its replacement, on the same volumes, right after.
+	grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
+	if getErr == nil && d.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
+		grace = *d.Spec.Template.Spec.TerminationGracePeriodSeconds
+	}
+	a.waitForPodsGone(ctx, resolved, time.Duration(grace+30)*time.Second)
+	return nil
 }
 
 // StartContainer implements docker start: it runs a pod for a container that
