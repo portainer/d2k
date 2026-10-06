@@ -18,6 +18,14 @@ func metav1ListOptions() metav1.ListOptions {
 	}
 }
 
+// podsOf selects the pods d2k created for the named Deployment: other
+// workloads in the namespace may carry the same app label.
+func podsOf(name string) metav1.ListOptions {
+	opts := metav1ListOptions()
+	opts.LabelSelector += ",app=" + name
+	return opts
+}
+
 // managedLabels returns the baseline labels applied to every Kubernetes resource
 // that d2k creates.
 func managedLabels(name string) map[string]string {

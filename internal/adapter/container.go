@@ -463,7 +463,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 		}
 	}
 
-	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + d.Name})
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(d.Name))
 	if err != nil {
 		return nil, fmt.Errorf("unable to list pods of %q: %w", resolved, err)
 	}

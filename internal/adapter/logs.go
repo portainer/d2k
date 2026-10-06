@@ -14,7 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/portainer/d2k/internal/errdefs"
-	"github.com/portainer/d2k/internal/types"
 )
 
 // LogOptions mirrors the docker logs settings Kubernetes can apply.
@@ -69,13 +68,7 @@ func (a *KubernetesDockerAdapter) GetContainerLogs(ctx context.Context, name str
 // currentPodForDeployment returns the first Running Pod owned by the named Deployment.
 // Falls back to any pod if none is in Running phase (e.g. CrashLoopBackOff).
 func (a *KubernetesDockerAdapter) currentPodForDeployment(ctx context.Context, deploymentName string) (*corev1.Pod, error) {
-	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: fmt.Sprintf("app=%s,%s=%s",
-			deploymentName,
-			types.LabelManagedBy,
-			types.LabelManagedByValue,
-		),
-	})
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(deploymentName))
 	if err != nil {
 		return nil, fmt.Errorf("unable to list pods for deployment %q: %w", deploymentName, err)
 	}

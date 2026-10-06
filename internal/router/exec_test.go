@@ -29,7 +29,7 @@ func TestExecWaitsForAStartingContainer(t *testing.T) {
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		_, _ = client.CoreV1().Pods("d2k").Create(context.Background(), &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "web-abc", Namespace: "d2k", Labels: map[string]string{"app": "web"}, CreationTimestamp: metav1.Now()},
+			ObjectMeta: metav1.ObjectMeta{Name: "web-abc", Namespace: "d2k", Labels: map[string]string{"app": "web", "d2k.portainer.io/managed-by": "d2k"}, CreationTimestamp: metav1.Now()},
 			Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
 				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
 			}}},

@@ -47,7 +47,7 @@ func (a *KubernetesDockerAdapter) CopyToContainer(ctx context.Context, nameOrID,
 	}
 	started := replicasOf(d) > 0
 	if runsAsPod(*d) {
-		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1.ListOptions{LabelSelector: "app=" + name})
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(name))
 		if err != nil {
 			return fmt.Errorf("unable to list the pods of %q: %w", name, err)
 		}

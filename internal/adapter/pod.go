@@ -41,7 +41,7 @@ func restartPolicyOf(d appsv1.Deployment) container.RestartPolicyMode {
 // startPod runs a new pod for the container, replacing any previous one.
 func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deployment) error {
 	pods := a.client.CoreV1().Pods(a.namespace)
-	previous, err := pods.List(ctx, metav1.ListOptions{LabelSelector: "app=" + d.Name})
+	previous, err := pods.List(ctx, podsOf(d.Name))
 	if err != nil {
 		return fmt.Errorf("unable to list the pods of %q: %w", d.Name, err)
 	}
@@ -85,7 +85,7 @@ func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deploy
 // its logs.
 func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deployment) error {
 	pods := a.client.CoreV1().Pods(a.namespace)
-	list, err := pods.List(ctx, metav1.ListOptions{LabelSelector: "app=" + d.Name})
+	list, err := pods.List(ctx, podsOf(d.Name))
 	if err != nil {
 		return fmt.Errorf("unable to list the pods of %q: %w", d.Name, err)
 	}
