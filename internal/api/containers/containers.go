@@ -361,6 +361,17 @@ func (h *Handler) Restart(w http.ResponseWriter, r *http.Request) {
 // Remove handles DELETE /containers/{id}.
 func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "")
+	if !boolParam(r.URL.Query().Get("force")) {
+		ctr, err := h.adapter.InspectContainer(r.Context(), name)
+		if err != nil {
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		if ctr.State.Running || adapter.IsStarting(ctr.State) {
+			httputils.WriteErrorFrom(w, errdefs.Conflict(fmt.Errorf("cannot remove container %q: container is %s: stop the container before removing or force remove", name, ctr.State.Status)))
+			return
+		}
+	}
 	if err := h.adapter.RemoveContainer(r.Context(), name); err != nil {
 		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("RemoveContainer failed")
 		httputils.WriteErrorFrom(w, err)
