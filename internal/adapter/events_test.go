@@ -173,6 +173,50 @@ func TestEventsReportDeathsAcrossWatchRestarts(t *testing.T) {
 	}
 }
 
+// A run-once container whose pod is force-deleted or lost with its node
+// gets a die event too, so docker wait and an attached docker run don't
+// hang forever even though the kubelet never reported it terminating
+// (D2K-035).
+func TestEventsReportALostPodKilled(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	id, _, err := a.CreateContainer(ctx, RunOptions{Name: "job", Image: "busybox", RestartPolicy: "no"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	setStatus(t, a, podOf(t, a, "job"), corev1.PodRunning, corev1.ContainerState{Running: &corev1.ContainerStateRunning{}})
+
+	_, live, unsubscribe := a.SubscribeEvents()
+	defer unsubscribe()
+	go a.RecordEvents(ctx)
+
+	// Give the first watch a moment to start before force-deleting the pod
+	// out from under it, as kubectl delete --force --grace-period=0 does.
+	time.Sleep(200 * time.Millisecond)
+	if err := client.CoreV1().Pods(testNamespace).Delete(ctx, podOf(t, a, "job").Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case m := <-live:
+			if m.Action == events.ActionDie && m.Actor.ID == id {
+				if m.Actor.Attributes["exitCode"] != "137" {
+					t.Fatalf("die event exit code = %q, want 137", m.Actor.Attributes["exitCode"])
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("no die event for the container whose pod was lost")
+		}
+	}
+}
+
 // As the Docker daemon does when it starts, d2k removes the AutoRemove
 // containers whose run ended while it was not watching; one that runs, or
 // was never started, stays.
