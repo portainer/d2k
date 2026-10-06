@@ -77,3 +77,24 @@ func TestCreateVolumeRefusesOtherDrivers(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoveVolumeInUse(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+	if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "db", Image: "postgres", Binds: []string{"db_data:/var/lib/postgresql/data"}}); err != nil {
+		t.Fatal(err)
+	}
+	// As in Docker, a volume used by a container, even a stopped one, stays.
+	if err := a.RemoveVolume(ctx, "db_data"); !errdefs.IsConflict(err) {
+		t.Fatalf("remove of a volume in use = %v, want conflict", err)
+	}
+	if _, err := a.InspectVolume(ctx, "db_data"); err != nil {
+		t.Fatalf("volume after refused remove: %v", err)
+	}
+	if err := a.RemoveContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RemoveVolume(ctx, "db_data"); err != nil {
+		t.Fatalf("remove of a volume no longer in use = %v", err)
+	}
+}
