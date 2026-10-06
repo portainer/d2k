@@ -424,8 +424,8 @@ func nativeSettings(cfg container.Config, host container.HostConfig) (RunOptions
 		for _, o := range strings.Split(host.Tmpfs[target], ",") {
 			switch size, isSize := strings.CutPrefix(o, "size="); {
 			case isSize:
-				if q, err := resource.ParseQuantity(dockerSize(size)); err == nil {
-					m.SizeLimit = &q
+				if n, ok := dockerSize(size); ok {
+					m.SizeLimit = resource.NewQuantity(n, resource.BinarySI)
 				} else {
 					ignored = append(ignored, o)
 				}
@@ -514,12 +514,10 @@ func seLinuxLabel(opts *RunOptions, label string) bool {
 	return true
 }
 
-// dockerSize converts a size string as Docker parses it (RAMInBytes: a
-// number with an optional b/k/m/g/t/p suffix, "b" or "ib" allowed after the
-// unit letter) to a byte count a Kubernetes quantity accepts.
-func dockerSize(s string) string {
-	if n, err := units.RAMInBytes(s); err == nil {
-		return strconv.FormatInt(n, 10)
-	}
-	return s
+// dockerSize parses a size string as Docker does (RAMInBytes: a number with
+// an optional b/k/m/g/t/p suffix, "b" or "ib" allowed after the unit letter)
+// into bytes.
+func dockerSize(s string) (int64, bool) {
+	n, err := units.RAMInBytes(s)
+	return n, err == nil
 }

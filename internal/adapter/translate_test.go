@@ -12,7 +12,6 @@ import (
 	"github.com/docker/go-units"
 	"github.com/moby/moby/api/types/container"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // request decodes a create request body as a client sends it.
@@ -276,13 +275,13 @@ func TestDockerSizeMatchesRAMInBytes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("units.RAMInBytes(%q): %v", size, err)
 		}
-		q, err := resource.ParseQuantity(dockerSize(size))
-		if err != nil {
-			t.Errorf("dockerSize(%q) = %q, not a valid quantity: %v", size, dockerSize(size), err)
+		got, ok := dockerSize(size)
+		if !ok {
+			t.Errorf("dockerSize(%q) rejected a size RAMInBytes accepts", size)
 			continue
 		}
-		if got := q.Value(); got != want {
-			t.Errorf("dockerSize(%q) -> %d bytes, want %d (as RAMInBytes)", size, got, want)
+		if got != want {
+			t.Errorf("dockerSize(%q) = %d bytes, want %d (as RAMInBytes)", size, got, want)
 		}
 	}
 }
