@@ -3,6 +3,7 @@ module github.com/portainer/d2k
 go 1.26
 
 require (
+	github.com/docker/go-units v0.5.0
 	github.com/getkin/kin-openapi v0.149.0
 	github.com/moby/moby/api v1.52.0
 	github.com/rs/zerolog v1.35.1
@@ -16,7 +17,6 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/docker/go-units v0.5.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
