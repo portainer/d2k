@@ -151,6 +151,33 @@ func TestAutoRemoveStop(t *testing.T) {
 	}
 }
 
+// As in Docker, restarting a --rm container keeps it: only the end of a run
+// that is not restarted removes it.
+func TestAutoRemoveRestart(t *testing.T) {
+	client := newFakeCluster()
+	a := adapter.NewWithClient(client, "d2k")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go a.RecordEvents(ctx)
+	h := NewHandler(a)
+	runRemovable(t, ctx, client, a, h, "job")
+	kubeletStops(ctx, client)
+
+	rec := httptest.NewRecorder()
+	h.Restart(rec, httptest.NewRequest("POST", "/containers/job/restart", nil).WithContext(ctx))
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("restart = %d %s, want 204", rec.Code, rec.Body)
+	}
+	time.Sleep(500 * time.Millisecond) // a removal would have happened
+	ctr, err := a.InspectContainer(ctx, "job")
+	if err != nil {
+		t.Fatalf("inspect after restart = %v, want the container", err)
+	}
+	if !adapter.IsStarting(ctr.State) && !ctr.State.Running {
+		t.Errorf("state after restart = %+v, want started", ctr.State)
+	}
+}
+
 // As in Docker, a container that restarts cannot be removed when it exits.
 func TestAutoRemoveRefusesRestartPolicy(t *testing.T) {
 	h := NewHandler(adapter.NewWithClient(newFakeCluster(), "d2k"))
