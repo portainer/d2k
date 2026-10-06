@@ -107,3 +107,33 @@ func TestInjectQuotaDefaultsLimitAtLeastRequest(t *testing.T) {
 		t.Fatalf("limits.cpu = %s, want at least the 500m request", limit.String())
 	}
 }
+
+// A LimitRange's container defaults are applied by the API server before
+// the quota is checked: the admin's defaults satisfy the quota, and a value
+// d2k set would replace them.
+func TestInjectQuotaDefaultsLeavesLimitRangeDefaults(t *testing.T) {
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "compute", Namespace: testNamespace},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceRequestsCPU: resource.MustParse("2"), corev1.ResourceRequestsMemory: resource.MustParse("4Gi"),
+			corev1.ResourceLimitsCPU: resource.MustParse("4"), corev1.ResourceLimitsMemory: resource.MustParse("8Gi"),
+		}},
+	}
+	limits := &corev1.LimitRange{
+		ObjectMeta: metav1.ObjectMeta{Name: "defaults", Namespace: testNamespace},
+		Spec: corev1.LimitRangeSpec{Limits: []corev1.LimitRangeItem{{
+			Type:           corev1.LimitTypeContainer,
+			Default:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("512Mi")},
+			DefaultRequest: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("256Mi")},
+		}}},
+	}
+	a, _ := newTestAdapter(t, quota, limits)
+
+	got, err := a.injectQuotaDefaults(context.Background(), corev1.ResourceRequirements{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Requests) != 0 || len(got.Limits) != 0 {
+		t.Fatalf("reqs = %+v, want nothing injected: the LimitRange defaults apply", got)
+	}
+}
