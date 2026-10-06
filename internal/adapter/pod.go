@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -44,6 +45,10 @@ func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deploy
 	previous, err := pods.List(ctx, podsOf(d.Name))
 	if err != nil {
 		return fmt.Errorf("unable to list the pods of %q: %w", d.Name, err)
+	}
+	// As in Docker, a container that is running, or starting, keeps its run.
+	if slices.ContainsFunc(previous.Items, func(p corev1.Pod) bool { return p.DeletionTimestamp == nil && !podEnded(p) }) {
+		return nil
 	}
 	for _, p := range previous.Items {
 		if err := pods.Delete(ctx, p.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
