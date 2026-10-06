@@ -371,6 +371,10 @@ These features are absent by design. They reflect fundamental differences betwee
 
 d2k stores no images. `docker images` lists none, `docker pull` is acknowledged without pulling, and `docker image inspect` reports only the reference: the kubelet pulls the image when a container starts, and a failed pull shows as the container's state. `docker rmi` is not supported. d2k ignores the registry credentials a client sends (`X-Registry-Auth`); give the namespace pull secrets instead, for example on its default ServiceAccount or through a Portainer policy.
 
+### Container operations
+
+These answer `501 Not Implemented`: `docker kill`, `docker pause` and `docker unpause`, `docker top`, `docker update`, `docker export`, `docker diff`, `docker container prune`, and `docker cp` (which first stats the path in the container; copying into a container through the API, as compose does for secrets and configs, works). Use `docker stop`, `docker rm` and re-create the container instead.
+
 ### Advanced networking
 
 `docker network create --driver macvlan` and `--driver ipvlan` are not supported and will not be. macvlan and ipvlan require direct Layer 2 hardware access, assigning real MAC and IP addresses to container interfaces. Kubernetes networking is CNI-managed and operates above this level — there is no Kubernetes equivalent. If your workload requires macvlan (e.g. direct access to a physical LAN segment), it cannot be translated and must remain on a native Docker host.
