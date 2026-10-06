@@ -235,7 +235,8 @@ CASES = [
 
     # --- services: storage --------------------------------------------------
     case("volumes", PARTIAL, "Named volumes are PersistentVolumeClaims; `tmpfs` mounts are memory-backed `emptyDir`s. "
-         "Bind, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files.", "volumes: [data:/data]",
+         "Bind, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files. "
+         "Anonymous volumes (`volumes: [/data]`) are ignored with a warning: their data stays in the container.", "volumes: [data:/data]",
          ok(lambda d: pod(d)["volumes"][0]["persistentVolumeClaim"]["claimName"].endswith("data")), top="volumes: {data: {}}"),
     case("volumes.bind", NO, "See `volumes`.", "volumes: [./src:/src]", warns("host paths are not supported")),
     case("volumes.tmpfs", YES, "A memory-backed `emptyDir`, with `tmpfs.size` as its size limit.",

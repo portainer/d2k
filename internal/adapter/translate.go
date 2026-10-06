@@ -234,7 +234,7 @@ func parseNumericUser(user string) (uid, gid *int64, ok bool) {
 func volumeMountBinds(mounts []mount.Mount) []string {
 	var binds []string
 	for _, m := range mounts {
-		if m.Type != mount.TypeVolume {
+		if m.Type != mount.TypeVolume || m.Source == "" {
 			continue
 		}
 		bind := m.Source + ":" + m.Target
@@ -251,6 +251,10 @@ func mountWarningsFor(mounts []mount.Mount) []string {
 	for _, m := range mounts {
 		if m.Type != mount.TypeVolume && m.Type != mount.TypeTmpfs {
 			warnings = append(warnings, fmt.Sprintf("%s mount at %q ignored: only named volumes and tmpfs are supported by d2k", m.Type, m.Target))
+			continue
+		}
+		if m.Type == mount.TypeVolume && m.Source == "" {
+			warnings = append(warnings, fmt.Sprintf("anonymous volume at %q ignored: only named volumes are supported by d2k; its data stays in the container and is lost when the container stops", m.Target))
 			continue
 		}
 		if o := m.VolumeOptions; m.Type == mount.TypeVolume && o != nil && o.DriverConfig != nil && o.DriverConfig.Name != "" && o.DriverConfig.Name != "local" {
