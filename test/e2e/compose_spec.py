@@ -19,8 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-ENV = dict(os.environ, DOCKER_HOST="tcp://localhost:31112", DOCKER_TLS_VERIFY="1",
-           DOCKER_CERT_PATH=os.path.join(HERE, ".pki", "client"), DB_PASS="s3cret")
+ENV = dict(os.environ, DOCKER_HOST=os.environ.get("STANDALONE", "tcp://localhost:31112"), DOCKER_TLS_VERIFY="1",
+           DOCKER_CERT_PATH=os.environ.get("PKI", os.path.join(HERE, ".pki", "client")), DB_PASS="s3cret")
 CONTEXT = os.environ.get("CONTEXT", "kind-d2k")
 
 YES, PARTIAL, NO, CLIENT = "Supported", "Partial", "Not supported", "Compose"
