@@ -16,6 +16,7 @@ package containers
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -112,8 +113,15 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// As in the Docker daemon, a status filter implies all containers.
-	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true" || args.Contains("status")
+	limit := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if limit, err = strconv.Atoi(v); err != nil {
+			httputils.WriteErrorFrom(w, errdefs.InvalidParameter(fmt.Errorf("invalid limit %q: %w", v, err)))
+			return
+		}
+	}
+	// As in the Docker daemon, a status filter or a limit implies all containers.
+	all := r.URL.Query().Get("all") == "1" || r.URL.Query().Get("all") == "true" || args.Contains("status") || limit > 0
 
 	ctrs, err := h.adapter.ListContainers(r.Context(), all)
 	if err != nil {
@@ -122,6 +130,10 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctrs = filterContainers(ctrs, args)
+	slices.SortStableFunc(ctrs, func(a, b adapter.ContainerSummary) int { return cmp.Compare(b.Created, a.Created) })
+	if limit > 0 && len(ctrs) > limit {
+		ctrs = ctrs[:limit]
+	}
 
 	type endpoint struct {
 		NetworkID string `json:"NetworkID"`
