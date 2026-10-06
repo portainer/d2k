@@ -76,3 +76,33 @@ func TestVolumeCreateWithoutName(t *testing.T) {
 		t.Errorf("inspect = %d %s", rec.Code, rec.Body)
 	}
 }
+
+// TestVolumeRemove checks the status DELETE /volumes/{name} answers: 404 for
+// a name that was never created, 409 while a container still uses it (even
+// stopped, as Docker keeps it), and 204 once it's free.
+func TestVolumeRemove(t *testing.T) {
+	h, _ := newTestRouter()
+	if rec := do(t, h, "DELETE", "/volumes/nope", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("remove missing = %d, want 404: %s", rec.Code, rec.Body)
+	}
+
+	if rec := do(t, h, "POST", "/volumes/create", `{"Name":"db_data"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("volume create = %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/containers/create?name=db", `{"Image":"postgres","HostConfig":{"Binds":["db_data:/var/lib/postgresql/data"]}}`); rec.Code != http.StatusCreated {
+		t.Fatalf("container create = %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "DELETE", "/volumes/db_data", ""); rec.Code != http.StatusConflict {
+		t.Errorf("remove in use = %d, want 409: %s", rec.Code, rec.Body)
+	}
+
+	if rec := do(t, h, "DELETE", "/containers/db", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("container remove = %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "DELETE", "/volumes/db_data", ""); rec.Code != http.StatusNoContent {
+		t.Errorf("remove free = %d, want 204: %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "GET", "/volumes/db_data", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("inspect after remove = %d, want 404: %s", rec.Code, rec.Body)
+	}
+}

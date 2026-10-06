@@ -47,6 +47,56 @@ func TestNetworkDriverAndScope(t *testing.T) {
 	}
 }
 
+// TestNetworkConnect checks the status POST /networks/{id}/connect and
+// /disconnect answer: 400 on a malformed body, 404 for a container that
+// doesn't exist, and 200 once connected - reflected back by inspect.
+func TestNetworkConnect(t *testing.T) {
+	h, _ := newTestRouter()
+	if rec := do(t, h, "POST", "/networks/create", `{"Name":"app_default"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("network create = %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/containers/create?name=web", `{"Image":"nginx"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("container create = %d %s", rec.Code, rec.Body)
+	}
+
+	if rec := do(t, h, "POST", "/networks/app_default/connect", `{not json`); rec.Code != http.StatusBadRequest {
+		t.Errorf("connect with a malformed body = %d, want 400: %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/networks/app_default/connect", `{"Container":"nope"}`); rec.Code != http.StatusNotFound {
+		t.Errorf("connect a missing container = %d, want 404: %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/networks/app_default/connect", `{"Container":"web"}`); rec.Code != http.StatusOK {
+		t.Fatalf("connect = %d %s", rec.Code, rec.Body)
+	}
+
+	var detail struct {
+		NetworkSettings struct{ Networks map[string]any }
+	}
+	rec := do(t, h, "GET", "/containers/web/json", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("container inspect = %d %s", rec.Code, rec.Body)
+	}
+	if _, ok := detail.NetworkSettings.Networks["app_default"]; !ok {
+		t.Errorf("container networks = %v, want app_default", detail.NetworkSettings.Networks)
+	}
+
+	if rec := do(t, h, "POST", "/networks/app_default/disconnect", `{"Container":"web"}`); rec.Code != http.StatusOK {
+		t.Fatalf("disconnect = %d %s", rec.Code, rec.Body)
+	}
+	rec = do(t, h, "GET", "/containers/web/json", "")
+	// A fresh struct: unmarshalling into the same map twice would merge
+	// rather than replace, hiding a removed key behind a stale one.
+	var afterDisconnect struct {
+		NetworkSettings struct{ Networks map[string]any }
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &afterDisconnect); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := afterDisconnect.NetworkSettings.Networks["app_default"]; ok {
+		t.Errorf("container networks after disconnect = %v, want app_default gone", afterDisconnect.NetworkSettings.Networks)
+	}
+}
+
 // TestNetworkListFilters checks the filters of docker network ls, matched as
 // the daemon does. A filter d2k ignored listed every network, which a
 // `docker network ls -q -f ... | xargs docker network rm` would then remove.
