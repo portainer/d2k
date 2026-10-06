@@ -13,7 +13,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/types"
@@ -636,5 +638,37 @@ func TestContainerLeavesOtherServicesAlone(t *testing.T) {
 	}
 	if !exists("web-lb") {
 		t.Error("web's published Service web-lb was deleted")
+	}
+}
+
+// Docker label keys need not be Kubernetes label keys: Traefik's are often
+// longer than 63 characters. They are kept as the container's and volume's
+// Docker labels, and only valid keys become Kubernetes labels, which the
+// API server would otherwise reject.
+func TestLabelKeysKubernetesRejects(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	labels := map[string]string{
+		"traefik.http.middlewares.redirect-to-https.redirectscheme.scheme": "https",
+		"traefik.enable": "true",
+	}
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Labels: labels})
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if errs := metav1validation.ValidateLabels(d.Labels, field.NewPath("metadata", "labels")); len(errs) > 0 {
+		t.Errorf("Deployment labels the API server rejects: %v", errs)
+	}
+	if d.Labels["traefik.enable"] != "true" {
+		t.Errorf("Deployment labels = %v, want the valid Docker label kept", d.Labels)
+	}
+	if ctr, _ := a.InspectContainer(ctx, "web"); !maps.Equal(ctr.Config.Labels, labels) {
+		t.Errorf("Docker labels = %v, want %v", ctr.Config.Labels, labels)
+	}
+
+	if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: "data", Labels: labels}); err != nil {
+		t.Fatal(err)
+	}
+	pvc, _ := client.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "data", metav1.GetOptions{})
+	if errs := metav1validation.ValidateLabels(pvc.Labels, field.NewPath("metadata", "labels")); len(errs) > 0 {
+		t.Errorf("PVC labels the API server rejects: %v", errs)
 	}
 }
