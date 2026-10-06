@@ -308,6 +308,8 @@ func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
 		respond(ctr.State.ExitCode)
 		return
 	}
+	// A container removed after its run ends answers with the run's code.
+	exitCode := ctr.State.ExitCode
 	for {
 		select {
 		case <-r.Context().Done():
@@ -318,12 +320,14 @@ func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
 			}
 			switch {
 			case m.Action == events.ActionDestroy:
-				respond(0)
+				respond(exitCode)
 				return
-			case condition != "removed" && m.Action == events.ActionDie:
-				code, _ := strconv.Atoi(m.Actor.Attributes["exitCode"])
-				respond(code)
-				return
+			case m.Action == events.ActionDie:
+				exitCode, _ = strconv.Atoi(m.Actor.Attributes["exitCode"])
+				if condition != "removed" {
+					respond(exitCode)
+					return
+				}
 			case condition != "removed" && m.Action == events.ActionStop:
 				respond(0)
 				return

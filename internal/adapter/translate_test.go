@@ -86,14 +86,14 @@ func TestTranslatedSettings(t *testing.T) {
 
 func TestUntranslatedSettingsWarn(t *testing.T) {
 	req := request(t, `{"Image":"app","User":"nginx","Hostname":"h1","Healthcheck":{"Test":["CMD","true"]},"Volumes":{"/cache":{}},
-		"HostConfig":{"AutoRemove":true,"Dns":["1.1.1.1"],"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":3},
+		"HostConfig":{"Dns":["1.1.1.1"],"RestartPolicy":{"Name":"on-failure","MaximumRetryCount":3},
 			"LogConfig":{"Type":"syslog"},"ExtraHosts":["gw:host-gateway"],
 			"Mounts":[{"Type":"bind","Source":"/srv","Target":"/srv"}],"PidsLimit":100}}`)
 	_, warnings := RunOptionsFromRequest("web", req)
 	text := strings.Join(warnings, "\n")
 	for _, want := range []string{
 		`user "nginx" ignored`, "Volumes is not supported",
-		"HostConfig.AutoRemove is not supported", "DNS servers 1.1.1.1 ignored", "HostConfig.PidsLimit is not supported",
+		"DNS servers 1.1.1.1 ignored", "HostConfig.PidsLimit is not supported",
 		"maximum retry count 3 ignored", `log driver "syslog"`, `extra host "gw:host-gateway" ignored`, `bind mount at "/srv" ignored`,
 	} {
 		if !strings.Contains(text, want) {

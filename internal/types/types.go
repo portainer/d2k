@@ -55,6 +55,10 @@ const (
 	// pod, once its pod is gone.
 	AnnotationExitCode = LabelPrefix + "/exit-code"
 
+	// AnnotationAutoRemove marks a container that is removed when its run
+	// ends (docker run --rm).
+	AnnotationAutoRemove = LabelPrefix + "/auto-remove"
+
 	// AnnotationNetworkPrefix prefixes the namespace annotations that record
 	// the Docker networks created in it, one per network, as JSON. A Docker
 	// network has no Kubernetes object of its own.

@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/watch"
 
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/types"
 )
 
@@ -160,7 +161,28 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context) error {
 		}
 		for _, m := range msgs {
 			a.events.publish(m)
+			if m.Type == events.ContainerEventType && (m.Action == events.ActionDie || m.Action == events.ActionStop) && autoRemoves(known, m.Actor.ID) {
+				go a.autoRemove(ctx, m.Actor.ID)
+			}
 		}
+	}
+}
+
+// autoRemoves reports whether the container is removed when its run ends.
+func autoRemoves(known map[string]*appsv1.Deployment, id string) bool {
+	for _, d := range known {
+		if containerID(d.UID) == id {
+			return d.Annotations[types.AnnotationAutoRemove] == "true"
+		}
+	}
+	return false
+}
+
+// autoRemove removes a container whose run ended, as Docker does for one
+// created with AutoRemove.
+func (a *KubernetesDockerAdapter) autoRemove(ctx context.Context, id string) {
+	if err := a.RemoveContainer(ctx, id); err != nil && !errdefs.IsNotFound(err) {
+		log.Warn().Str("context", "KubernetesAdapter").Str("id", id).Err(err).Msg("Unable to remove a container whose run ended")
 	}
 }
 

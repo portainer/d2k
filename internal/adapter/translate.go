@@ -33,7 +33,7 @@ var (
 		"Memory": true, "MemoryReservation": true, "NanoCPUs": true,
 		"CPUShares": true, "CPUQuota": true, "CPUPeriod": true, "DeviceRequests": true,
 		"DNS": true, "DNSSearch": true, "DNSOptions": true, "Sysctls": true, "ShmSize": true, "Tmpfs": true,
-		"SecurityOpt": true, "GroupAdd": true, "Annotations": true,
+		"SecurityOpt": true, "GroupAdd": true, "Annotations": true, "AutoRemove": true,
 	}
 	// Links are reported with HostConfig.Links, where compose also sets them.
 	endpointHandled = map[string]bool{"Aliases": true, "Links": true}
@@ -125,6 +125,7 @@ func RunOptionsFromRequest(name string, req container.CreateRequest) (RunOptions
 	if opts.RestartPolicy == "" {
 		opts.RestartPolicy = string(container.RestartPolicyDisabled)
 	}
+	opts.AutoRemove = host.AutoRemove
 	if n := host.RestartPolicy.MaximumRetryCount; n > 0 {
 		warnings = append(warnings, fmt.Sprintf("on-failure maximum retry count %d ignored: Kubernetes retries without limit", n))
 	}

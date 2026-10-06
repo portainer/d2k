@@ -23,6 +23,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `docker run` | Deployment, the container's record. `--restart always` and `unless-stopped`: its replica runs the container. `--restart no` (the default) and `on-failure`: a pod created from it runs the container |
 | `docker stop` | Scale the Deployment to 0, or delete the pod and record its exit code |
 | `docker start` | Scale the Deployment to 1, or run a new pod |
+| `docker run --rm` | As in Docker, the container is removed when its run ends; it cannot have a restart policy |
 | `docker rm` | Delete the Deployment (and its pod) + Service. As in Docker, a running container needs `-f` |
 | `-p <host>:<container>` | LoadBalancer Service |
 | `-P` (publish all) | NodePort Service |
