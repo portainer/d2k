@@ -95,3 +95,25 @@ func TestInitNeverWritesAKeyOthersCanRead(t *testing.T) {
 		t.Error("Init() overwrote an existing client key")
 	}
 }
+
+func TestInitSANs(t *testing.T) {
+	// A space after a comma is how people type lists: it is not part of the name.
+	dir := t.TempDir()
+	if err := Init(dir, []string{"a.example.com", " b.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	server, err := tls.LoadX509KeyPair(filepath.Join(dir, "server", "tls.crt"), filepath.Join(dir, "server", "tls.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Leaf.VerifyHostname("b.example.com"); err != nil {
+		t.Errorf("server certificate not valid for b.example.com: %v", err)
+	}
+
+	// Names no client can match fail now, not at the first connection.
+	for _, san := range []string{"", "d2k.example.com:2376", "tcp://d2k.example.com", "[::1]"} {
+		if err := Init(t.TempDir(), []string{san}); err == nil {
+			t.Errorf("Init() accepted SAN %q", san)
+		}
+	}
+}
