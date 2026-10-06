@@ -57,6 +57,7 @@ func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deploy
 	}
 	if err := a.annotate(ctx, d.Name, map[string]*string{
 		types.AnnotationStartedAt: ptr(time.Now().UTC().Format(time.RFC3339Nano)),
+		types.AnnotationStoppedAt: nil,
 		types.AnnotationExitCode:  nil,
 	}); err != nil {
 		return err
