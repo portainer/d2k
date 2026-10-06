@@ -1,0 +1,12 @@
+# source: https://github.com/louislam/uptime-kuma (official docker-compose example, README "How to Use")
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1.23.16
+    labels:
+      corpus.mark: "v1"
+    ports:
+      - "18189:3001"
+    volumes:
+      - kuma_data:/app/data
+volumes:
+  kuma_data:

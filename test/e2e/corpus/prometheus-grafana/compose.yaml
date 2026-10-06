@@ -1,0 +1,33 @@
+# source: https://github.com/docker/awesome-compose/tree/master/prometheus-grafana
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    configs:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
+    ports:
+      - "18183:9090"
+    volumes:
+      - prom_data:/prometheus
+  grafana:
+    image: grafana/grafana:11.2.0
+    labels:
+      corpus.mark: "v1"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    ports:
+      - "18184:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+configs:
+  prometheus_config:
+    content: |
+      global:
+        scrape_interval: 15s
+      scrape_configs:
+        - job_name: prometheus
+          static_configs:
+            - targets: ["localhost:9090"]
+volumes:
+  prom_data:
+  grafana_data:

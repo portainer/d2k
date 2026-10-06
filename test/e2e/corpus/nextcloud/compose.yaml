@@ -1,0 +1,44 @@
+# source: https://github.com/docker/awesome-compose/tree/master/nextcloud-postgres,
+# adapted to the MariaDB+Redis backend from https://hub.docker.com/_/nextcloud
+services:
+  nextcloud:
+    image: nextcloud:29.0-apache
+    labels:
+      corpus.mark: "v1"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      MYSQL_HOST: db
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: nextcloud
+      REDIS_HOST: redis
+      NEXTCLOUD_ADMIN_USER: admin
+      NEXTCLOUD_ADMIN_PASSWORD: adminpass
+    ports:
+      - "18182:80"
+    volumes:
+      - nc_data:/var/www/html
+  db:
+    image: mariadb:11.4
+    command: --transaction-isolation=READ-COMMITTED
+    environment:
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: nextcloud
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - db_data:/var/lib/mysql
+  redis:
+    image: redis:7.4-alpine
+volumes:
+  nc_data:
+  db_data:

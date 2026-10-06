@@ -1,0 +1,20 @@
+# Dedicated fixture (not from a public source): an init/migration service that must
+# run once and succeed before the app starts, the pattern most database-backed apps
+# use for schema migrations (depends_on: service_completed_successfully).
+services:
+  migrate:
+    image: busybox:1.36
+    restart: "no"
+    command: ["sh", "-c", "echo migrating... && sleep 2 && echo done >/shared/migrated && cat /shared/migrated"]
+    volumes:
+      - shared:/shared
+  app:
+    image: busybox:1.36
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["sh", "-c", "cat /shared/migrated && sleep 3600"]
+    volumes:
+      - shared:/shared
+volumes:
+  shared:

@@ -1,0 +1,34 @@
+# source: https://www.metabase.com/docs/latest/installation-and-operation/running-metabase-on-docker
+# (official image, Postgres application database)
+services:
+  metabase:
+    image: metabase/metabase:v0.51.6
+    labels:
+      corpus.mark: "v1"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabase
+      MB_DB_PORT: 5432
+      MB_DB_USER: metabase
+      MB_DB_PASS: metabase
+      MB_DB_HOST: db
+    ports:
+      - "18194:3000"
+  db:
+    image: postgres:16.4
+    environment:
+      POSTGRES_DB: metabase
+      POSTGRES_USER: metabase
+      POSTGRES_PASSWORD: metabase
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metabase"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - db_data:/var/lib/postgresql/data
+volumes:
+  db_data:
