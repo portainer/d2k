@@ -255,7 +255,7 @@ kubectl -n d2k create secret generic d2k-tls --from-file=d2k-pki/server
 kubectl apply -f deploy/kubernetes.yaml
 ```
 
-`d2k-pki/client` holds the client certificate (`ca.pem`, `cert.pem`, `key.pem`) for the Docker CLI and for Portainer's "Docker API" environment with TLS. Keep `d2k-pki/ca.key` private. cert-manager can issue the `d2k-tls` Secret instead, as long as it holds `tls.crt`, `tls.key` and the client CA as `ca.crt`. d2k reloads the Secret when it changes, without a restart.
+`d2k-pki/client` holds the client certificate (`ca.pem`, `cert.pem`, `key.pem`) for the Docker CLI and for Portainer's "Docker API" environment with TLS. Keep `d2k-pki/ca.key` private. `d2k pki init` refuses to overwrite any file it would write, so give it a new `--out` directory to start over. cert-manager can issue the `d2k-tls` Secret instead, as long as it holds `tls.crt`, `tls.key` and the client CA as `ca.crt`. d2k reloads the Secret when it changes, without a restart.
 
 For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included.
 

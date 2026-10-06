@@ -31,13 +31,15 @@ const (
 //	client/ca.pem, cert.pem, key.pem   for Docker clients (DOCKER_CERT_PATH)
 //
 // sans are the DNS names and IP addresses clients use to reach d2k. Init
-// refuses to overwrite an existing CA.
+// refuses to overwrite any of these files.
 func Init(dir string, sans []string) error {
 	if len(sans) == 0 {
 		return errors.New("at least one subject alternative name is required")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "ca.key")); err == nil {
-		return fmt.Errorf("%s already holds a CA; refusing to overwrite it", dir)
+	for _, name := range outputs {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
+			return fmt.Errorf("%s already exists; refusing to overwrite it", filepath.Join(dir, name))
+		}
 	}
 
 	caKey, caCert, err := newCertificate(&x509.Certificate{
@@ -89,16 +91,37 @@ func Init(dir string, sans []string) error {
 		"client/cert.pem": encodeCert(clientCert),
 		"client/key.pem":  encodeKey(clientKey),
 	}
-	for name, data := range files {
+	for _, name := range outputs {
 		path := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return err
 		}
-		if err := os.WriteFile(path, data, 0o600); err != nil {
+		if err := writeNew(path, files[name]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// outputs are the files Init writes, relative to its directory.
+var outputs = []string{
+	"ca.crt", "ca.key",
+	"server/tls.crt", "server/tls.key", "server/ca.crt",
+	"client/ca.pem", "client/cert.pem", "client/key.pem",
+}
+
+// writeNew writes data to a file that must not exist yet, so the file is
+// created with mode 0600 rather than keeping an existing file's mode.
+func writeNew(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // newCertificate creates a key and a certificate from template, signed by
