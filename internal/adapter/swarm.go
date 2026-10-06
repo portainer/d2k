@@ -2375,6 +2375,27 @@ func (a *KubernetesDockerAdapter) injectQuotaDefaults(ctx context.Context, reqs 
 		}
 	}
 
+	// The API server sets a LimitRange's container defaults, which satisfy the
+	// quota, on values that are unset only. Without the permission to read
+	// them, d2k injects its own.
+	if ranges, err := a.client.CoreV1().LimitRanges(a.namespace).List(ctx, metav1.ListOptions{}); err == nil {
+		for _, lr := range ranges.Items {
+			for _, item := range lr.Spec.Limits {
+				if item.Type != corev1.LimitTypeContainer {
+					continue
+				}
+				_, cpu := item.Default[corev1.ResourceCPU]
+				_, mem := item.Default[corev1.ResourceMemory]
+				_, cpuReq := item.DefaultRequest[corev1.ResourceCPU]
+				_, memReq := item.DefaultRequest[corev1.ResourceMemory]
+				needsCPULimit = needsCPULimit && !cpu
+				needsMemLimit = needsMemLimit && !mem
+				needsCPUReq = needsCPUReq && !cpuReq && !cpu
+				needsMemReq = needsMemReq && !memReq && !mem
+			}
+		}
+	}
+
 	if !needsCPUReq && !needsMemReq && !needsCPULimit && !needsMemLimit {
 		return reqs, nil
 	}
