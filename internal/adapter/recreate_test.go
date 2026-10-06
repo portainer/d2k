@@ -7,6 +7,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -68,5 +69,27 @@ func TestRecreateFromInspectKeepsVolumes(t *testing.T) {
 		if got[path] != m {
 			t.Errorf("recreated mount at %s = %+v, want %+v", path, got[path], m)
 		}
+	}
+}
+
+func TestRecreateFromInspectKeepsResources(t *testing.T) {
+	a, client := newTestAdapter(t)
+	opts, _ := RunOptionsFromRequest("api", container.CreateRequest{
+		Config: &container.Config{Image: "nginx"},
+		HostConfig: &container.HostConfig{Resources: container.Resources{
+			Memory: 256 << 20, MemoryReservation: 128 << 20, NanoCPUs: 500_000_000, CPUShares: 512,
+		}},
+	})
+	mustCreate(t, a, opts)
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "api", metav1.GetOptions{})
+	want := d.Spec.Template.Spec.Containers[0].Resources
+
+	inspect, _ := a.InspectContainer(context.Background(), "api")
+	if r := inspect.HostConfig.Resources; r.Memory != 256<<20 || r.MemoryReservation != 128<<20 || r.NanoCPUs != 500_000_000 || r.CPUShares != 512 {
+		t.Errorf("inspect HostConfig: Memory %d, MemoryReservation %d, NanoCpus %d, CpuShares %d; want the values the container was created with",
+			r.Memory, r.MemoryReservation, r.NanoCPUs, r.CPUShares)
+	}
+	if got := recreate(t, a, "api", "api2").Containers[0].Resources; !equality.Semantic.DeepEqual(got, want) {
+		t.Errorf("recreated container resources = %v, want %v", got, want)
 	}
 }
