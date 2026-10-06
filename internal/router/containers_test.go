@@ -1,12 +1,16 @@
 package router
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // TestContainerListByNetworkAndVolume checks the network and volume filters
@@ -90,6 +94,49 @@ func TestRemoveRunningContainer(t *testing.T) {
 	for _, path := range []string{"/containers/web?force=1", "/containers/idle", "/containers/stopped"} {
 		if rec := do(t, h, "DELETE", path, ""); rec.Code != http.StatusNoContent {
 			t.Errorf("DELETE %s = %d %s, want 204", path, rec.Code, rec.Body)
+		}
+	}
+}
+
+// TestContainerListNewestFirstAndLimit checks that, as in Docker, containers
+// are listed newest first, and limit (`docker ps -n 2`, `docker ps -l`) keeps
+// the newest ones, stopped or not.
+func TestContainerListNewestFirstAndLimit(t *testing.T) {
+	h, client := newTestRouter()
+	created := time.Date(2026, 10, 7, 9, 0, 0, 0, time.UTC)
+	for i, name := range []string{"b-oldest", "c-middle", "a-newest"} {
+		if rec := do(t, h, "POST", "/containers/create?name="+name, `{"Image":"nginx"}`); rec.Code != http.StatusCreated {
+			t.Fatalf("container create %s = %d %s", name, rec.Code, rec.Body)
+		}
+		d, err := client.AppsV1().Deployments("d2k").Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.CreationTimestamp = metav1.NewTime(created.Add(time.Duration(i) * time.Minute))
+		if _, err := client.AppsV1().Deployments("d2k").Update(context.Background(), d, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tt := range []struct {
+		query string
+		want  []string
+	}{
+		{"all=1", []string{"/a-newest", "/c-middle", "/b-oldest"}},
+		{"limit=2", []string{"/a-newest", "/c-middle"}},
+		{"limit=1", []string{"/a-newest"}},
+	} {
+		rec := do(t, h, "GET", "/containers/json?"+tt.query, "")
+		var list []struct{ Names []string }
+		if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", tt.query, rec.Code, rec.Body)
+		}
+		var got []string
+		for _, c := range list {
+			got = append(got, strings.Join(c.Names, ","))
+		}
+		if !slices.Equal(got, tt.want) {
+			t.Errorf("%s: containers = %v, want %v", tt.query, got, tt.want)
 		}
 	}
 }
