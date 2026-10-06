@@ -9,14 +9,18 @@
 set -uo pipefail
 
 CONTEXT=kind-${CLUSTER:-d2k}
-STANDALONE=tcp://localhost:31112
-SWARM=tcp://localhost:31111
+STANDALONE=${STANDALONE:-tcp://localhost:31112}
+SWARM=${SWARM:-tcp://localhost:31111}
+# curl talks https/http to the same host:port the Docker CLI reaches over tcp.
+HTTPS_STANDALONE=https://${STANDALONE#tcp://}
+HTTP_STANDALONE=http://${STANDALONE#tcp://}
+HTTPS_SWARM=https://${SWARM#tcp://}
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 
 # d2k serves mutual TLS: the Docker CLI, Compose and curl use the client
 # certificate created by setup.sh.
-PKI=$(cd "$(dirname "$0")" && pwd)/.pki/client
+PKI=${PKI:-$(cd "$(dirname "$0")" && pwd)/.pki/client}
 export DOCKER_TLS_VERIFY=1 DOCKER_CERT_PATH=$PKI CURL_HOME=$WORKDIR
 printf 'cacert = "%s/ca.pem"\ncert = "%s/cert.pem"\nkey = "%s/key.pem"\n' "$PKI" "$PKI" "$PKI" >"$WORKDIR/.curlrc"
 
@@ -79,9 +83,9 @@ standalone_cases() {
   check "info reports cluster CPUs" bash -c '[ "$(docker info -f {{.NCPU}})" -gt 0 ]'
   check "d2k runs unprivileged" bash -c "[ \"\$(kubectl --context $CONTEXT -n d2k get pod -l app=d2k -o jsonpath='{.items[0].spec.securityContext.runAsNonRoot} {.items[0].spec.containers[0].securityContext.readOnlyRootFilesystem}')\" = 'true true' ]"
   # Mutual TLS is required.
-  check "plaintext is refused" bash -c '! curl -sf -m 5 http://localhost:31112/_ping'
-  check "TLS without a client certificate is refused" bash -c "! curl -q -sf -m 5 --cacert $PKI/ca.pem https://localhost:31112/_ping"
-  check "TLS with a client certificate is accepted" bash -c '[ "$(curl -s https://localhost:31112/_ping)" = OK ]'
+  check "plaintext is refused" bash -c "! curl -sf -m 5 $HTTP_STANDALONE/_ping"
+  check "TLS without a client certificate is refused" bash -c "! curl -q -sf -m 5 --cacert $PKI/ca.pem $HTTPS_STANDALONE/_ping"
+  check "TLS with a client certificate is accepted" bash -c "[ \"\$(curl -s $HTTPS_STANDALONE/_ping)\" = OK ]"
 
   check "run starts a container" bash -c '
     docker run -d --name e2e-web nginx:alpine >/dev/null &&
@@ -169,7 +173,7 @@ standalone_cases() {
       [ "${cpu:-0}" -ge 50 ] && exit 0; sleep 4
     done; exit 1'
   check "stats report the memory limit" bash -c 'docker stats --no-stream --format "{{.MemUsage}}" e2e-busy | grep -q "/ 64MiB"'
-  check "stats stream one sample a second" bash -c '[ "$(perl -e "alarm 4; exec @ARGV" curl -s -N "https://localhost:31112/v1.52/containers/e2e-busy/stats" | wc -l | tr -d " ")" -ge 3 ]'
+  check "stats stream one sample a second" bash -c "[ \"\$(perl -e 'alarm 4; exec @ARGV' curl -s -N \"$HTTPS_STANDALONE/v1.52/containers/e2e-busy/stats\" | wc -l | tr -d ' ')\" -ge 3 ]"
   docker rm -f e2e-busy >/dev/null 2>&1
 
   # Phase 0: name resolution.
@@ -192,8 +196,8 @@ standalone_cases() {
 
   # Volumes, including unversioned paths (Portainer UI).
   check "volume create and label filter" bash -c 'docker volume create --label e2e=1 e2e-vol >/dev/null && [ "$(docker volume ls -q --filter label=e2e=1)" = e2e-vol ]'
-  check "unversioned /volumes/create routes" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json -d "{\"Name\":\"e2e-vol-raw\"}" https://localhost:31112/volumes/create)" = 201 ]'
-  check "unversioned /volumes/{name} routes" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/volumes/e2e-vol-raw)" = 200 ]'
+  check "unversioned /volumes/create routes" bash -c "[ \"\$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json -d '{\"Name\":\"e2e-vol-raw\"}' $HTTPS_STANDALONE/volumes/create)\" = 201 ]"
+  check "unversioned /volumes/{name} routes" bash -c "[ \"\$(curl -s -o /dev/null -w %{http_code} $HTTPS_STANDALONE/volumes/e2e-vol-raw)\" = 200 ]"
   check "volume keeps its name, labels and options" bash -c '
     long=$(printf "x%.0s" $(seq 80)) &&
     docker volume create --label "long=$long" --opt size=2Gi e2e_vol_u >/dev/null &&
@@ -234,13 +238,13 @@ standalone_cases() {
   check "docker rmi is not supported" bash -c 'docker rmi nginx:alpine 2>&1 | grep -q "not supported by d2k"'
 
   # Docker Engine API operations d2k does not implement answer 501.
-  check "unsupported operation returns 501" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/v1.52/system/df)" = 501 ]'
+  check "unsupported operation returns 501" bash -c "[ \"\$(curl -s -o /dev/null -w %{http_code} $HTTPS_STANDALONE/v1.52/system/df)\" = 501 ]"
   check "docker reports an unsupported operation" bash -c 'docker system df 2>&1 | grep -q "not supported by d2k"'
   # Status codes clients branch on (compose treats 404 as "gone").
-  check "removing a missing container returns 404" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} -X DELETE https://localhost:31112/v1.52/containers/e2e-missing)" = 404 ]'
-  check "duplicate container name returns 409" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json -d "{\"Image\":\"nginx:alpine\"}" "https://localhost:31112/v1.52/containers/create?name=e2e-group-a")" = 409 ]'
-  check "API versions older than 1.44 are rejected" bash -c 'curl -s https://localhost:31112/v1.41/_ping | grep -q "client version 1.41 is too old"'
-  check "non-Docker path returns 404" bash -c '[ "$(curl -s -o /dev/null -w %{http_code} https://localhost:31112/v1.52/not/docker)" = 404 ]'
+  check "removing a missing container returns 404" bash -c "[ \"\$(curl -s -o /dev/null -w %{http_code} -X DELETE $HTTPS_STANDALONE/v1.52/containers/e2e-missing)\" = 404 ]"
+  check "duplicate container name returns 409" bash -c "[ \"\$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json -d '{\"Image\":\"nginx:alpine\"}' \"$HTTPS_STANDALONE/v1.52/containers/create?name=e2e-group-a\")\" = 409 ]"
+  check "API versions older than 1.44 are rejected" bash -c "curl -s $HTTPS_STANDALONE/v1.41/_ping | grep -q 'client version 1.41 is too old'"
+  check "non-Docker path returns 404" bash -c "[ \"\$(curl -s -o /dev/null -w %{http_code} $HTTPS_STANDALONE/v1.52/not/docker)\" = 404 ]"
 
   check "rm deletes the Deployment" bash -c "docker rm -f e2e-web >/dev/null && ! kubectl --context $CONTEXT -n d2k get deploy e2e-web >/dev/null 2>&1"
 }
@@ -486,7 +490,7 @@ YAML
   k -n d2k-swarm create secret generic e2e-unmanaged --from-literal=k=v >/dev/null
   check "service cannot mount an unmanaged secret" bash -c "[ \"\$(curl -s -o /dev/null -w %{http_code} -X POST -H content-type:application/json \
     -d '{\"Name\":\"e2e-leak\",\"TaskTemplate\":{\"ContainerSpec\":{\"Image\":\"busybox\",\"Secrets\":[{\"SecretName\":\"e2e-unmanaged\",\"File\":{\"Name\":\"k\"}}]}}}' \
-    https://localhost:31111/services/create)\" = 400 ]"
+    $HTTPS_SWARM/services/create)\" = 400 ]"
   k -n d2k-swarm delete secret e2e-unmanaged >/dev/null
 
   check "config create and label filter" bash -c "printf 'x' | docker config create --label e2e=1 e2e_conf - >/dev/null && [ \"\$(docker config ls --filter label=e2e=1 --format {{.Name}})\" = e2e_conf ]"
