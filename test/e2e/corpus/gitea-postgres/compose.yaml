@@ -1,0 +1,36 @@
+# source: https://docs.gitea.com/installation/install-with-docker (docker-compose, adapted to a Postgres backend)
+services:
+  gitea:
+    image: gitea/gitea:1.22.3
+    labels:
+      corpus.mark: "v1"
+    environment:
+      GITEA__database__DB_TYPE: postgres
+      GITEA__database__HOST: db:5432
+      GITEA__database__NAME: gitea
+      GITEA__database__USER: gitea
+      GITEA__database__PASSWD: gitea
+      GITEA__security__INSTALL_LOCK: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "18181:3000"
+    volumes:
+      - gitea_data:/data
+  db:
+    image: postgres:16.4
+    environment:
+      POSTGRES_USER: gitea
+      POSTGRES_PASSWORD: gitea
+      POSTGRES_DB: gitea
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gitea"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - db_data:/var/lib/postgresql/data
+volumes:
+  gitea_data:
+  db_data:
