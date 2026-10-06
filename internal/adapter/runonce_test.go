@@ -175,3 +175,33 @@ func TestRunOnceContainerHealthWhileStarting(t *testing.T) {
 		t.Fatalf("health of a starting container = %+v, want starting", ctr.State.Health)
 	}
 }
+
+// Pods that share the container's app label but are not d2k's, such as a
+// StatefulSet's in the same namespace, are left alone.
+func TestRunOnceLeavesOtherPodsAlone(t *testing.T) {
+	other := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-0", Namespace: testNamespace, Labels: map[string]string{"app": "web"}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{
+			{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}}},
+		}},
+	}
+	a, client := newTestAdapter(t, other)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "no"})
+
+	if err := a.StartContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().Pods(testNamespace).Get(ctx, "web-0", metav1.GetOptions{}); err != nil {
+		t.Fatalf("start deleted a pod d2k does not own: %v", err)
+	}
+	if ctr, err := a.InspectContainer(ctx, "web"); err != nil || ctr.State.Running {
+		t.Fatalf("inspect = %+v, %v; want the state of d2k's pod, not running", ctr.State, err)
+	}
+	if err := a.StopContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.CoreV1().Pods(testNamespace).Get(ctx, "web-0", metav1.GetOptions{}); err != nil {
+		t.Fatalf("stop deleted a pod d2k does not own: %v", err)
+	}
+}
