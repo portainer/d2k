@@ -595,3 +595,46 @@ func TestPortWithoutHostPort(t *testing.T) {
 		t.Fatalf("list Ports = %+v, want 80 published on 80", ctrs[0].Ports)
 	}
 }
+
+// A container acts only on its own Services: a Service of the same name
+// that belongs to another container, or not to d2k, is neither taken over
+// nor deleted.
+func TestContainerLeavesOtherServicesAlone(t *testing.T) {
+	foreign := func(name string) *corev1.Service {
+		return &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+			Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "helm-" + name}}}
+	}
+	a, client := newTestAdapter(t, foreign("db"), foreign("cache-lb"))
+	ctx := context.Background()
+	exists := func(name string) bool {
+		_, err := client.CoreV1().Services(testNamespace).Get(ctx, name, metav1.GetOptions{})
+		return err == nil
+	}
+
+	// "cache" has no published ports, so "cache-lb" is not its Service.
+	mustCreate(t, a, RunOptions{Name: "cache", Image: "redis"})
+	if err := a.RemoveContainer(ctx, "cache"); err != nil {
+		t.Fatal(err)
+	}
+	if !exists("cache-lb") {
+		t.Error("docker rm cache deleted Service cache-lb, which is not its")
+	}
+
+	// "db" would resolve to the other workload's pods.
+	if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "db", Image: "postgres"}); !errdefs.IsConflict(err) {
+		t.Errorf("create over another workload's Service = %v, want conflict", err)
+	}
+	if svc, err := client.CoreV1().Services(testNamespace).Get(ctx, "db", metav1.GetOptions{}); err != nil || svc.Spec.Selector["app"] != "helm-db" {
+		t.Errorf("Service db after the refused create = %+v, %v; want it unchanged", svc, err)
+	}
+
+	// "web-lb" is the name of web's published Service.
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", PortBindings: []string{"8080:80/tcp"}})
+	if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "web-lb", Image: "nginx"}); !errdefs.IsConflict(err) {
+		t.Errorf("create of web-lb over web's published Service = %v, want conflict", err)
+		_ = a.RemoveContainer(ctx, "web-lb")
+	}
+	if !exists("web-lb") {
+		t.Error("web's published Service web-lb was deleted")
+	}
+}
