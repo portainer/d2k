@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -523,5 +525,50 @@ func TestCreateContainerNativeSettings(t *testing.T) {
 	}
 	if s := d.Spec.Template.Spec.DNSConfig.Searches; s[len(s)-1] != "example.com" || !strings.HasPrefix(s[0], "compose-p.") {
 		t.Errorf("compose DNS searches = %q", s)
+	}
+}
+
+func TestUDPPortsKeepTheirProtocol(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	// pihole's ports: DNS on 53 over TCP and UDP.
+	req := request(t, `{"Image":"pihole/pihole","ExposedPorts":{"53/tcp":{},"53/udp":{},"80/tcp":{}},
+		"HostConfig":{"PortBindings":{"53/tcp":[{"HostPort":"53"}],"53/udp":[{"HostPort":"53"}],"80/tcp":[{"HostPort":"8080"}]}}}`)
+	opts, _ := RunOptionsFromRequest("pihole", req)
+	mustCreate(t, a, opts)
+
+	for _, name := range []string{serviceName("pihole"), publishedServiceName("pihole")} {
+		svc, err := client.CoreV1().Services(testNamespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, p := range svc.Spec.Ports {
+			key := fmt.Sprintf("%d/%s", p.Port, p.Protocol)
+			if seen[key] {
+				t.Errorf("Service %s: duplicate port %s, which Kubernetes rejects", name, key)
+			}
+			seen[key] = true
+		}
+		if !seen["53/UDP"] || !seen["53/TCP"] {
+			t.Errorf("Service %s ports = %v, want 53/TCP and 53/UDP", name, seen)
+		}
+	}
+
+	ctrs, err := a.ListContainers(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(ctrs[0].Ports, func(p container.PortSummary) bool {
+		return p.PrivatePort == 53 && p.PublicPort == 53 && p.Type == "udp"
+	}) {
+		t.Errorf("list Ports = %+v, want 53->53/udp", ctrs[0].Ports)
+	}
+	inspect, err := a.InspectContainer(ctx, "pihole")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := inspect.HostConfig.PortBindings[network.MustParsePort("53/udp")]; len(b) != 1 || b[0].HostPort != "53" {
+		t.Errorf("inspect PortBindings = %v, want 53/udp -> 53", inspect.HostConfig.PortBindings)
 	}
 }
