@@ -10,6 +10,9 @@
 package volumes
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -86,6 +89,18 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if err := httputils.ParseJSON(r, &body); err != nil {
 		httputils.WriteError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// As in Docker, a volume created without a name gets a random one.
+	if body.Name == "" {
+		b := make([]byte, 32)
+		_, _ = rand.Read(b)
+		body.Name = hex.EncodeToString(b)
+		body.Labels = maps.Clone(body.Labels)
+		if body.Labels == nil {
+			body.Labels = map[string]string{}
+		}
+		body.Labels["com.docker.volume.anonymous"] = ""
 	}
 
 	// Allow size to be passed as a driver option: --opt size=5Gi
