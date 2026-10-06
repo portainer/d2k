@@ -17,7 +17,7 @@ import (
 type Usage struct {
 	CPUNanoCores int64 // CPU in use, in billionths of a CPU
 	MemoryBytes  int64 // working set
-	MemoryLimit  int64 // the container's limit, else the host's memory
+	MemoryLimit  int64 // the container's limit (its pod's, else its template's), else the host's memory
 	OnlineCPUs   int   // the host's CPUs
 }
 
@@ -55,6 +55,14 @@ func (a *KubernetesDockerAdapter) ContainerUsage(ctx context.Context, name strin
 	}
 
 	pod, err := a.currentPodForDeployment(ctx, resolved)
+	if err == nil {
+		// A LimitRange's default limit is set on the pod only.
+		if c := pod.Spec.Containers; len(c) > 0 {
+			if limit, ok := c[0].Resources.Limits[corev1.ResourceMemory]; ok {
+				u.MemoryLimit = limit.Value()
+			}
+		}
+	}
 	if errors.Is(err, errNoPod) || a.metricsClient == nil {
 		return u, nil
 	}
