@@ -62,3 +62,34 @@ func TestContainerListByNetworkAndVolume(t *testing.T) {
 		}
 	}
 }
+
+// TestRemoveRunningContainer checks that, as in Docker, removing a running
+// container needs force: `docker rm web` refuses, `docker rm -f web` removes.
+// compose stops a container before removing it without force.
+func TestRemoveRunningContainer(t *testing.T) {
+	h, _ := newTestRouter()
+	for _, name := range []string{"web", "idle", "stopped"} {
+		if rec := do(t, h, "POST", "/containers/create?name="+name, `{"Image":"nginx"}`); rec.Code != http.StatusCreated {
+			t.Fatalf("container create %s = %d %s", name, rec.Code, rec.Body)
+		}
+	}
+	for _, step := range []struct{ method, path string }{
+		{"POST", "/containers/web/start"},
+		{"POST", "/containers/stopped/start"},
+		{"POST", "/containers/stopped/stop"},
+	} {
+		if rec := do(t, h, step.method, step.path, ""); rec.Code != http.StatusNoContent {
+			t.Fatalf("%s %s = %d %s", step.method, step.path, rec.Code, rec.Body)
+		}
+	}
+
+	rec := do(t, h, "DELETE", "/containers/web", "")
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "stop the container before removing or force remove") {
+		t.Errorf("rm of a running container = %d %s, want 409", rec.Code, rec.Body)
+	}
+	for _, path := range []string{"/containers/web?force=1", "/containers/idle", "/containers/stopped"} {
+		if rec := do(t, h, "DELETE", path, ""); rec.Code != http.StatusNoContent {
+			t.Errorf("DELETE %s = %d %s, want 204", path, rec.Code, rec.Body)
+		}
+	}
+}
