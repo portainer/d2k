@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
@@ -670,5 +671,42 @@ func TestLabelKeysKubernetesRejects(t *testing.T) {
 	pvc, _ := client.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "data", metav1.GetOptions{})
 	if errs := metav1validation.ValidateLabels(pvc.Labels, field.NewPath("metadata", "labels")); len(errs) > 0 {
 		t.Errorf("PVC labels the API server rejects: %v", errs)
+	}
+}
+
+// As in Docker, docker stop returns once the container has stopped: compose
+// recreates a service by stopping the old container, then starting the new
+// one on the same volumes.
+func TestStopWaitsForThePod(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: "always"})
+	if err := a.StartContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-abc", Namespace: testNamespace,
+		Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}}}
+	if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- a.StopContainer(ctx, "db") }()
+	select {
+	case err := <-stopped:
+		t.Fatalf("stop returned (%v) while the container's pod still runs", err)
+	case <-time.After(700 * time.Millisecond):
+	}
+	// The ReplicaSet deletes the pod once its process ends.
+	if err := client.CoreV1().Pods(testNamespace).Delete(ctx, "db-abc", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not return once the pod was gone")
 	}
 }
