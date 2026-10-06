@@ -233,7 +233,7 @@ Note: only `nfs.csi.k8s.io` is supported for automatic matching. Other NFS provi
 
 ### Volume lifecycle
 
-Volumes (PVCs) are not deleted when a stack is removed with `docker stack rm`. This matches Docker Swarm behaviour; named volumes are intentionally preserved across stack teardown to prevent accidental data loss. Data persists and reattaches automatically if the stack is redeployed. To remove a volume explicitly, use `docker volume rm <name>`.
+Volumes (PVCs) are not deleted when a stack is removed with `docker stack rm`. This matches Docker Swarm behaviour; named volumes are intentionally preserved across stack teardown to prevent accidental data loss. Data persists and reattaches automatically if the stack is redeployed. To remove a volume explicitly, use `docker volume rm <name>`. As in Docker, `docker volume rm` refuses a volume that a container, running or stopped, still uses (409, "volume is in use"): remove the container first.
 
 The NFS subdirectory created by the CSI provisioner is named after the PVC UID (e.g. `pvc-92f50b38-...`), not the pod. This means pod rescheduling, rolling updates, and replica scaling all reattach to the same data automatically without any intervention.
 

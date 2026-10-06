@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -236,8 +237,26 @@ func (a *KubernetesDockerAdapter) RemoveVolume(ctx context.Context, name string)
 	if _, err := a.InspectVolume(ctx, name); err != nil {
 		return err
 	}
+	claim := sanitiseResourceName(name)
 
-	if err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Delete(ctx, sanitiseResourceName(name), metav1.DeleteOptions{}); err != nil {
+	// As in Docker, a volume a container uses, even a stopped one, stays.
+	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return fmt.Errorf("unable to list deployments: %w", err)
+	}
+	var users []string
+	for _, d := range deployments.Items {
+		if slices.ContainsFunc(d.Spec.Template.Spec.Volumes, func(v corev1.Volume) bool {
+			return v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName == claim
+		}) {
+			users = append(users, containerID(d.UID))
+		}
+	}
+	if len(users) > 0 {
+		return errdefs.Conflict(fmt.Errorf("remove %s: volume is in use - [%s]", name, strings.Join(users, ", ")))
+	}
+
+	if err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Delete(ctx, claim, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete PVC %q: %w", name, err)
 	}
 
