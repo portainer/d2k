@@ -158,7 +158,9 @@ func (a *KubernetesDockerAdapter) storeCopiedFiles(ctx context.Context, d *appsv
 			return err
 		case secret.Labels[types.LabelManagedBy] != types.LabelManagedByValue:
 			return errdefs.Conflict(fmt.Errorf("secret %q, needed for the files copied into the container, is not d2k's", name))
-		case len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].UID != d.UID:
+		case len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].Kind != "Deployment" || secret.OwnerReferences[0].Name != d.Name:
+			return errdefs.Conflict(fmt.Errorf("secret %q, needed for the files copied into the container, is not the container's", name))
+		case secret.OwnerReferences[0].UID != d.UID:
 			// Left by a removed container of the same name, whose owner is
 			// gone: the garbage collector deletes it.
 			secret.OwnerReferences, secret.Data = []metav1.OwnerReference{owner}, nil
