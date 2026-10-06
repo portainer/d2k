@@ -71,3 +71,27 @@ func TestInitRequiresSANs(t *testing.T) {
 		t.Fatal("Init() without SANs succeeded")
 	}
 }
+
+func TestInitNeverWritesAKeyOthersCanRead(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "client", "key.pem")
+	if err := os.MkdirAll(filepath.Dir(key), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(key, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Init(dir, []string{"localhost"})
+	data, _ := os.ReadFile(key)
+	info, _ := os.Stat(key)
+	if len(data) > 0 && info.Mode().Perm()&0o077 != 0 {
+		t.Errorf("client key written with mode %v", info.Mode().Perm())
+	}
+	if err == nil {
+		t.Error("Init() overwrote an existing client key")
+	}
+}
