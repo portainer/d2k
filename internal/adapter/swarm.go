@@ -479,6 +479,13 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 	// --- configs as volume mounts ---
 	for _, c := range cs.Configs {
 		k8sConfigName := sanitiseResourceName(c.ConfigName)
+		existing, err := a.client.CoreV1().ConfigMaps(a.namespace).Get(ctx, k8sConfigName, metav1.GetOptions{})
+		if err != nil && !errors.IsNotFound(err) {
+			return nil, fmt.Errorf("unable to get config %q: %w", c.ConfigName, err)
+		}
+		if err != nil || existing.Labels[types.LabelSwarmManagedBy] != types.LabelSwarmManagedByValue || existing.Name == types.ConfigMapSwarmIdentity {
+			return nil, errdefs.InvalidParameter(fmt.Errorf("config not found: %s", c.ConfigName))
+		}
 		targetName := c.File.Name
 		if targetName == "" {
 			targetName = c.ConfigName // keep original as the mount filename
