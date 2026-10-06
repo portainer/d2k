@@ -210,6 +210,34 @@ func (a *KubernetesDockerAdapter) ListVolumes(ctx context.Context) ([]volume.Vol
 	return vols, nil
 }
 
+// ReferencedVolumes returns the names of the volumes a container, running or
+// stopped, mounts: Docker's referenced volumes, the ones that are not dangling.
+func (a *KubernetesDockerAdapter) ReferencedVolumes(ctx context.Context) (map[string]bool, error) {
+	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list deployments: %w", err)
+	}
+	claims := map[string]bool{}
+	for _, d := range deployments.Items {
+		for _, v := range d.Spec.Template.Spec.Volumes {
+			if v.PersistentVolumeClaim != nil {
+				claims[v.PersistentVolumeClaim.ClaimName] = true
+			}
+		}
+	}
+	pvcs, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list PVCs: %w", err)
+	}
+	referenced := map[string]bool{}
+	for _, pvc := range pvcs.Items {
+		if claims[pvc.Name] {
+			referenced[recordedName(pvc.ObjectMeta)] = true
+		}
+	}
+	return referenced, nil
+}
+
 // InspectVolume implements docker volume inspect.
 func (a *KubernetesDockerAdapter) InspectVolume(ctx context.Context, name string) (*volume.Volume, error) {
 	notFound := errdefs.NotFound(fmt.Errorf("no such volume: %s", name))

@@ -11,6 +11,7 @@ package volumes
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/moby/moby/api/types/volume"
@@ -47,11 +48,26 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	}
 	vols = filterVolumes(vols, args)
 
+	if args.Contains("dangling") {
+		dangling, err := args.GetBoolOrDefault("dangling", false)
+		if err != nil {
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		referenced, err := h.adapter.ReferencedVolumes(r.Context())
+		if err != nil {
+			log.Error().Str("context", "VolumesAPI").Err(err).Msg("ReferencedVolumes failed")
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		vols = slices.DeleteFunc(vols, func(v volume.Volume) bool { return referenced[v.Name] == dangling })
+	}
+
 	httputils.WriteJSON(w, http.StatusOK, volume.ListResponse{Volumes: vols, Warnings: []string{}})
 }
 
 // volumeFilters are the `filters` keys d2k supports on GET /volumes.
-var volumeFilters = map[string]bool{"name": true, "label": true, "driver": true}
+var volumeFilters = map[string]bool{"name": true, "label": true, "driver": true, "dangling": true}
 
 // filterVolumes applies list filters with the Docker daemon's matching rules.
 func filterVolumes(vols []volume.Volume, args filters.Args) []volume.Volume {
