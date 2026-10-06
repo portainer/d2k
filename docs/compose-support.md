@@ -19,9 +19,14 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 |---|---|---|
 | `image` | Supported |  |
 | `command` | Supported | Becomes the container's `args`. |
+| `command.string` | Supported | See `command`. A string is split shell-style by compose before it reaches d2k. |
 | `entrypoint` | Supported | Becomes the container's `command`. |
+| `entrypoint.string` | Supported | See `entrypoint`. A string is split shell-style by compose before it reaches d2k. |
 | `environment` | Supported |  |
+| `environment.list` | Supported | See `environment`. The list form. |
+| `environment.value_syntax` | Supported | See `environment`. A value may itself contain `=` and spaces. |
 | `env_file` | Compose | Read by compose; arrives as `environment`. |
+| `env_file.syntax` | Compose | See `env_file`. Comments and quoted values are stripped by compose before they reach d2k. |
 | `working_dir` | Supported |  |
 | `user` | Partial | Numeric `uid[:gid]` becomes `runAsUser`/`runAsGroup`. User names need the image's `/etc/passwd`, which Kubernetes does not read: they are ignored with a warning. |
 | `user.name` | Partial | See `user`. |
@@ -32,15 +37,20 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `init` | Not supported | Kubernetes has no init process injection. |
 | `healthcheck` | Partial | Becomes a readiness probe, which `docker ps` and `depends_on: service_healthy` read. `start_interval` is ignored with a warning: probes have one period. |
 | `healthcheck.start_interval` | Partial | See `healthcheck`. |
+| `healthcheck.test_string` | Partial | See `healthcheck`. A string `test` runs under `CMD-SHELL`. |
+| `healthcheck.test_shell` | Partial | See `healthcheck`. |
 | `restart` | Supported | `always` and `unless-stopped` containers run as a Deployment's replica, which restarts. `no` (the default) runs the container once in a pod (`restartPolicy: Never`), and `on-failure` in a pod with `restartPolicy: OnFailure`; a maximum retry count is ignored with a warning. Such pods are not rescheduled if their node fails. |
 | `restart.no` | Supported | See `restart`. |
 | `restart.on_failure_max` | Partial | See `restart`. |
+| `restart.unless_stopped` | Supported | See `restart`. |
 | `post_start` | Partial | Run with exec once the container runs. Hooks with a `user`, `working_dir`, `environment` or `privileged` fail: Kubernetes exec runs as the container's process does. |
 | `post_start.user` | Partial | See `post_start`. |
 | `pre_start` | Not supported | Not yet in a compose release. |
 | `pre_stop` | Partial | Run with exec before the container stops; same limits as `post_start`. |
 | `container_name` | Supported | The Docker name is kept; the Kubernetes name is derived from it. |
 | `labels` | Supported | Kept verbatim; also set as Kubernetes labels where the value is valid. |
+| `labels.list` | Supported | See `labels`. The list form. |
+| `labels.long_key` | Supported | See `labels`. A key over 63 characters is kept verbatim on the Docker label but is not a valid Kubernetes label key, so it is not also set there. |
 | `label_file` | Compose | Read by compose; arrives as `labels`. |
 | `annotations` | Partial | Set on the pod. Container runtimes receive pod annotations only where configured to. |
 | `hostname` | Not supported | A compose service's pod hostname is its service name, which service DNS needs: ignored with a warning. (`docker run --hostname` sets the pod hostname.) |
@@ -53,11 +63,14 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `extends` | Compose |  |
 | `attach` | Compose |  |
 | `depends_on` | Supported |  |
+| `depends_on.service_started` | Supported | The map form with the default condition. |
 | `depends_on.service_healthy` | Supported | Waits on the dependency's healthcheck. |
 | `depends_on.service_completed_successfully` | Supported | The dependency runs once (`restart: "no"`) and compose waits for it to exit with code 0. |
 | `scale` | Compose | Compose creates one container per replica. |
 | `deploy.replicas` | Compose | As `scale`. |
 | `deploy.resources` | Supported | Limits and reservations of CPU and memory become limits and requests. |
+| `deploy.resources.limits_only` | Supported | See `deploy.resources`. |
+| `deploy.resources.reservations_only` | Compose | See `deploy.resources`. Compose does not forward a CPU reservation outside Swarm mode; only `reservations.memory` reaches d2k. |
 | `deploy.restart_policy` | Supported | As `restart`. |
 | `deploy.placement` | Compose | Ignored by compose outside Swarm mode. |
 | `cpus` | Supported | CPU limit. |
@@ -104,8 +117,14 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `ports` | Partial | Published ports get a LoadBalancer Service. A port with no published port is published on its container port. A `host_ip` is ignored with a warning. |
 | `ports.range` | Supported |  |
 | `ports.host_ip` | Partial | See `ports`. |
+| `ports.container_only` | Partial | See `ports`. A bare container port with no host port published. |
+| `ports.udp` | Partial | See `ports`. |
+| `ports.dual_protocol` | Partial | See `ports`. The same port published for both protocols. |
+| `ports.long_syntax` | Partial | See `ports`. The long syntax; `mode: host` has no Kubernetes equivalent (every published port already reaches every node) and is ignored. |
+| `ports.wildcard_host` | Partial | See `ports`. `host_ip: 0.0.0.0` with no host port: a random host port, explicitly bound to every interface. |
 | `expose` | Supported | The ports are reachable within the namespace. |
 | `networks` | Partial | Containers resolve the services of their compose project by name. The namespace network is flat: networks do not isolate containers. |
+| `networks.map` | Partial | See `networks`. The map form with no per-network settings. |
 | `networks.aliases` | Not supported | Containers resolve by compose service name only. |
 | `networks.ipv4_address` | Not supported | The cluster network assigns pod addresses. |
 | `networks.mac_address` | Not supported |  |
@@ -119,7 +138,10 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `dns_opt` | Supported | Added to the pod's DNS options, after d2k's own. |
 | `dns_search` | Supported | Searched after the compose project's and the namespace's domains. |
 | `volumes` | Partial | Named volumes are PersistentVolumeClaims; `tmpfs` mounts are memory-backed `emptyDir`s. Bind, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files. Anonymous volumes (`volumes: [/data]`) are ignored with a warning: their data stays in the container. |
+| `volumes.anonymous` | Not supported | See `volumes`. |
 | `volumes.bind` | Not supported | See `volumes`. |
+| `volumes.bind_absolute` | Not supported | See `volumes`. An absolute client path. |
+| `volumes.read_only` | Supported | The long syntax's `read_only` becomes the mount's `readOnly`. |
 | `volumes.tmpfs` | Supported | A memory-backed `emptyDir`, with `tmpfs.size` as its size limit. |
 | `volumes.image` | Not supported |  |
 | `volumes.subpath` | Supported | Becomes the mount's `subPath`. |
@@ -128,8 +150,10 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `tmpfs` | Partial | Memory-backed `emptyDir`s; a `size=` option is the size limit, other options are ignored with a warning. |
 | `secrets` | Partial | Secrets from `environment` (and configs from `content` or `environment`) are stored in a Secret owned by the container and mounted read-only at their target with their `mode`; `uid` and `gid` are not kept, and they total 1 MiB at most. Secrets from a `file` are ignored with a warning: the file is on the client. |
 | `secrets.file` | Not supported | See `secrets`. |
+| `secrets.long_syntax` | Partial | See `secrets`. The long syntax's `target` and `mode`. |
 | `configs` | Partial | As `secrets`. |
 | `configs.file` | Not supported | See `configs`. |
+| `configs.long_syntax` | Partial | See `configs`. The long syntax's `target` and `mode`. |
 | `logging` | Partial | Logs are read from Kubernetes. Drivers other than `json-file` and log options are ignored with a warning: the kubelet rotates logs. |
 | `logging.options` | Partial | See `logging`. |
 | `build` | Not supported | d2k cannot build images: build and push them, then use `image`. |

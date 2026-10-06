@@ -62,12 +62,23 @@ CASES = [
     case("image", YES, "", "", ok(lambda d: ctr(d)["image"] == "nginx:alpine")),
     case("command", YES, "Becomes the container's `args`.", "command: [sleep, '3600']",
          ok(lambda d: ctr(d)["args"] == ["sleep", "3600"])),
+    case("command.string", YES, "See `command`. A string is split shell-style by compose before it reaches d2k.",
+         "command: sleep 3600", ok(lambda d: ctr(d)["args"] == ["sleep", "3600"])),
     case("entrypoint", YES, "Becomes the container's `command`.", "entrypoint: [sh, -c, 'sleep 3600']",
          ok(lambda d: ctr(d)["command"] == ["sh", "-c", "sleep 3600"])),
+    case("entrypoint.string", YES, "See `entrypoint`. A string is split shell-style by compose before it reaches d2k.",
+         "entrypoint: /bin/sh", ok(lambda d: ctr(d)["command"] == ["/bin/sh"])),
     case("environment", YES, "", "environment: {A: '1'}",
          ok(lambda d: {"name": "A", "value": "1"} in ctr(d)["env"])),
+    case("environment.list", YES, "See `environment`. The list form.", "environment: ['A=1']",
+         ok(lambda d: {"name": "A", "value": "1"} in ctr(d)["env"])),
+    case("environment.value_syntax", YES, "See `environment`. A value may itself contain `=` and spaces.",
+         "environment: ['A=x=y z']", ok(lambda d: {"name": "A", "value": "x=y z"} in ctr(d)["env"])),
     case("env_file", CLIENT, "Read by compose; arrives as `environment`.", "env_file: [./app.env]",
          ok(lambda d: {"name": "FROM_FILE", "value": "1"} in ctr(d)["env"])),
+    case("env_file.syntax", CLIENT, "See `env_file`. Comments and quoted values are stripped by compose before they "
+         "reach d2k.", "env_file: [./app2.env]",
+         ok(lambda d: {"name": "QUOTED", "value": "has spaces"} in ctr(d)["env"])),
     case("working_dir", YES, "", "working_dir: /srv", ok(lambda d: ctr(d)["workingDir"] == "/srv")),
     case("user", PARTIAL, "Numeric `uid[:gid]` becomes `runAsUser`/`runAsGroup`. User names need the image's "
          "`/etc/passwd`, which Kubernetes does not read: they are ignored with a warning.", "user: '1000:1000'",
@@ -85,6 +96,10 @@ CASES = [
          ok(lambda d: ctr(d)["readinessProbe"]["periodSeconds"] == 5 and ctr(d)["readinessProbe"]["failureThreshold"] == 4)),
     case("healthcheck.start_interval", PARTIAL, "See `healthcheck`.",
          "healthcheck: {test: [CMD, 'true'], start_period: 10s, start_interval: 1s}", warns("start interval ignored")),
+    case("healthcheck.test_string", PARTIAL, "See `healthcheck`. A string `test` runs under `CMD-SHELL`.",
+         "healthcheck: {test: 'true', interval: 5s}", ok(lambda d: ctr(d)["readinessProbe"]["periodSeconds"] == 5)),
+    case("healthcheck.test_shell", PARTIAL, "See `healthcheck`.", "healthcheck: {test: [CMD-SHELL, 'true'], interval: 5s}",
+         ok(lambda d: ctr(d)["readinessProbe"]["periodSeconds"] == 5)),
     case("restart", YES, "`always` and `unless-stopped` containers run as a Deployment's replica, which restarts. "
          "`no` (the default) runs the container once in a pod (`restartPolicy: Never`), and `on-failure` in a pod with "
          "`restartPolicy: OnFailure`; a maximum retry count is ignored with a warning. Such pods are not rescheduled "
@@ -92,6 +107,8 @@ CASES = [
     case("restart.no", YES, "See `restart`.", "restart: 'no'",
          ok(lambda d: d[0]["metadata"]["annotations"]["d2k.portainer.io/restart-policy"] == "no")),
     case("restart.on_failure_max", PARTIAL, "See `restart`.", "restart: on-failure:3", warns("maximum retry count 3 ignored")),
+    case("restart.unless_stopped", YES, "See `restart`.", "restart: unless-stopped",
+         ok(lambda d: d[0]["metadata"]["annotations"]["d2k.portainer.io/restart-policy"] == "unless-stopped")),
     case("post_start", PARTIAL, "Run with exec once the container runs. Hooks with a `user`, `working_dir`, "
          "`environment` or `privileged` fail: Kubernetes exec runs as the container's process does.",
          "post_start: [{command: [touch, /tmp/x]}]", ok()),
@@ -106,6 +123,12 @@ CASES = [
          "container_name: my-web", ok(lambda d: d[0]["metadata"]["annotations"]["d2k.portainer.io/docker-name"] == "my-web")),
     case("labels", YES, "Kept verbatim; also set as Kubernetes labels where the value is valid.", "labels: {a.b: c}",
          ok(lambda d: d[0]["metadata"]["labels"]["a.b"] == "c")),
+    case("labels.list", YES, "See `labels`. The list form.", "labels: ['a.b=c']",
+         ok(lambda d: d[0]["metadata"]["labels"]["a.b"] == "c")),
+    case("labels.long_key", YES, "See `labels`. A key over 63 characters is kept verbatim on the Docker label but is "
+         "not a valid Kubernetes label key, so it is not also set there.",
+         "labels: {this-key-is-seventy-characters-long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx: c}",
+         ok(lambda d: "this-key-is-seventy-characters-long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" not in d[0]["metadata"]["labels"])),
     case("label_file", CLIENT, "Read by compose; arrives as `labels`.", "label_file: ./app.labels",
          ok(lambda d: d[0]["metadata"]["labels"]["from.file"] == "1")),
     case("annotations", PARTIAL, "Set on the pod. Container runtimes receive pod annotations only where configured to.",
@@ -125,6 +148,8 @@ CASES = [
 
     # --- services: dependencies and scaling ---------------------------------
     case("depends_on", YES, "", "depends_on: [db]", ok(), extra=DB),
+    case("depends_on.service_started", YES, "The map form with the default condition.",
+         "depends_on: {db: {condition: service_started}}", ok(), extra=DB),
     case("depends_on.service_healthy", YES, "Waits on the dependency's healthcheck.",
          "depends_on: {db: {condition: service_healthy}}", ok(), extra=DB_HEALTHY),
     case("depends_on.service_completed_successfully", YES, "The dependency runs once (`restart: \"no\"`) and "
@@ -135,6 +160,12 @@ CASES = [
     case("deploy.resources", YES, "Limits and reservations of CPU and memory become limits and requests.",
          "deploy: {resources: {limits: {cpus: '0.5', memory: 64M}, reservations: {memory: 32M}}}",
          ok(lambda d: ctr(d)["resources"] == {"limits": {"cpu": "500m", "memory": "64Mi"}, "requests": {"memory": "32Mi"}})),
+    case("deploy.resources.limits_only", YES, "See `deploy.resources`.", "deploy: {resources: {limits: {memory: 64M}}}",
+         ok(lambda d: ctr(d)["resources"] == {"limits": {"memory": "64Mi"}})),
+    case("deploy.resources.reservations_only", CLIENT, "See `deploy.resources`. Compose does not forward a CPU "
+         "reservation outside Swarm mode; only `reservations.memory` reaches d2k.",
+         "deploy: {resources: {reservations: {cpus: '0.25', memory: 32M}}}",
+         ok(lambda d: ctr(d)["resources"] == {"requests": {"memory": "32Mi"}})),
     case("deploy.restart_policy", YES, "As `restart`.", "deploy: {restart_policy: {condition: on-failure}}",
          ok(lambda d: d[0]["metadata"]["annotations"]["d2k.portainer.io/restart-policy"] == "on-failure")),
     case("deploy.placement", CLIENT, "Ignored by compose outside Swarm mode.", "deploy: {placement: {constraints: [node.role==manager]}}", ok()),
@@ -209,9 +240,25 @@ CASES = [
     case("ports.range", YES, "", "ports: ['18090-18091:80-81']", ok(lambda d: len(ctr(d)["ports"]) == 2)),
     case("ports.host_ip", PARTIAL, "See `ports`.", "ports: [{target: 80, published: '18082', protocol: udp, host_ip: 127.0.0.1}]",
          warns('host IP "127.0.0.1"')),
+    case("ports.container_only", PARTIAL, "See `ports`. A bare container port with no host port published.",
+         "ports: ['80']", ok(lambda d: ctr(d)["ports"] == [{"containerPort": 80, "protocol": "TCP"}])),
+    case("ports.udp", PARTIAL, "See `ports`.", "ports: ['18083:80/udp']",
+         ok(lambda d: ctr(d)["ports"] == [{"containerPort": 80, "protocol": "UDP"}])),
+    case("ports.dual_protocol", PARTIAL, "See `ports`. The same port published for both protocols.",
+         "ports: ['18084:80/tcp', '18084:80/udp']",
+         ok(lambda d: sorted(p["protocol"] for p in ctr(d)["ports"]) == ["TCP", "UDP"])),
+    case("ports.long_syntax", PARTIAL, "See `ports`. The long syntax; `mode: host` has no Kubernetes equivalent "
+         "(every published port already reaches every node) and is ignored.",
+         "ports: [{target: 80, published: 18085, protocol: tcp, mode: host}]",
+         ok(lambda d: ctr(d)["ports"] == [{"containerPort": 80, "protocol": "TCP"}])),
+    case("ports.wildcard_host", PARTIAL, "See `ports`. `host_ip: 0.0.0.0` with no host port: a random host port, "
+         "explicitly bound to every interface.", "ports: ['0.0.0.0::80']",
+         ok(lambda d: ctr(d)["ports"] == [{"containerPort": 80, "protocol": "TCP"}])),
     case("expose", YES, "The ports are reachable within the namespace.", "expose: ['8080']", ok()),
     case("networks", PARTIAL, "Containers resolve the services of their compose project by name. The namespace network "
          "is flat: networks do not isolate containers.", "networks: [front]", ok(), top="networks: {front: {}}"),
+    case("networks.map", PARTIAL, "See `networks`. The map form with no per-network settings.",
+         "networks: {front: null}", ok(), top="networks: {front: {}}"),
     case("networks.aliases", NO, "Containers resolve by compose service name only.", "networks: {front: {aliases: [www]}}",
          warns('network alias "www" ignored'), top="networks: {front: {}}"),
     case("networks.ipv4_address", NO, "The cluster network assigns pod addresses.", "networks: {front: {ipv4_address: 172.30.0.10}}",
@@ -238,7 +285,13 @@ CASES = [
          "Bind, `image` and `npipe` mounts are ignored with a warning: pods cannot reach the client's files. "
          "Anonymous volumes (`volumes: [/data]`) are ignored with a warning: their data stays in the container.", "volumes: [data:/data]",
          ok(lambda d: pod(d)["volumes"][0]["persistentVolumeClaim"]["claimName"].endswith("data")), top="volumes: {data: {}}"),
+    case("volumes.anonymous", NO, "See `volumes`.", "volumes: [/data]", warns('anonymous volume at "/data" ignored')),
     case("volumes.bind", NO, "See `volumes`.", "volumes: [./src:/src]", warns("host paths are not supported")),
+    case("volumes.bind_absolute", NO, "See `volumes`. An absolute client path.", "volumes: [/tmp/src:/src]",
+         warns("host paths are not supported")),
+    case("volumes.read_only", YES, "The long syntax's `read_only` becomes the mount's `readOnly`.",
+         "volumes: [{type: volume, source: data, target: /data, read_only: true}]",
+         ok(lambda d: ctr(d)["volumeMounts"][0]["readOnly"] is True), top="volumes: {data: {}}"),
     case("volumes.tmpfs", YES, "A memory-backed `emptyDir`, with `tmpfs.size` as its size limit.",
          "volumes: [{type: tmpfs, target: /cache, tmpfs: {size: 1048576}}]",
          ok(lambda d: {"medium": "Memory", "sizeLimit": "1Mi"} in [v.get("emptyDir") for v in pod(d)["volumes"]])),
@@ -259,8 +312,16 @@ CASES = [
          "not kept, and they total 1 MiB at most. Secrets from a `file` are ignored with a warning: the file is on the "
          "client.", "secrets: [pw]", ok(lambda d: any(m["mountPath"] == "/run/secrets/pw" and m["readOnly"] for m in ctr(d)["volumeMounts"])), top="secrets: {pw: {environment: DB_PASS}}"),
     case("secrets.file", NO, "See `secrets`.", "secrets: [pw]", warns('"/run/secrets/pw" ignored'), top="secrets: {pw: {file: ./pw.txt}}"),
+    case("secrets.long_syntax", PARTIAL, "See `secrets`. The long syntax's `target` and `mode`.",
+         "secrets: [{source: pw, target: db_pw, mode: 0400}]",
+         ok(lambda d: any(m["mountPath"] == "/run/secrets/db_pw" and m["readOnly"] for m in ctr(d)["volumeMounts"])),
+         top="secrets: {pw: {environment: DB_PASS}}"),
     case("configs", PARTIAL, "As `secrets`.", "configs: [cfg]", ok(lambda d: any(m["mountPath"] == "/cfg" and m["readOnly"] for m in ctr(d)["volumeMounts"])), top="configs: {cfg: {content: hello}}"),
     case("configs.file", NO, "See `configs`.", "configs: [cfg]", warns('"/cfg" ignored'), top="configs: {cfg: {file: ./cfg.txt}}"),
+    case("configs.long_syntax", PARTIAL, "See `configs`. The long syntax's `target` and `mode`.",
+         "configs: [{source: cfg, target: /etc/app/cfg, mode: 0400}]",
+         ok(lambda d: any(m["mountPath"] == "/etc/app/cfg" and m["readOnly"] for m in ctr(d)["volumeMounts"])),
+         top="configs: {cfg: {content: hello}}"),
 
     # --- services: logging --------------------------------------------------
     case("logging", PARTIAL, "Logs are read from Kubernetes. Drivers other than `json-file` and log options are "
@@ -324,7 +385,8 @@ CASES = [
 ]
 
 FILES = {
-    "app.env": "FROM_FILE=1\n", "profile.json": '{"defaultAction": "SCMP_ACT_ALLOW"}', "app.labels": "from.file=1\n", "cfg.txt": "cfg\n", "pw.txt": "pw\n",
+    "app.env": "FROM_FILE=1\n", "app2.env": "# a comment\nQUOTED=\"has spaces\"\n",
+    "profile.json": '{"defaultAction": "SCMP_ACT_ALLOW"}', "app.labels": "from.file=1\n", "cfg.txt": "cfg\n", "pw.txt": "pw\n",
     "base.yaml": "services:\n  base:\n    image: nginx:alpine\n    environment: [BASE=1]\n",
 }
 NOISE = ("Network ", "Volume ", "Container ", "Image ", "nginx:alpine: not pulled")
