@@ -1,11 +1,21 @@
 package events
 
 import (
+	"context"
+	"fmt"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/api/types/events"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/filters"
+	"github.com/portainer/d2k/internal/types"
 )
 
 func TestMatches(t *testing.T) {
@@ -34,6 +44,45 @@ func TestMatches(t *testing.T) {
 		}
 		if got := matches(tt.args, vol); got != tt.vol {
 			t.Errorf("%s: volume event matches = %v, want %v", tt.name, got, tt.vol)
+		}
+	}
+}
+
+// As in Docker, until alone, or since=0, replays the recorded events.
+func TestStreamReplaysWithUntilOrSinceZero(t *testing.T) {
+	client := fake.NewClientset()
+	a := adapter.NewWithClient(client, "ns")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.RecordEvents(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for i := 0; ; i++ {
+		history, _, done := a.SubscribeEvents()
+		done()
+		if len(history) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("volume create event not recorded")
+		}
+		// Volumes that exist before the watch starts are not events: create
+		// new ones until the watch reports one.
+		pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Name: fmt.Sprintf("data-%d", i), Namespace: "ns", Labels: map[string]string{types.LabelManagedBy: types.LabelManagedByValue},
+		}}
+		_, _ = client.CoreV1().PersistentVolumeClaims("ns").Create(ctx, pvc, metav1.CreateOptions{})
+		time.Sleep(20 * time.Millisecond)
+	}
+	until := fmt.Sprint(time.Now().Unix() + 1)
+	time.Sleep(time.Until(time.Unix(time.Now().Unix()+1, 0)) + 10*time.Millisecond)
+
+	h := NewHandler(a)
+	for _, query := range []string{"until=" + until, "since=0&until=" + until} {
+		rec := httptest.NewRecorder()
+		h.Stream(rec, httptest.NewRequest("GET", "/events?"+query, nil))
+		if !strings.Contains(rec.Body.String(), `"Action":"create"`) {
+			t.Errorf("GET /events?%s = %q, want the recorded volume create", query, rec.Body.String())
 		}
 	}
 }

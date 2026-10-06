@@ -71,3 +71,49 @@ func TestInitRequiresSANs(t *testing.T) {
 		t.Fatal("Init() without SANs succeeded")
 	}
 }
+
+func TestInitNeverWritesAKeyOthersCanRead(t *testing.T) {
+	dir := t.TempDir()
+	key := filepath.Join(dir, "client", "key.pem")
+	if err := os.MkdirAll(filepath.Dir(key), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(key, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Init(dir, []string{"localhost"})
+	data, _ := os.ReadFile(key)
+	info, _ := os.Stat(key)
+	if len(data) > 0 && info.Mode().Perm()&0o077 != 0 {
+		t.Errorf("client key written with mode %v", info.Mode().Perm())
+	}
+	if err == nil {
+		t.Error("Init() overwrote an existing client key")
+	}
+}
+
+func TestInitSANs(t *testing.T) {
+	// A space after a comma is how people type lists: it is not part of the name.
+	dir := t.TempDir()
+	if err := Init(dir, []string{"a.example.com", " b.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	server, err := tls.LoadX509KeyPair(filepath.Join(dir, "server", "tls.crt"), filepath.Join(dir, "server", "tls.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Leaf.VerifyHostname("b.example.com"); err != nil {
+		t.Errorf("server certificate not valid for b.example.com: %v", err)
+	}
+
+	// Names no client can match fail now, not at the first connection.
+	for _, san := range []string{"", "d2k.example.com:2376", "tcp://d2k.example.com", "[::1]"} {
+		if err := Init(t.TempDir(), []string{san}); err == nil {
+			t.Errorf("Init() accepted SAN %q", san)
+		}
+	}
+}

@@ -28,8 +28,8 @@ func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
 	return &Handler{adapter: a}
 }
 
-// Stream handles GET /events. As in Docker: without since only new events
-// are sent; since replays recorded ones first; until ends the stream.
+// Stream handles GET /events. As in Docker: without since or until only new
+// events are sent; either replays recorded ones first; until ends the stream.
 func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	args, err := httputils.ParseFilters(r, eventFilters)
@@ -68,7 +68,7 @@ func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
 		t := time.Unix(0, m.TimeNano)
 		return !t.Before(since) && (until.IsZero() || !t.After(until))
 	}
-	if !since.IsZero() {
+	if q.Get("since") != "" || q.Get("until") != "" {
 		for _, m := range history {
 			if inRange(m) {
 				send(m)
