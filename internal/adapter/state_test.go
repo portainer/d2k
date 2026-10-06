@@ -76,6 +76,29 @@ func TestContainerState(t *testing.T) {
 	}
 }
 
+// TestRunOncePodGoneWithoutExitCodeIsNotReportedAsCleanExit guards against a
+// container whose pod was deleted by something other than d2k's own
+// stopPod/removeContainer (a force-deleted pod, a node loss, an evicted
+// pod): nothing ever wrote AnnotationStoppedAt or AnnotationExitCode, so the
+// container must not be reported as a normal "Exited (0)" the way a real
+// clean exit would be.
+func TestRunOncePodGoneWithoutExitCodeIsNotReportedAsCleanExit(t *testing.T) {
+	d := withReplicas(0, map[string]string{
+		types.AnnotationRestartPolicy: "no",
+		types.AnnotationStartedAt:     now.Add(-time.Minute).Format(time.RFC3339Nano),
+	})
+	got := podContainerState(d, nil, now)
+	if got.Status != container.StateExited {
+		t.Fatalf("status = %s, want %s", got.Status, container.StateExited)
+	}
+	if got.ExitCode == 0 {
+		t.Fatalf("exit code = 0: a pod that vanished without d2k recording a stop looks like a clean exit, hiding that it was killed")
+	}
+	if got.FinishedAt == "" {
+		t.Fatal("finished at is empty: no indication of when the container was lost")
+	}
+}
+
 func TestContainerStateImagePullErrorIsReported(t *testing.T) {
 	got := containerState(withReplicas(1, nil), []corev1.Pod{podWith(corev1.ContainerStatus{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
 		Reason: "ImagePullBackOff", Message: `Back-off pulling image "nope:latest"`,

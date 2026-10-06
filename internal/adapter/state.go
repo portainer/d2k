@@ -68,8 +68,19 @@ func podContainerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) co
 	case status == nil:
 		// Without a pod, the container was stopped; with one, it is starting.
 		if !slices.ContainsFunc(pods, func(p corev1.Pod) bool { return p.DeletionTimestamp == nil }) {
-			state.Status, state.FinishedAt = container.StateExited, d.Annotations[types.AnnotationStoppedAt]
-			state.ExitCode, _ = strconv.Atoi(d.Annotations[types.AnnotationExitCode])
+			state.Status = container.StateExited
+			if stopped := d.Annotations[types.AnnotationStoppedAt]; stopped != "" {
+				// d2k's own stop/rm path recorded a real exit code.
+				state.FinishedAt = stopped
+				state.ExitCode, _ = strconv.Atoi(d.Annotations[types.AnnotationExitCode])
+			} else {
+				// The pod disappeared some other way (force-deleted, an
+				// evicted or lost node): nothing recorded a real exit code,
+				// so reporting 0 would look like a clean exit. 137 is
+				// Docker's own convention for a killed container.
+				state.FinishedAt = now.UTC().Format(time.RFC3339Nano)
+				state.ExitCode = 137
+			}
 		}
 	case status.State.Running != nil:
 		state.Status, state.Running = container.StateRunning, true

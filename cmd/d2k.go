@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"github.com/sethvargo/go-envconfig"
@@ -24,7 +26,9 @@ const usage = `usage:
   d2k                              serve the Docker API (configured by D2K_* environment variables)
   d2k pki init --san NAME[,NAME] [--out DIR]
                                    create a CA, a server certificate valid for each NAME (DNS name
-                                   or IP address clients use to reach d2k) and a client certificate`
+                                   or IP address clients use to reach d2k) and a client certificate
+  d2k sleep SECONDS                sleep for SECONDS; the image has no shell or coreutils, so this
+                                   is what the preStop hook in deploy/kubernetes.yaml runs`
 
 func main() {
 	if len(os.Args) > 1 {
@@ -32,9 +36,22 @@ func main() {
 			pkiInit(os.Args[3:])
 			return
 		}
+		if len(os.Args) > 2 && os.Args[1] == "sleep" {
+			sleep(os.Args[2])
+			return
+		}
 		exitUsage()
 	}
 	serve()
+}
+
+func sleep(seconds string) {
+	n, err := strconv.Atoi(seconds)
+	if err != nil || n < 0 {
+		fmt.Fprintf(os.Stderr, "sleep: invalid duration %q\n", seconds)
+		os.Exit(2)
+	}
+	time.Sleep(time.Duration(n) * time.Second)
 }
 
 func exitUsage() {

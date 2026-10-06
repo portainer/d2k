@@ -45,8 +45,13 @@ func TestPreStopDelaysSIGTERM(t *testing.T) {
 		t.Fatal("d2k container has no preStop hook: SIGTERM reaches it as soon as termination starts, before kube-proxy stops routing to it")
 	}
 	cmd := c.Lifecycle.PreStop.Exec.Command
-	if len(cmd) < 2 || cmd[0] != "sleep" {
-		t.Fatalf("preStop command = %v, want a sleep", cmd)
+	// The d2k image is built FROM scratch (Dockerfile): it has no shell and no
+	// coreutils, so a bare "sleep" exec fails with "executable file not found
+	// in $PATH" (kubectl -n <ns> get events shows FailedPreStopHook) and the
+	// hook returns immediately without delaying SIGTERM at all. The only
+	// executable in the image is /d2k itself, so the hook must invoke that.
+	if len(cmd) < 3 || cmd[0] != "/d2k" || cmd[1] != "sleep" {
+		t.Fatalf("preStop command = %v, want [\"/d2k\", \"sleep\", N]: a bare \"sleep\" doesn't exist in the scratch image", cmd)
 	}
 	seconds, err := strconv.Atoi(cmd[len(cmd)-1])
 	if err != nil || seconds < 5 {
