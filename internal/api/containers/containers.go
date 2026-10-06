@@ -47,12 +47,12 @@ type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
 
 	mu       sync.Mutex
-	attached map[string]*streams.SizeQueue // TTY sizes of attach sessions, by container ID
+	attached map[string]map[*streams.SizeQueue]bool // TTY sizes of attach sessions, by container ID
 }
 
 // NewHandler creates a Handler.
 func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
-	return &Handler{adapter: a, attached: map[string]*streams.SizeQueue{}}
+	return &Handler{adapter: a, attached: map[string]map[*streams.SizeQueue]bool{}}
 }
 
 // DispatchAction handles POST /containers/{id}/start, /stop, /restart, /wait.
@@ -709,7 +709,7 @@ func waitUntilStarted(ctx context.Context, a *adapter.KubernetesDockerAdapter, i
 }
 
 // Resize handles POST /containers/{id}/resize: it resizes the TTY of the
-// container's attach session, if any.
+// container's attach sessions, if any.
 func (h *Handler) Resize(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/resize")
 	height, errH := strconv.ParseUint(r.URL.Query().Get("h"), 10, 16)
@@ -724,11 +724,10 @@ func (h *Handler) Resize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mu.Lock()
-	resize := h.attached[ctr.ID]
-	h.mu.Unlock()
-	if resize != nil {
+	for resize := range h.attached[ctr.ID] {
 		resize.Push(uint(height), uint(width))
 	}
+	h.mu.Unlock()
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -736,13 +735,17 @@ func (h *Handler) attachSession(id string) *streams.SizeQueue {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	q := streams.NewSizeQueue()
-	h.attached[id] = q
+	if h.attached[id] == nil {
+		h.attached[id] = map[*streams.SizeQueue]bool{}
+	}
+	h.attached[id][q] = true
 	return q
 }
 
 func (h *Handler) endAttachSession(id string, q *streams.SizeQueue) {
 	h.mu.Lock()
-	if h.attached[id] == q {
+	delete(h.attached[id], q)
+	if len(h.attached[id]) == 0 {
 		delete(h.attached, id)
 	}
 	h.mu.Unlock()

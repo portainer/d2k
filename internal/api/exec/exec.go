@@ -164,6 +164,17 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
 		return
 	}
+	// The container may have stopped or gone since the exec was created:
+	// refuse before the response is committed, as Docker does.
+	ctr, err := h.adapter.InspectContainer(r.Context(), inst.containerID)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	if !ctr.State.Running {
+		httputils.WriteErrorFrom(w, errdefs.Conflict(fmt.Errorf("container %s is not running", ctr.ID)))
+		return
+	}
 	if !inst.markStarted() {
 		httputils.WriteErrorFrom(w, errdefs.Conflict(fmt.Errorf("exec %s has already been started", inst.id)))
 		return
