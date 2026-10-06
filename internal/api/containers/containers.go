@@ -168,7 +168,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 // containerFilters are the `filters` keys d2k supports on GET /containers/json.
-var containerFilters = map[string]bool{"id": true, "name": true, "label": true, "status": true}
+var containerFilters = map[string]bool{"id": true, "name": true, "label": true, "status": true, "network": true, "volume": true}
 
 // filterContainers applies list filters with the Docker daemon's matching rules.
 func filterContainers(ctrs []adapter.ContainerSummary, args filters.Args) []adapter.ContainerSummary {
@@ -180,6 +180,26 @@ func filterContainers(ctrs []adapter.ContainerSummary, args filters.Args) []adap
 			continue
 		}
 		if !args.Match("id", c.ID) || !args.MatchKVList("label", c.Labels) || !args.Match("status", c.State) {
+			continue
+		}
+		if args.Contains("network") && !slices.ContainsFunc(args.Get("network"), func(v string) bool {
+			if _, ok := c.Networks[v]; ok {
+				return true
+			}
+			for _, id := range c.Networks {
+				if strings.HasPrefix(id, v) {
+					return true
+				}
+			}
+			return false
+		}) {
+			continue
+		}
+		if args.Contains("volume") && !slices.ContainsFunc(args.Get("volume"), func(v string) bool {
+			return slices.ContainsFunc(c.Mounts, func(m container.MountPoint) bool {
+				return m.Name == v || m.Destination == v
+			})
+		}) {
 			continue
 		}
 		result = append(result, c)
