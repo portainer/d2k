@@ -854,6 +854,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		// Each pod has its own cgroup namespace, as with Docker's default on cgroup v2.
 		CgroupnsMode: container.CgroupnsModePrivate,
 	}
+	hostConfig.Binds, hostConfig.Mounts = volumeConfig(d)
 	process := append(append([]string{}, spec.Command...), spec.Args...)
 	var path string
 	var args []string
@@ -1220,8 +1221,9 @@ func containerNetworks(d appsv1.Deployment) []string {
 	return []string{"bridge"}
 }
 
-// containerMounts returns the container's named-volume mounts.
-func containerMounts(d appsv1.Deployment) []container.MountPoint {
+// volumeClaims maps the pod volumes of a container's named volumes to the
+// volumes' Docker names.
+func volumeClaims(d appsv1.Deployment) map[string]string {
 	var names map[string]string
 	if raw := d.Annotations[types.AnnotationVolumeNames]; raw != "" {
 		_ = json.Unmarshal([]byte(raw), &names)
@@ -1232,6 +1234,38 @@ func containerMounts(d appsv1.Deployment) []container.MountPoint {
 			claims[v.Name] = cmp.Or(names[v.PersistentVolumeClaim.ClaimName], v.PersistentVolumeClaim.ClaimName)
 		}
 	}
+	return claims
+}
+
+// volumeConfig returns the container's named-volume mounts as the
+// HostConfig that creates them: binds, or mounts for those with a subpath,
+// which a bind cannot express.
+func volumeConfig(d appsv1.Deployment) ([]string, []mount.Mount) {
+	if len(d.Spec.Template.Spec.Containers) == 0 {
+		return nil, nil
+	}
+	claims := volumeClaims(d)
+	var binds []string
+	var mounts []mount.Mount
+	for _, m := range d.Spec.Template.Spec.Containers[0].VolumeMounts {
+		claim, ok := claims[m.Name]
+		switch {
+		case !ok:
+		case m.SubPath != "":
+			mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: claim, Target: m.MountPath, ReadOnly: m.ReadOnly,
+				VolumeOptions: &mount.VolumeOptions{Subpath: m.SubPath}})
+		case m.ReadOnly:
+			binds = append(binds, claim+":"+m.MountPath+":ro")
+		default:
+			binds = append(binds, claim+":"+m.MountPath)
+		}
+	}
+	return binds, mounts
+}
+
+// containerMounts returns the container's named-volume mounts.
+func containerMounts(d appsv1.Deployment) []container.MountPoint {
+	claims := volumeClaims(d)
 	mounts := []container.MountPoint{}
 	if len(d.Spec.Template.Spec.Containers) == 0 {
 		return mounts
