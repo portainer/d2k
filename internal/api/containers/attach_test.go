@@ -12,8 +12,65 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/remotecommand"
 
+	"github.com/moby/moby/api/types/events"
 	"github.com/portainer/d2k/internal/adapter"
 )
+
+// A pod force-deleted or lost out from under an attach never gets the
+// kubelet to end the SPDY stream: podEvents still reports the container's
+// die (D2K-035), but nothing made the attach notice. stopOnDeath is the
+// backstop: watching the same event stream Wait uses, it cancels the
+// attach's context as soon as the container's die event arrives, so the
+// handler's stream ends instead of hanging after inspect/wait already
+// report the container dead (D2K-038).
+func TestStopOnDeathCancelsOnDie(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	live := make(chan events.Message, 2)
+	live <- events.Message{Actor: events.Actor{ID: "other"}, Action: events.ActionDie}
+	live <- events.Message{Actor: events.Actor{ID: "ctr1"}, Action: events.ActionDie}
+
+	done := make(chan struct{})
+	go func() {
+		stopOnDeath(ctx, stop, "ctr1", live)
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("stopOnDeath did not cancel on a die event for this container")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stopOnDeath did not return after cancelling")
+	}
+}
+
+// Other events, and another container's die, must not end the attach.
+func TestStopOnDeathIgnoresOtherEvents(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	live := make(chan events.Message, 1)
+	done := make(chan struct{})
+	go func() {
+		stopOnDeath(ctx, stop, "ctr1", live)
+		close(done)
+	}()
+
+	live <- events.Message{Actor: events.Actor{ID: "other"}, Action: events.ActionDie}
+	select {
+	case <-ctx.Done():
+		t.Fatal("stopOnDeath cancelled on another container's die event")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	stop()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stopOnDeath did not return once ctx ended")
+	}
+}
 
 // `docker run` attaches before it starts the container. A container that
 // runs once may exit before it is ever seen running: the attach must still
