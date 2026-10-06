@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/go-units"
 	"github.com/moby/moby/api/types/container"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -262,5 +263,25 @@ func TestAnonymousVolumeWarns(t *testing.T) {
 	}
 	if _, _, err := a.CreateContainer(context.Background(), opts); err != nil {
 		t.Fatalf("create with an anonymous volume: %v", err)
+	}
+}
+
+// dockerSize must accept every size string github.com/docker/go-units
+// RAMInBytes accepts (the "b"/"kb"/"kib" suffixes docker's --tmpfs and
+// compose's tmpfs size= use), not just k/m/g.
+func TestDockerSizeMatchesRAMInBytes(t *testing.T) {
+	for _, size := range []string{"100b", "100B", "1kb", "1KB", "1kib", "1KiB", "64m", "2g", "0"} {
+		want, err := units.RAMInBytes(size)
+		if err != nil {
+			t.Fatalf("units.RAMInBytes(%q): %v", size, err)
+		}
+		got, ok := dockerSize(size)
+		if !ok {
+			t.Errorf("dockerSize(%q) rejected a size RAMInBytes accepts", size)
+			continue
+		}
+		if got != want {
+			t.Errorf("dockerSize(%q) = %d bytes, want %d (as RAMInBytes)", size, got, want)
+		}
 	}
 }

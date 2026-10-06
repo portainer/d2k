@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/go-units"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	corev1 "k8s.io/api/core/v1"
@@ -423,8 +424,8 @@ func nativeSettings(cfg container.Config, host container.HostConfig) (RunOptions
 		for _, o := range strings.Split(host.Tmpfs[target], ",") {
 			switch size, isSize := strings.CutPrefix(o, "size="); {
 			case isSize:
-				if q, err := resource.ParseQuantity(dockerSize(size)); err == nil {
-					m.SizeLimit = &q
+				if n, ok := dockerSize(size); ok {
+					m.SizeLimit = resource.NewQuantity(n, resource.BinarySI)
 				} else {
 					ignored = append(ignored, o)
 				}
@@ -513,13 +514,10 @@ func seLinuxLabel(opts *RunOptions, label string) bool {
 	return true
 }
 
-// dockerSize converts Docker's size suffixes (k, m, g, in powers of 1024)
-// to Kubernetes quantities.
-func dockerSize(s string) string {
-	for suffix, unit := range map[string]string{"k": "Ki", "m": "Mi", "g": "Gi"} {
-		if n, ok := strings.CutSuffix(strings.ToLower(s), suffix); ok {
-			return n + unit
-		}
-	}
-	return s
+// dockerSize parses a size string as Docker does (RAMInBytes: a number with
+// an optional b/k/m/g/t/p suffix, "b" or "ib" allowed after the unit letter)
+// into bytes.
+func dockerSize(s string) (int64, bool) {
+	n, err := units.RAMInBytes(s)
+	return n, err == nil
 }
