@@ -57,6 +57,7 @@ func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deploy
 	}
 	if err := a.annotate(ctx, d.Name, map[string]*string{
 		types.AnnotationStartedAt: ptr(time.Now().UTC().Format(time.RFC3339Nano)),
+		types.AnnotationStoppedAt: nil,
 		types.AnnotationExitCode:  nil,
 	}); err != nil {
 		return err
@@ -114,7 +115,12 @@ func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deploym
 	if exitCode != "" {
 		updates[types.AnnotationExitCode] = &exitCode
 	}
-	return a.annotate(ctx, d.Name, updates)
+	err = a.annotate(ctx, d.Name, updates)
+	if apierrors.IsNotFound(err) && d.Annotations[types.AnnotationAutoRemove] == "true" {
+		// The end of its run removed the container meanwhile.
+		return nil
+	}
+	return err
 }
 
 // waitForPodGone waits until the pod is deleted, and returns its container's

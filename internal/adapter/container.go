@@ -410,6 +410,22 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 	return a.scaleDeployment(ctx, name, 1)
 }
 
+// RestartContainer implements docker restart: it stops the container, then
+// starts it. As in Docker, the end of the run a restart stops does not
+// remove an AutoRemove container.
+func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name string) error {
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return err
+	}
+	a.restarting.Store(resolved, true)
+	defer a.restarting.Delete(resolved)
+	if err := a.StopContainer(ctx, name); err != nil {
+		return err
+	}
+	return a.StartContainer(ctx, name)
+}
+
 // RemoveContainer implements docker rm: deletes the Deployment and its associated Service (if any).
 // Returns an error if the Deployment is managed by the Swarm layer — use docker service rm instead.
 func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name string) error {

@@ -172,3 +172,39 @@ func TestEventsReportDeathsAcrossWatchRestarts(t *testing.T) {
 		}
 	}
 }
+
+// As the Docker daemon does when it starts, d2k removes the AutoRemove
+// containers whose run ended while it was not watching; one that runs, or
+// was never started, stays.
+func TestEventsRemoveRunsThatEndedBeforeTheWatch(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, name := range []string{"ended", "running", "created"} {
+		mustCreate(t, a, RunOptions{Name: name, Image: "busybox", RestartPolicy: "no", AutoRemove: true})
+	}
+	for _, name := range []string{"ended", "running"} {
+		if err := a.StartContainer(ctx, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setStatus(t, a, podOf(t, a, "ended"), corev1.PodFailed, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3}})
+	setStatus(t, a, podOf(t, a, "running"), corev1.PodRunning, corev1.ContainerState{Running: &corev1.ContainerStateRunning{}})
+
+	go a.RecordEvents(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := a.InspectContainer(ctx, "ended"); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the container whose run ended before d2k watched was not removed")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for _, name := range []string{"running", "created"} {
+		if _, err := a.InspectContainer(ctx, name); err != nil {
+			t.Errorf("inspect %s = %v, want it kept", name, err)
+		}
+	}
+}

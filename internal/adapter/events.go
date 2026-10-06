@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/events"
 	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
@@ -119,10 +120,24 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context, state *eventS
 	if err != nil {
 		return fmt.Errorf("unable to list volumes: %w", err)
 	}
+	first := !state.listed
 	for _, m := range state.relist(deps.Items, pods.Items, pvcs.Items, time.Now()) {
 		a.events.publish(m)
 		if m.Type == events.ContainerEventType && (m.Action == events.ActionDie || m.Action == events.ActionStop) && autoRemoves(state.known, m.Actor.ID) {
 			go a.autoRemove(ctx, m.Actor.ID)
+		}
+	}
+	if first {
+		// As the Docker daemon does when it starts, remove the AutoRemove
+		// containers whose run ended while nothing watched.
+		podsByContainer := map[string][]corev1.Pod{}
+		for _, p := range pods.Items {
+			podsByContainer[p.Labels["app"]] = append(podsByContainer[p.Labels["app"]], p)
+		}
+		for _, d := range deps.Items {
+			if d.Annotations[types.AnnotationAutoRemove] == "true" && containerState(d, podsByContainer[d.Name], time.Now()).Status == container.StateExited {
+				go a.autoRemove(ctx, containerID(d.UID))
+			}
 		}
 	}
 
@@ -193,8 +208,17 @@ func autoRemoves(known map[string]*appsv1.Deployment, id string) bool {
 }
 
 // autoRemove removes a container whose run ended, as Docker does for one
-// created with AutoRemove.
+// created with AutoRemove: unless a restart ended the run, or the container
+// runs again.
 func (a *KubernetesDockerAdapter) autoRemove(ctx context.Context, id string) {
+	if resolved, err := a.resolveDeploymentName(ctx, id); err == nil {
+		if _, restarting := a.restarting.Load(resolved); restarting {
+			return
+		}
+	}
+	if ctr, err := a.InspectContainer(ctx, id); err == nil && (ctr.State.Running || IsStarting(ctr.State)) {
+		return
+	}
 	if err := a.RemoveContainer(ctx, id); err != nil && !errdefs.IsNotFound(err) {
 		log.Warn().Str("context", "KubernetesAdapter").Str("id", id).Err(err).Msg("Unable to remove a container whose run ended")
 	}
