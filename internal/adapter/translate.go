@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/go-units"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	corev1 "k8s.io/api/core/v1"
@@ -513,13 +514,12 @@ func seLinuxLabel(opts *RunOptions, label string) bool {
 	return true
 }
 
-// dockerSize converts Docker's size suffixes (k, m, g, in powers of 1024)
-// to Kubernetes quantities.
+// dockerSize converts a size string as Docker parses it (RAMInBytes: a
+// number with an optional b/k/m/g/t/p suffix, "b" or "ib" allowed after the
+// unit letter) to a byte count a Kubernetes quantity accepts.
 func dockerSize(s string) string {
-	for suffix, unit := range map[string]string{"k": "Ki", "m": "Mi", "g": "Gi"} {
-		if n, ok := strings.CutSuffix(strings.ToLower(s), suffix); ok {
-			return n + unit
-		}
+	if n, err := units.RAMInBytes(s); err == nil {
+		return strconv.FormatInt(n, 10)
 	}
 	return s
 }
