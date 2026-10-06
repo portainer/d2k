@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
@@ -39,6 +40,7 @@ type NetworkSummary struct {
 // networkRecord is a network as it was created, recorded on the namespace.
 type networkRecord struct {
 	Name   string            `json:"name"`
+	Driver string            `json:"driver,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
 	// Warnings name the options the network was created with that d2k
 	// cannot honour, reported to the containers that join it.
@@ -46,11 +48,15 @@ type networkRecord struct {
 }
 
 func (r networkRecord) summary(namespace string) NetworkSummary {
+	driver, scope := cmp.Or(r.Driver, "bridge"), "local"
+	if driver == "overlay" {
+		scope = "swarm"
+	}
 	return NetworkSummary{
 		ID:     networkIDForName(r.Name, namespace),
 		Name:   r.Name,
-		Driver: "overlay",
-		Scope:  "swarm",
+		Driver: driver,
+		Scope:  scope,
 		IPAM:   NetworkIPAM{Driver: "default", Config: []IPAMConfig{}},
 		Labels: r.Labels,
 	}
@@ -118,7 +124,7 @@ func (a *KubernetesDockerAdapter) CreateNetwork(ctx context.Context, opts Create
 		labels[k] = v
 	}
 
-	record := networkRecord{Name: opts.Name, Labels: labels, Warnings: optionWarnings}
+	record := networkRecord{Name: opts.Name, Driver: opts.Driver, Labels: labels, Warnings: optionWarnings}
 	if err := a.recordNetwork(ctx, record); err != nil {
 		return nil, nil, err
 	}
