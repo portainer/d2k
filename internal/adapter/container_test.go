@@ -572,3 +572,26 @@ func TestUDPPortsKeepTheirProtocol(t *testing.T) {
 		t.Errorf("inspect PortBindings = %v, want 53/udp -> 53", inspect.HostConfig.PortBindings)
 	}
 }
+
+// Docker publishes a port given without a host port on a port it picks:
+// compose's `ports: ["80"]` and `docker run -p 80`. d2k publishes it on the
+// container port.
+func TestPortWithoutHostPort(t *testing.T) {
+	a, client := newTestAdapter(t)
+	req := request(t, `{"Image":"nginx","ExposedPorts":{"80/tcp":{}},"HostConfig":{"PortBindings":{"80/tcp":[{"HostIp":"","HostPort":""}]}}}`)
+	opts, _ := RunOptionsFromRequest("web", req)
+	if _, _, err := a.CreateContainer(context.Background(), opts); err != nil {
+		t.Fatalf("create with port 80 and no host port: %v", err)
+	}
+	svc, err := client.CoreV1().Services(testNamespace).Get(context.Background(), publishedServiceName("web"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != 80 || svc.Spec.Ports[0].TargetPort.IntValue() != 80 {
+		t.Fatalf("published ports = %+v, want 80 -> 80", svc.Spec.Ports)
+	}
+	ctrs, _ := a.ListContainers(context.Background(), true)
+	if len(ctrs[0].Ports) != 1 || ctrs[0].Ports[0].PublicPort != 80 {
+		t.Fatalf("list Ports = %+v, want 80 published on 80", ctrs[0].Ports)
+	}
+}
