@@ -227,3 +227,31 @@ func TestStartRunningContainerKeepsItsRun(t *testing.T) {
 		t.Fatalf("pod after starting a running container = %s, want %s: the run was replaced", p.Name, first.Name)
 	}
 }
+
+// A run whose pod disappears is reported killed (D2K-026), even when an
+// earlier run of the container was stopped by docker stop.
+func TestRunOncePodGoneAfterStopAndStart(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "job", Image: "busybox", RestartPolicy: "no"})
+	if err := a.StartContainer(ctx, "job"); err != nil {
+		t.Fatal(err)
+	}
+	setStatus(t, a, podOf(t, a, "job"), corev1.PodRunning, corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}})
+	if err := a.StopContainer(ctx, "job"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartContainer(ctx, "job"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CoreV1().Pods(testNamespace).Delete(ctx, podOf(t, a, "job").Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := a.InspectContainer(ctx, "job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := ctr.State; s.Status != container.StateExited || s.ExitCode != 137 {
+		t.Fatalf("state after the pod of the second run is lost = %s, exit %d, finished %s; want exited 137, not the first run's stop", s.Status, s.ExitCode, s.FinishedAt)
+	}
+}
