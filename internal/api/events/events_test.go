@@ -86,3 +86,13 @@ func TestStreamReplaysWithUntilOrSinceZero(t *testing.T) {
 		}
 	}
 }
+
+// As in Docker, since after until is a bad request.
+func TestStreamRefusesSinceAfterUntil(t *testing.T) {
+	h := NewHandler(adapter.NewWithClient(fake.NewClientset(), "ns"))
+	rec := httptest.NewRecorder()
+	h.Stream(rec, httptest.NewRequest("GET", "/events?since=200&until=100", nil))
+	if rec.Code != 400 {
+		t.Errorf("GET /events?since=200&until=100 = %d %q, want 400", rec.Code, rec.Body.String())
+	}
+}
