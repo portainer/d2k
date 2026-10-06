@@ -2351,37 +2351,75 @@ func (a *KubernetesDockerAdapter) injectQuotaDefaults(ctx context.Context, reqs 
 		return reqs, nil
 	}
 
-	needsCPU := false
-	needsMem := false
+	needsCPUReq, needsMemReq, needsCPULimit, needsMemLimit := false, false, false, false
 
 	for _, q := range quotas.Items {
 		if _, ok := q.Spec.Hard[corev1.ResourceRequestsCPU]; ok {
-			needsCPU = true
+			needsCPUReq = true
 		}
 		if _, ok := q.Spec.Hard[corev1.ResourceRequestsMemory]; ok {
-			needsMem = true
+			needsMemReq = true
+		}
+		if _, ok := q.Spec.Hard[corev1.ResourceLimitsCPU]; ok {
+			needsCPULimit = true
+		}
+		if _, ok := q.Spec.Hard[corev1.ResourceLimitsMemory]; ok {
+			needsMemLimit = true
 		}
 	}
 
-	if !needsCPU && !needsMem {
+	if !needsCPUReq && !needsMemReq && !needsCPULimit && !needsMemLimit {
 		return reqs, nil
 	}
 
-	if reqs.Requests == nil {
-		reqs.Requests = corev1.ResourceList{}
+	if needsCPUReq || needsMemReq {
+		if reqs.Requests == nil {
+			reqs.Requests = corev1.ResourceList{}
+		}
 	}
 
-	if needsCPU {
+	if needsCPUReq {
 		if _, alreadySet := reqs.Requests[corev1.ResourceCPU]; !alreadySet {
 			reqs.Requests[corev1.ResourceCPU] = resource.MustParse("10m")
 			log.Info().Str("context", "KubernetesAdapter").Any("namespace", a.namespace).Any("value", "10m").Msg("Injected requests.cpu to satisfy namespace ResourceQuota")
 		}
 	}
 
-	if needsMem {
+	if needsMemReq {
 		if _, alreadySet := reqs.Requests[corev1.ResourceMemory]; !alreadySet {
 			reqs.Requests[corev1.ResourceMemory] = resource.MustParse("32Mi")
 			log.Info().Str("context", "KubernetesAdapter").Any("namespace", a.namespace).Any("value", "32Mi").Msg("Injected requests.memory to satisfy namespace ResourceQuota")
+		}
+	}
+
+	// A quota enforcing limits.cpu/limits.memory is common on its own, to cap
+	// usage without reserving it. The injected limit must be at least the
+	// (possibly caller-set) request, or Kubernetes rejects the pod.
+	if needsCPULimit || needsMemLimit {
+		if reqs.Limits == nil {
+			reqs.Limits = corev1.ResourceList{}
+		}
+	}
+
+	if needsCPULimit {
+		if _, alreadySet := reqs.Limits[corev1.ResourceCPU]; !alreadySet {
+			limit := resource.MustParse("10m")
+			if req, ok := reqs.Requests[corev1.ResourceCPU]; ok && req.Cmp(limit) > 0 {
+				limit = req
+			}
+			reqs.Limits[corev1.ResourceCPU] = limit
+			log.Info().Str("context", "KubernetesAdapter").Any("namespace", a.namespace).Any("value", limit.String()).Msg("Injected limits.cpu to satisfy namespace ResourceQuota")
+		}
+	}
+
+	if needsMemLimit {
+		if _, alreadySet := reqs.Limits[corev1.ResourceMemory]; !alreadySet {
+			limit := resource.MustParse("32Mi")
+			if req, ok := reqs.Requests[corev1.ResourceMemory]; ok && req.Cmp(limit) > 0 {
+				limit = req
+			}
+			reqs.Limits[corev1.ResourceMemory] = limit
+			log.Info().Str("context", "KubernetesAdapter").Any("namespace", a.namespace).Any("value", limit.String()).Msg("Injected limits.memory to satisfy namespace ResourceQuota")
 		}
 	}
 
