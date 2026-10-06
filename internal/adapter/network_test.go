@@ -3,9 +3,11 @@ package adapter
 import (
 	"context"
 	"maps"
+	"net/http"
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -104,5 +106,41 @@ func TestNetworkCreateRejectedByAPIServerIsNotRetried(t *testing.T) {
 	}
 	if err == nil || errdefs.IsUnavailable(err) || !strings.Contains(err.Error(), "Too long") {
 		t.Errorf("create = %v, want the API server's rejection", err)
+	}
+}
+
+// A namespace that changed between d2k's read and its patch fails the
+// patch's resourceVersion test, which the API server answers 422 with no
+// details: the network is recorded on a retry.
+func TestNetworkCreateRetriesWhenTheNamespaceChanged(t *testing.T) {
+	a, client := newTestAdapter(t)
+	patches := 0
+	client.PrependReactor("patch", "namespaces", func(k8stesting.Action) (bool, runtime.Object, error) {
+		patches++
+		if patches > 1 {
+			return false, nil, nil
+		}
+		// Reactors run under the clientset's lock: change the namespace
+		// through its tracker.
+		gvr := corev1.SchemeGroupVersion.WithResource("namespaces")
+		obj, err := client.Tracker().Get(gvr, "", testNamespace)
+		if err != nil {
+			return true, nil, err
+		}
+		ns := obj.(*corev1.Namespace).DeepCopy()
+		ns.ResourceVersion = "2"
+		if err := client.Tracker().Update(gvr, ns, ""); err != nil {
+			return true, nil, err
+		}
+		return true, nil, apierrors.NewGenericServerResponse(http.StatusUnprocessableEntity, "", schema.GroupResource{}, "", "testing value /metadata/resourceVersion failed: test failed", 0, false)
+	})
+	if _, _, err := a.CreateNetwork(context.Background(), CreateNetworkOptions{Name: "web_default"}); err != nil {
+		t.Fatalf("create = %v, want the network recorded on a retry", err)
+	}
+	if patches != 2 {
+		t.Errorf("patches = %d, want 2", patches)
+	}
+	if _, err := a.InspectNetwork(context.Background(), "web_default"); err != nil {
+		t.Errorf("inspect = %v", err)
 	}
 }
