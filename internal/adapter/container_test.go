@@ -842,6 +842,57 @@ func TestStopWaitsForThePod(t *testing.T) {
 	}
 }
 
+// As in Docker, a container docker stop ended reports its process's exit
+// code: 137 when it was killed at the end of the stop timeout, not 0.
+// docker ps, compose ps and Portainer show it as "Exited (137)".
+func TestStopRecordsTheExitCode(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: "always"})
+	if err := a.StartContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	// The kubelet shows the container killed before the pod goes.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-abc", Namespace: testNamespace,
+			Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137}},
+		}}},
+	}
+	if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(700 * time.Millisecond)
+		_ = client.CoreV1().Pods(testNamespace).Delete(ctx, "db-abc", metav1.DeleteOptions{})
+	}()
+	if err := a.StopContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := a.InspectContainer(ctx, "db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctr.State.Status != container.StateExited || ctr.State.ExitCode != 137 {
+		t.Fatalf("after stop: %s with exit code %d, want exited with 137", ctr.State.Status, ctr.State.ExitCode)
+	}
+
+	// A later stop that saw no exit does not report the earlier one's.
+	if err := a.StartContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StopContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	if ctr, err = a.InspectContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	if ctr.State.ExitCode != 0 {
+		t.Fatalf("after the second stop: exit code %d, want 0, not the first stop's", ctr.State.ExitCode)
+	}
+}
+
 // As Docker's rm -f does, docker rm kills the container at once rather than
 // leaving its pod to its stop grace period, and returns once it is gone:
 // its volumes and name are free right after.

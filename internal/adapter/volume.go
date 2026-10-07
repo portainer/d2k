@@ -196,14 +196,17 @@ func (a *KubernetesDockerAdapter) createPVC(ctx context.Context, name string, pv
 	if errors.IsAlreadyExists(err) {
 		old, getErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
 		if getErr == nil && old.DeletionTimestamp != nil {
-			if !a.waitForPVCGone(ctx, pvc.Name, volumeTerminationTimeout) {
+			if !a.waitForPVCGone(ctx, old, volumeTerminationTimeout) {
 				return nil, errdefs.Conflict(fmt.Errorf("volume %q is being deleted: try again once it is gone", name))
 			}
 			created, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, pvc, metav1.CreateOptions{})
-			if err != nil {
+			if err == nil {
+				return pvcToVolume(*created), nil
+			}
+			// Another create of the volume, waiting too, made it first.
+			if !errors.IsAlreadyExists(err) {
 				return nil, fmt.Errorf("unable to create PVC %q: %w", pvc.Name, err)
 			}
-			return pvcToVolume(*created), nil
 		}
 		existing, err := a.InspectVolume(ctx, name)
 		if errdefs.IsNotFound(err) {
@@ -217,14 +220,15 @@ func (a *KubernetesDockerAdapter) createPVC(ctx context.Context, name string, pv
 	return pvcToVolume(*created), nil
 }
 
-// waitForPVCGone waits until the PVC named name no longer exists, or
-// timeout passes. It returns whether the PVC is confirmed gone.
-func (a *KubernetesDockerAdapter) waitForPVCGone(ctx context.Context, name string, timeout time.Duration) bool {
+// waitForPVCGone waits until the PVC old no longer exists, or timeout
+// passes. It returns whether the PVC is confirmed gone: deleted, or replaced
+// by a new PVC of the same name.
+func (a *KubernetesDockerAdapter) waitForPVCGone(ctx context.Context, old *corev1.PersistentVolumeClaim, timeout time.Duration) bool {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for {
-		_, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, name, metav1.GetOptions{})
-		if errors.IsNotFound(err) {
+		pvc, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, old.Name, metav1.GetOptions{})
+		if errors.IsNotFound(err) || err == nil && pvc.UID != old.UID {
 			return true
 		}
 		select {

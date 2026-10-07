@@ -28,6 +28,7 @@ func containerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) conta
 		if state.StartedAt != "" {
 			state.Status = container.StateExited
 			state.FinishedAt = d.Annotations[types.AnnotationStoppedAt]
+			state.ExitCode, _ = strconv.Atoi(d.Annotations[types.AnnotationExitCode])
 		}
 		return state
 	}
