@@ -845,6 +845,11 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		endpoints[name] = &network.EndpointSettings{NetworkID: id, IPAddress: ip}
 	}
 
+	user, capAdd, capDrop, privileged, readOnly, securityOpt := dockerSecurityContext(spec.SecurityContext)
+	groupAdd, sysctls := dockerPodSecurityContext(d.Spec.Template.Spec.SecurityContext)
+	dnsSearch, dnsOptions := dockerDNSConfig(d.Spec.Template.Spec.DNSConfig)
+	shmSize, tmpfs := dockerTmpfs(d)
+
 	hostConfig := &container.HostConfig{
 		LogConfig: container.LogConfig{
 			Type: "json-file",
@@ -852,8 +857,20 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		RestartPolicy: container.RestartPolicy{Name: restartPolicyOf(d)},
 		AutoRemove:    d.Annotations[types.AnnotationAutoRemove] == "true",
 		// Each pod has its own cgroup namespace, as with Docker's default on cgroup v2.
-		CgroupnsMode: container.CgroupnsModePrivate,
-		Resources:    dockerResources(spec.Resources),
+		CgroupnsMode:   container.CgroupnsModePrivate,
+		Resources:      dockerResources(spec.Resources),
+		CapAdd:         capAdd,
+		CapDrop:        capDrop,
+		Privileged:     privileged,
+		ReadonlyRootfs: readOnly,
+		GroupAdd:       groupAdd,
+		Sysctls:        sysctls,
+		SecurityOpt:    securityOpt,
+		ExtraHosts:     dockerExtraHosts(d.Spec.Template.Spec.HostAliases),
+		DNSSearch:      dnsSearch,
+		DNSOptions:     dnsOptions,
+		ShmSize:        shmSize,
+		Tmpfs:          tmpfs,
 	}
 	hostConfig.Binds, hostConfig.Mounts = volumeConfig(d)
 	process := append(append([]string{}, spec.Command...), spec.Args...)
@@ -873,6 +890,12 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		hostConfig.PortBindings = portMap
 	}
 
+	var stopTimeout *int
+	if grace := d.Spec.Template.Spec.TerminationGracePeriodSeconds; grace != nil {
+		seconds := int(*grace)
+		stopTimeout = &seconds
+	}
+
 	return container.InspectResponse{
 		ID:         containerID(d.UID),
 		Name:       "/" + dockerName(d),
@@ -885,6 +908,10 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		Mounts:     containerMounts(d),
 		Config: &container.Config{
 			Image:        d.Annotations[types.AnnotationImageRef],
+			User:         user,
+			WorkingDir:   spec.WorkingDir,
+			Hostname:     d.Spec.Template.Spec.Hostname,
+			StopTimeout:  stopTimeout,
 			ExposedPorts: network.PortSet{},
 			Tty:          spec.TTY,
 			OpenStdin:    spec.Stdin,
@@ -1262,6 +1289,39 @@ func volumeConfig(d appsv1.Deployment) ([]string, []mount.Mount) {
 		}
 	}
 	return binds, mounts
+}
+
+// dockerTmpfs returns the container's memory-backed mounts as the
+// HostConfig that creates them: ShmSize for /dev/shm, Tmpfs for the rest.
+func dockerTmpfs(d appsv1.Deployment) (shmSize int64, tmpfs map[string]string) {
+	if len(d.Spec.Template.Spec.Containers) == 0 {
+		return 0, nil
+	}
+	volumes := map[string]*corev1.EmptyDirVolumeSource{}
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
+			volumes[v.Name] = v.EmptyDir
+		}
+	}
+	for _, m := range d.Spec.Template.Spec.Containers[0].VolumeMounts {
+		v, ok := volumes[m.Name]
+		if !ok {
+			continue
+		}
+		var size string
+		if v.SizeLimit != nil {
+			size = "size=" + strconv.FormatInt(v.SizeLimit.Value(), 10)
+		}
+		if m.MountPath == "/dev/shm" && v.SizeLimit != nil {
+			shmSize = v.SizeLimit.Value()
+			continue
+		}
+		if tmpfs == nil {
+			tmpfs = map[string]string{}
+		}
+		tmpfs[m.MountPath] = size
+	}
+	return shmSize, tmpfs
 }
 
 // containerMounts returns the container's named-volume mounts.
