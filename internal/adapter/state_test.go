@@ -133,6 +133,14 @@ func TestContainerStateWhilePodIsReplaced(t *testing.T) {
 			}
 		})
 	}
+
+	// An evicted pod is kept, Failed, after its replacement ran: it is not
+	// the run of a later docker start.
+	evicted := podWith(corev1.ContainerStatus{State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, FinishedAt: finished}}})
+	evicted.CreationTimestamp, evicted.Status.Phase = metav1.NewTime(now.Add(-2*time.Hour)), corev1.PodFailed
+	if got := containerState(withReplicas(1, started), []corev1.Pod{evicted, creating}, now); got.Status != container.StateCreated {
+		t.Fatalf("starting beside an evicted pod: state = %s, want %s", got.Status, container.StateCreated)
+	}
 }
 
 func TestContainerStateImagePullErrorIsReported(t *testing.T) {
