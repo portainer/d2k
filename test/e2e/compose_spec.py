@@ -12,6 +12,7 @@ checked), warns, or fails with an error: no attribute may be dropped silently.
 """
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,10 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 ENV = dict(os.environ, DOCKER_HOST=os.environ.get("STANDALONE", "tcp://localhost:31112"), DOCKER_TLS_VERIFY="1",
            DOCKER_CERT_PATH=os.environ.get("PKI", os.path.join(HERE, ".pki", "client")), DB_PASS="s3cret")
 CONTEXT = os.environ.get("CONTEXT", "kind-d2k")
+# COMPOSE_CMD picks the compose binary/plugin invocation: "docker compose" (default, the
+# CLI plugin) or a standalone binary such as a pinned docker-compose release, e.g.
+# COMPOSE_CMD=/path/to/docker-compose-v2.40.3 (no "compose" subcommand for a standalone binary).
+COMPOSE = shlex.split(os.environ.get("COMPOSE_CMD", "docker compose"))
 
 YES, PARTIAL, NO, CLIENT = "Supported", "Partial", "Not supported", "Compose"
 
@@ -394,7 +399,7 @@ NOISE = ("Network ", "Volume ", "Container ", "Image ", "nginx:alpine: not pulle
 
 def compose(cwd, project, *args, timeout=150):
     try:
-        return subprocess.run(["docker", "compose", "-p", project, *args], cwd=cwd, env=ENV,
+        return subprocess.run([*COMPOSE, "-p", project, *args], cwd=cwd, env=ENV,
                               capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(args, -1, "", f"timed out after {timeout}s")

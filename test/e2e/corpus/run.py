@@ -18,6 +18,7 @@ Usage:
 import http.cookiejar
 import json
 import os
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -35,6 +36,10 @@ STANDALONE = os.environ.get("STANDALONE", "tcp://localhost:31112")
 PKI = os.environ.get("PKI", os.path.join(E2E, ".pki", "client"))
 NS = "d2k"
 ENV = dict(os.environ, DOCKER_HOST=STANDALONE, DOCKER_TLS_VERIFY="1", DOCKER_CERT_PATH=PKI)
+# COMPOSE_CMD picks the compose binary/plugin invocation: "docker compose" (default, the
+# CLI plugin) or a standalone binary such as a pinned docker-compose release, e.g.
+# COMPOSE_CMD=/path/to/docker-compose-v2.40.3 (no "compose" subcommand for a standalone binary).
+COMPOSE = shlex.split(os.environ.get("COMPOSE_CMD", "docker compose"))
 
 
 def sh(*args, timeout=60, env=ENV, cwd=None, check=False):
@@ -42,7 +47,7 @@ def sh(*args, timeout=60, env=ENV, cwd=None, check=False):
 
 
 def compose(cwd, project, *args, timeout=240, env=ENV):
-    return sh("docker", "compose", "-p", project, *args, cwd=cwd, timeout=timeout, env=env)
+    return sh(*COMPOSE, "-p", project, *args, cwd=cwd, timeout=timeout, env=env)
 
 
 def kubectl(*args, timeout=60):
@@ -344,7 +349,7 @@ def run_app(app):
     except Exception as e:
         r.step(f"crashed: {type(e).__name__}", False, str(e))
     finally:
-        cleanup = sh("docker", "compose", "-p", project, "down", "-v", "-t", "5",
+        cleanup = sh(*COMPOSE, "-p", project, "down", "-v", "-t", "5",
                      cwd=dir_, env=dict(ENV, **app.get("env", {})), timeout=90)
         if cleanup.returncode != 0:
             print(f"         cleanup down -v failed: {cleanup.stderr.strip()[-400:]}")
@@ -354,7 +359,7 @@ def run_app(app):
 def run_app_body(app, r, dir_, project):
     env = dict(ENV, **app.get("env", {}))
 
-    up = sh("docker", "compose", "-p", project, "up", "-d", cwd=dir_, env=env, timeout=app["up_timeout"] + 30)
+    up = sh(*COMPOSE, "-p", project, "up", "-d", cwd=dir_, env=env, timeout=app["up_timeout"] + 30)
     if not r.step("compose up", up.returncode == 0, (up.stdout + up.stderr)[-800:]):
         return
 
@@ -392,10 +397,10 @@ def run_app_body(app, r, dir_, project):
     ex = sh("docker", "exec", exec_ctr, "sh", "-c", "echo corpus-exec-ok")
     r.step("exec runs in the main service's container", ex.returncode == 0 and "corpus-exec-ok" in ex.stdout)
 
-    down = sh("docker", "compose", "-p", project, "down", "-t", "5", cwd=dir_, env=env, timeout=90)
+    down = sh(*COMPOSE, "-p", project, "down", "-t", "5", cwd=dir_, env=env, timeout=90)
     r.step("compose down", down.returncode == 0, down.stderr)
 
-    up2 = sh("docker", "compose", "-p", project, "up", "-d", cwd=dir_, env=env, timeout=app["up_timeout"] + 30)
+    up2 = sh(*COMPOSE, "-p", project, "up", "-d", cwd=dir_, env=env, timeout=app["up_timeout"] + 30)
     r.step("compose up again", up2.returncode == 0, up2.stderr)
     check_http(r, project, app["http"], app["up_timeout"], "data survived down/up")
     if app["name"] == "migrate-once":
@@ -404,7 +409,7 @@ def run_app_body(app, r, dir_, project):
 
     default_recreate(app, r)
 
-    downv = sh("docker", "compose", "-p", project, "down", "-v", "-t", "5", cwd=dir_, env=env, timeout=90)
+    downv = sh(*COMPOSE, "-p", project, "down", "-v", "-t", "5", cwd=dir_, env=env, timeout=90)
     r.step("compose down -v", downv.returncode == 0, downv.stderr)
 
     def nothing_left():
