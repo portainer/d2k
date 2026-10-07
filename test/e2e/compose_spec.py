@@ -230,7 +230,7 @@ CASES = [
     case("pid", NO, "", "pid: host", warns("PidMode")),
     case("ipc", NO, "", "ipc: host", warns("IpcMode")),
     case("uts", NO, "", "uts: host", warns("UTSMode")),
-    case("cgroup", NO, "", "cgroup: host", warns("CgroupnsMode")),
+    case("cgroup", NO, "", "cgroup: host", warns("cgroup namespace mode")),
     case("cgroup_parent", NO, "", "cgroup_parent: m-executor", warns("CgroupParent")),
     case("devices", NO, "Use a device plugin and resource requests.", "devices: ['/dev/null:/dev/xnull']", warns("HostConfig.Devices")),
     case("device_cgroup_rules", NO, "", "device_cgroup_rules: ['c 1:3 mr']", warns("DeviceCgroupRules")),
