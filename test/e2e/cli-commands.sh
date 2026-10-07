@@ -58,6 +58,10 @@ reset() {
     k -n d2k get "$kind" -o name 2>/dev/null | grep '/e2e' | xargs -r -n1 -I{} kubectl --context "$CONTEXT" -n d2k delete {} --wait=false >/dev/null 2>&1
   done
   eventually 60 bash -c "[ -z \"\$(kubectl --context $CONTEXT -n d2k get deploy -o name | grep /e2e)\" ]"
+  # A PVC can keep Terminating after its Deployment is gone: wait it out too,
+  # so a volume name this script reuses on its next run doesn't race the
+  # delete (a container create would then correctly refuse with a conflict).
+  eventually 60 bash -c "[ -z \"\$(kubectl --context $CONTEXT -n d2k get pvc -o name | grep /e2e)\" ]"
 }
 
 running() { [ "$(docker inspect -f '{{.State.Status}}' "$1" 2>/dev/null)" = running ]; }
@@ -74,11 +78,13 @@ container_cases() {
   printf 'FOO=bar\n' >"$WORKDIR/envfile"
   check "run with the full create/run flag set" bash -c "
     docker run -d --name e2ec-run -e X=1 --env-file $WORKDIR/envfile -p 18199:80 -v e2ec-vol:/data -w /tmp -u 101:101 \
-      --health-cmd 'exit 0' --health-interval 2s --hostname e2ec-host --entrypoint /bin/sh --network bridge --init \
+      --health-cmd 'exit 0' --health-interval 30s --hostname e2ec-host --entrypoint /bin/sh --network bridge --init \
       nginx:alpine -c 'sleep 3600' >/dev/null &&
-    for _ in \$(seq 60); do running e2ec-run && break; sleep 2; done &&
-    [ \"\$(docker inspect -f '{{.Config.Hostname}} {{.Config.WorkingDir}} {{.Config.User}} {{.Config.Entrypoint}}' e2ec-run)\" = 'e2ec-host /tmp 101:101 [/bin/sh]' ] &&
-    [ \"\$(docker exec e2ec-run env | grep -c '^X=1\$\\|^FOO=bar\$')\" = 2 ]"
+    (for _ in \$(seq 60); do running e2ec-run && exit 0; sleep 2; done; exit 1)"
+  check "-d set Hostname/WorkingDir/User/Entrypoint" bash -c '
+    [ "$(docker inspect -f "{{.Config.Hostname}} {{.Config.WorkingDir}} {{.Config.User}} {{.Config.Entrypoint}}" e2ec-run)" = "e2ec-host /tmp 101:101 [/bin/sh]" ]'
+  check "-e and --env-file both reach the container" bash -c '
+    docker exec e2ec-run env | grep -qx X=1 && docker exec e2ec-run env | grep -qx FOO=bar'
   check "-P publishes the image's exposed port" bash -c '
     docker port e2ec-run | grep -q "80/tcp -> "'
   check "a named volume (-v) is a PersistentVolumeClaim" bash -c "
@@ -106,6 +112,9 @@ container_cases() {
 
   # ps: -a -q -s --filter(each key) --format --no-trunc -n -l
   docker run -d --name e2ec-ps1 --label e2e.k=v nginx:alpine >/dev/null
+  # Kubernetes' CreationTimestamp has only one-second resolution: give ps2 a
+  # distinct second so "newest first" has an unambiguous answer to check.
+  sleep 1
   docker run -d --name e2ec-ps2 nginx:alpine >/dev/null
   eventually 60 running e2ec-ps1
   check "ps -q --no-trunc prints a 64-hex ID" bash -c '[[ "$(docker ps -q --no-trunc --filter name=e2ec-ps1)" =~ ^[0-9a-f]{64}$ ]]'
