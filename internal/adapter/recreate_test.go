@@ -211,3 +211,25 @@ func TestRecreateFromInspectKeepsStorageSettings(t *testing.T) {
 		t.Errorf("recreated tmpfs mounts = %+v, want %+v", gotMounts, wantMounts)
 	}
 }
+
+func TestRecreateFromInspectKeepsGPUs(t *testing.T) {
+	a, client := newTestAdapter(t)
+	a.gpuResourceName = "nvidia.com/gpu"
+	opts, _ := RunOptionsFromRequest("ml", container.CreateRequest{
+		Config: &container.Config{Image: "pytorch"},
+		HostConfig: &container.HostConfig{Resources: container.Resources{DeviceRequests: []container.DeviceRequest{
+			{Driver: "nvidia", DeviceIDs: []string{"0", "1"}, Capabilities: [][]string{{"compute", "utility"}}},
+		}}},
+	})
+	mustCreate(t, a, opts)
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "ml", metav1.GetOptions{})
+	want := d.Spec.Template.Spec.Containers[0].Resources.Limits["nvidia.com/gpu"]
+	if want.Value() != 2 {
+		t.Fatalf("created container GPU limit = %s, want 2", want.String())
+	}
+
+	got := recreate(t, a, "ml", "ml2").Containers[0].Resources.Limits["nvidia.com/gpu"]
+	if !got.Equal(want) {
+		t.Errorf("recreated container GPU limit = %s, want %s", got.String(), want.String())
+	}
+}

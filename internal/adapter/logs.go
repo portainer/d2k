@@ -70,13 +70,16 @@ func (a *KubernetesDockerAdapter) GetContainerLogs(ctx context.Context, name str
 // states (no container status yet, ContainerCreating, PodInitializing) that
 // Docker has no equivalent of. The kubelet refuses to stream a container's
 // logs during them, unlike Docker, which has nothing to refuse: a created
-// container only starts running. Left waiting past timeout, the pod is
+// container only starts running. A pod the scheduler cannot place is not
+// waited for: it gets no container status. Left waiting past timeout, the pod is
 // returned as is, so the kubelet's error passes through as before.
 func (a *KubernetesDockerAdapter) waitForContainerStarted(ctx context.Context, pod *corev1.Pod, timeout time.Duration) *corev1.Pod {
 	waiting := func(p *corev1.Pod) bool {
 		s := p.Status.ContainerStatuses
 		if len(s) == 0 {
-			return true
+			return !slices.ContainsFunc(p.Status.Conditions, func(c corev1.PodCondition) bool {
+				return c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable
+			})
 		}
 		return s[0].State.Waiting != nil && waitingWhileCreating[s[0].State.Waiting.Reason]
 	}
