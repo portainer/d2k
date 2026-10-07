@@ -511,3 +511,55 @@ func TestRelistReportsAStoppedContainerWhosePodWentDead(t *testing.T) {
 		t.Fatalf("relist after a pod replacement = %q, want %q", got, want)
 	}
 }
+
+// A restart cut short by d2k stopping, between its stop and its start, is
+// finished when d2k starts: as the Docker daemon does when it starts, an
+// always or unless-stopped container runs again. A container that runs once
+// stays stopped, as Docker leaves it (D2K-083).
+func TestEventsFinishRestartsCutShortByD2kStopping(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "always"})
+	mustCreate(t, a, RunOptions{Name: "job", Image: "busybox", RestartPolicy: "no"})
+	for _, name := range []string{"web", "job"} {
+		if err := a.StartContainer(ctx, name); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.annotate(ctx, name, map[string]*string{"d2k.portainer.io/restarting": ptr("2026-01-01T00:00:00Z")}); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.StopContainer(ctx, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	go a.RecordEvents(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		web, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "job", metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, webMarked := web.Annotations["d2k.portainer.io/restarting"]
+		_, jobMarked := job.Annotations["d2k.portainer.io/restarting"]
+		if *web.Spec.Replicas == 1 && !webMarked && !jobMarked {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("web replicas = %d, restarting web %v, job %v; want 1, the restarts finished", *web.Spec.Replicas, webMarked, jobMarked)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	job, err := a.InspectContainer(ctx, "job")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.State.Status != "exited" {
+		t.Errorf("job status = %q, want exited", job.State.Status)
+	}
+}
