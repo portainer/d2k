@@ -6,6 +6,7 @@ import (
 	"maps"
 	"sync"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -138,10 +139,16 @@ func TestVolumeNamesSharingAPVCName(t *testing.T) {
 }
 
 // Recreating a volume while its old PVC is still terminating (Kubernetes
-// deletion is not instant, unlike Docker's local driver) must not silently
-// hand back the dying PVC: a container that then mounts it would be
-// scheduled against a claim that is about to vanish for good, and never run.
+// deletion is not instant, unlike Docker's local driver) that never clears
+// still gets a retryable conflict, not a hang: a container that mounted the
+// dying PVC would be scheduled against a claim about to vanish for good,
+// and never run. volumeTerminationTimeout is shortened so the test doesn't
+// take the real 30s.
 func TestCreateVolumeWhileOldOneIsTerminating(t *testing.T) {
+	orig := volumeTerminationTimeout
+	volumeTerminationTimeout = 50 * time.Millisecond
+	defer func() { volumeTerminationTimeout = orig }()
+
 	now := metav1.Now()
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: "data", Namespace: testNamespace,
@@ -152,7 +159,31 @@ func TestCreateVolumeWhileOldOneIsTerminating(t *testing.T) {
 	}}
 	a, _ := newTestAdapter(t, pvc)
 	if _, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data"}); !errdefs.IsConflict(err) {
-		t.Fatalf("create while the old PVC is terminating = %v, want a retryable conflict, not success with the dying PVC", err)
+		t.Fatalf("create while the old PVC never clears = %v, want a retryable conflict, not success with the dying PVC", err)
+	}
+}
+
+// Recreating a volume right after removing it (docker rm -f; docker volume
+// rm; docker run -v) is the realistic case: the old PVC is terminating only
+// because its pod hasn't finished shutting down yet, and clears on its own
+// within the pod's termination grace period. createPVC must wait that out
+// and succeed, not hand the caller a conflict Docker would never raise.
+func TestCreateVolumeWaitsForTerminatingPVCThenSucceeds(t *testing.T) {
+	now := metav1.Now()
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data", Namespace: testNamespace,
+		Labels:            managedLabels("data"),
+		Annotations:       map[string]string{"d2k.portainer.io/docker-name": "data"},
+		DeletionTimestamp: &now,
+		Finalizers:        []string{"kubernetes.io/pvc-protection"},
+	}}
+	a, client := newTestAdapter(t, pvc)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = client.CoreV1().PersistentVolumeClaims(testNamespace).Delete(context.Background(), "data", metav1.DeleteOptions{})
+	}()
+	if _, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data"}); err != nil {
+		t.Fatalf("create once the old PVC finishes terminating = %v, want success", err)
 	}
 }
 
