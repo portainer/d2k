@@ -495,20 +495,37 @@ func healthProbe(h *container.HealthConfig) (*corev1.Probe, []string) {
 }
 
 // gpuCount returns the GPUs requested with --gpus. Docker sends Count=-1 for
-// "all"; Kubernetes device plugins need a count, so that is one GPU.
+// "all"; Kubernetes device plugins need a count, so that is one GPU. Count=0
+// with DeviceIDs set means specific devices, not zero.
 func gpuCount(requests []container.DeviceRequest) int {
 	count := 0
 	for _, dr := range requests {
-		if !slices.ContainsFunc(dr.Capabilities, func(caps []string) bool { return slices.Contains(caps, "gpu") }) {
+		if !isGPUDeviceRequest(dr) {
 			continue
 		}
-		if dr.Count < 0 {
+		switch {
+		case dr.Count < 0:
 			count = max(count, 1)
-		} else {
+		case dr.Count == 0:
+			count = max(count, len(dr.DeviceIDs))
+		default:
 			count = max(count, dr.Count)
 		}
 	}
 	return count
+}
+
+// isGPUDeviceRequest reports whether a DeviceRequest is a GPU request, the
+// way moby's daemon.handleDevice (daemon/devices.go) itself decides it: a
+// request naming the "nvidia" driver is handled by it regardless of
+// Capabilities (Portainer's create form always sets Driver but never adds
+// the "gpu" capability); one with no driver is matched by capability, the
+// way Docker CLI's own --gpus always does ("gpu" always present).
+func isGPUDeviceRequest(dr container.DeviceRequest) bool {
+	if dr.Driver != "" {
+		return dr.Driver == "nvidia"
+	}
+	return slices.ContainsFunc(dr.Capabilities, func(caps []string) bool { return slices.Contains(caps, "gpu") })
 }
 
 // nativeSettings translates the settings Kubernetes has a pod or container
