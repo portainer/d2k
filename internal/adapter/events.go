@@ -181,7 +181,11 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context, state *eventS
 				return fmt.Errorf("deployment watch closed")
 			}
 			if d, isDeployment := e.Object.(*appsv1.Deployment); isDeployment {
-				msgs = deploymentEvents(state.known, e.Type, d, time.Now())
+				now := time.Now()
+				if e.Type == watch.Deleted {
+					msgs = state.removedEvents(d.Name, now)
+				}
+				msgs = append(msgs, deploymentEvents(state.known, e.Type, d, now)...)
 			}
 		case e, ok := <-podWatch.ResultChan():
 			if !ok {
@@ -313,6 +317,7 @@ func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []
 	}
 	msgs = append(msgs, changes...)
 	for _, d := range gone {
+		msgs = append(msgs, s.removedEvents(d.Name, now)...)
 		msgs = append(msgs, deploymentEvents(s.known, watch.Deleted, d, now)...)
 	}
 	goneVolumes := maps.Clone(s.volumes)
@@ -453,6 +458,26 @@ func (s *eventState) restartEvents(app, pod string, runs, died bool, now time.Ti
 		}
 	}
 	return nil
+}
+
+// removedEvents reports the death of a container removed while it runs,
+// as docker rm -f kills it, with 137, before it removes it (D2K-072): its
+// Deployment is gone before its pod ends, and the pod's end is then no
+// longer reported.
+func (s *eventState) removedEvents(app string, now time.Time) []events.Message {
+	d, ok := s.known[app]
+	delete(s.died, app)
+	runs := false
+	for p, a := range s.running {
+		if a == app {
+			runs = true
+			delete(s.running, p)
+		}
+	}
+	if !ok || !runs {
+		return nil
+	}
+	return []events.Message{containerEvent(d, events.ActionDie, now, map[string]string{"exitCode": "137"})}
 }
 
 // containerRuns reports whether the pod's container is running, in a pod
