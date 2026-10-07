@@ -111,6 +111,36 @@ func TestRemoveNetworkMissingIsNotAnError(t *testing.T) {
 	}
 }
 
+// Docker refuses to remove a network a container is still joined to
+// ("has active endpoints"). RemoveNetwork removed the record unconditionally,
+// so a container's NetworkSettings kept listing a network that
+// InspectNetwork then reported as gone. Found on a network built on the
+// upgrade lane's pre-night estate, but the gap is in RemoveNetwork itself,
+// not specific to pre-upgrade objects.
+func TestRemoveNetworkRefusesWhileAContainerIsJoined(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+	if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "demo_back"}); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Networks: []string{"demo_back"}})
+
+	if err := a.RemoveNetwork(ctx, "demo_back"); !errdefs.IsForbidden(err) {
+		t.Fatalf("remove while a container is joined = %v, want forbidden (has active endpoints)", err)
+	}
+	if _, err := a.InspectNetwork(ctx, "demo_back"); err != nil {
+		t.Fatalf("network removed despite a container still joined: inspect = %v", err)
+	}
+
+	// Once the container is gone, removal succeeds as normal.
+	if err := a.RemoveContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.RemoveNetwork(ctx, "demo_back"); err != nil {
+		t.Fatalf("remove after the container left = %v, want nil", err)
+	}
+}
+
 func containsNetwork(list []NetworkSummary, name string) bool {
 	for _, n := range list {
 		if n.Name == name {
