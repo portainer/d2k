@@ -16,7 +16,6 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
-	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -430,11 +429,7 @@ func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name str
 	if err := a.annotate(ctx, resolved, map[string]*string{types.AnnotationRestarting: ptr(time.Now().UTC().Format(time.RFC3339Nano))}); err != nil {
 		return fmt.Errorf("unable to restart container %q: %w", name, err)
 	}
-	defer func() {
-		if err := a.annotate(ctx, resolved, map[string]*string{types.AnnotationRestarting: nil}); err != nil && !errors.IsNotFound(err) {
-			log.Warn().Str("context", "KubernetesAdapter").Str("container", resolved).Err(err).Msg("Unable to clear the restarting mark")
-		}
-	}()
+	defer a.clearRestarting(ctx, resolved)
 	if err := a.StopContainer(ctx, name); err != nil {
 		return err
 	}

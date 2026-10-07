@@ -223,15 +223,31 @@ func (a *KubernetesDockerAdapter) finishRestarts(ctx context.Context, deps []app
 		if _, restarting := d.Annotations[types.AnnotationRestarting]; !restarting {
 			continue
 		}
-		if !runsAsPod(d) && d.Labels[types.LabelSwarmManagedBy] != types.LabelSwarmManagedByValue {
+		if runsAsPod(d) || d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+			a.clearRestarting(ctx, d.Name)
+			continue
+		}
+		go func() {
+			// As the restart does, start it once the run its stop ended is
+			// gone: the two would share the container's volumes.
+			grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
+			if g := d.Spec.Template.Spec.TerminationGracePeriodSeconds; g != nil {
+				grace = *g
+			}
+			a.waitForPodsGone(ctx, d.Name, time.Duration(grace+30)*time.Second)
 			if err := a.scaleDeployment(ctx, d.Name, 1); err != nil {
 				log.Warn().Str("context", "KubernetesAdapter").Str("container", d.Name).Err(err).Msg("Unable to finish a restart")
-				continue
+				return
 			}
-		}
-		if err := a.annotate(ctx, d.Name, map[string]*string{types.AnnotationRestarting: nil}); err != nil && !apierrors.IsNotFound(err) {
-			log.Warn().Str("context", "KubernetesAdapter").Str("container", d.Name).Err(err).Msg("Unable to clear the restarting mark")
-		}
+			a.clearRestarting(ctx, d.Name)
+		}()
+	}
+}
+
+// clearRestarting clears the container's restarting mark.
+func (a *KubernetesDockerAdapter) clearRestarting(ctx context.Context, name string) {
+	if err := a.annotate(ctx, name, map[string]*string{types.AnnotationRestarting: nil}); err != nil && !apierrors.IsNotFound(err) {
+		log.Warn().Str("context", "KubernetesAdapter").Str("container", name).Err(err).Msg("Unable to clear the restarting mark")
 	}
 }
 
