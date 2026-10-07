@@ -57,7 +57,7 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `domainname` | Not supported |  |
 | `mac_address` | Not supported | The cluster network assigns pod addresses. |
 | `platform` | Not supported | The node's container runtime picks the image platform. |
-| `pull_policy` | Compose | Compose decides whether to pull; d2k's pull is a no-op and the kubelet pulls the image (`IfNotPresent`). |
+| `pull_policy` | Compose | Compose decides whether to pull; d2k's pull is a no-op and the kubelet pulls the image (`IfNotPresent`). Compose prints a `Pulling`/`Pulled` progress line either way; older compose releases (tested: v2.40.3) print it per-service instead of per-image. |
 | `pull_refresh_after` | Compose | As `pull_policy`. |
 | `profiles` | Compose |  |
 | `extends` | Compose |  |

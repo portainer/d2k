@@ -235,9 +235,15 @@ func (a *KubernetesDockerAdapter) finishRestarts(ctx context.Context, deps []app
 				grace = *g
 			}
 			a.waitForPodsGone(ctx, d.Name, time.Duration(grace+30)*time.Second)
-			if err := a.scaleDeployment(ctx, d.Name, 1); err != nil {
-				log.Warn().Str("context", "KubernetesAdapter").Str("container", d.Name).Err(err).Msg("Unable to finish a restart")
+			// The d2k a rollout replaces may have finished it meanwhile.
+			now, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, d.Name, metav1GetOptions())
+			if err != nil || now.Annotations[types.AnnotationRestarting] != d.Annotations[types.AnnotationRestarting] {
 				return
+			}
+			// A start that fails leaves the container stopped, as a failed
+			// docker start does: it is no longer restarting either way.
+			if err := a.StartContainer(ctx, d.Name); err != nil {
+				log.Warn().Str("context", "KubernetesAdapter").Str("container", d.Name).Err(err).Msg("Unable to finish a restart")
 			}
 			a.clearRestarting(ctx, d.Name)
 		}()

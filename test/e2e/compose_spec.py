@@ -144,7 +144,8 @@ CASES = [
     case("mac_address", NO, "The cluster network assigns pod addresses.", "mac_address: 02:42:ac:11:00:02", warns("MacAddress")),
     case("platform", NO, "The node's container runtime picks the image platform.", "platform: linux/arm64", warns('platform "linux/arm64"')),
     case("pull_policy", CLIENT, "Compose decides whether to pull; d2k's pull is a no-op and the kubelet pulls the image "
-         "(`IfNotPresent`).", "pull_policy: always", ok()),
+         "(`IfNotPresent`). Compose prints a `Pulling`/`Pulled` progress line either way; older compose releases "
+         "(tested: v2.40.3) print it per-service instead of per-image.", "pull_policy: always", ok()),
     case("pull_refresh_after", CLIENT, "As `pull_policy`.", "pull_policy: daily", ok()),
     case("profiles", CLIENT, "", "profiles: [debug]", ("absent", None), extra=DB),
     case("extends", CLIENT, "", "extends: {file: ./base.yaml, service: base}",
@@ -395,6 +396,10 @@ FILES = {
     "base.yaml": "services:\n  base:\n    image: nginx:alpine\n    environment: [BASE=1]\n",
 }
 NOISE = ("Network ", "Volume ", "Container ", "Image ", "nginx:alpine: not pulled")
+# Pull progress lines: compose v5 prints "Image <ref> Pulling"/"Pulled" (caught by the
+# "Image " prefix above); compose v2.40.3 prints "<service> Pulling"/"<service> Pulled"
+# instead, so catch those by suffix regardless of the service name.
+PULL_NOISE = (" Pulling", " Pulled")
 
 
 def compose(cwd, project, *args, timeout=150):
@@ -418,7 +423,7 @@ def run(c):
             "services:\n  web:\n    image: nginx:alpine\n    " + c["service"] + "\n" + c["extra"] + c["top"] + "\n")
         up = compose(d, project, "up", "-d")
         out = [l.strip() for l in (up.stdout + up.stderr).splitlines()
-               if l.strip() and not l.strip().startswith(NOISE)]
+               if l.strip() and not l.strip().startswith(NOISE) and not l.strip().endswith(PULL_NOISE)]
         got = subprocess.run(["kubectl", "--context", CONTEXT, "-n", "d2k", "get", "deploy", "-o", "json",
                               "-l", f"com.docker.compose.project={project},com.docker.compose.service=web"],
                              capture_output=True, text=True)
