@@ -98,8 +98,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
-	if !ctr.State.Running {
-		httputils.WriteErrorFrom(w, errdefs.Conflict(fmt.Errorf("container %s is not running", ctr.ID)))
+	if err := execable(ctr); err != nil {
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -153,6 +153,17 @@ func (h *Handler) runningContainer(ctx context.Context, name string) (*container
 	}
 }
 
+// execable refuses a container that cannot run an exec, as Docker does.
+func execable(ctr *container.InspectResponse) error {
+	if !ctr.State.Running {
+		return errdefs.Conflict(fmt.Errorf("container %s is not running", ctr.ID))
+	}
+	if ctr.State.Restarting {
+		return errdefs.Conflict(fmt.Errorf("container %s is restarting, wait until the container is running", ctr.ID))
+	}
+	return nil
+}
+
 // Start handles POST /exec/{id}/start.
 func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 	inst, ok := h.lookup(w, r)
@@ -171,8 +182,8 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
-	if !ctr.State.Running {
-		httputils.WriteErrorFrom(w, errdefs.Conflict(fmt.Errorf("container %s is not running", ctr.ID)))
+	if err := execable(ctr); err != nil {
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	if !inst.markStarted() {

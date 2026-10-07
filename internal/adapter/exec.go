@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -35,16 +36,9 @@ type ExecStreams struct {
 // ExecContainer runs a command in the container's pod and returns its exit
 // code. An error means the command could not be run or streamed.
 func (a *KubernetesDockerAdapter) ExecContainer(ctx context.Context, opts ExecOptions, streams ExecStreams) (int, error) {
-	resolved, err := a.resolveDeploymentName(ctx, opts.Name)
+	pod, err := a.runningPod(ctx, opts.Name)
 	if err != nil {
 		return 0, err
-	}
-	pod, err := a.currentPodForDeployment(ctx, resolved)
-	if err != nil && !errors.Is(err, errNoPod) {
-		return 0, err
-	}
-	if pod == nil || pod.Status.Phase != corev1.PodRunning {
-		return 0, errdefs.Conflict(fmt.Errorf("container %s is not running", opts.Name))
 	}
 
 	// Kubernetes needs at least one stream; Docker runs execs with none, as
@@ -90,16 +84,9 @@ func (a *KubernetesDockerAdapter) ExecContainer(ctx context.Context, opts ExecOp
 // container, as `kubectl attach` does. It returns when the process ends or
 // the streams close.
 func (a *KubernetesDockerAdapter) AttachContainer(ctx context.Context, name string, tty bool, streams ExecStreams) error {
-	resolved, err := a.resolveDeploymentName(ctx, name)
+	pod, err := a.runningPod(ctx, name)
 	if err != nil {
 		return err
-	}
-	pod, err := a.currentPodForDeployment(ctx, resolved)
-	if err != nil && !errors.Is(err, errNoPod) {
-		return err
-	}
-	if pod == nil || pod.Status.Phase != corev1.PodRunning {
-		return errdefs.Conflict(fmt.Errorf("container %s is not running", name))
 	}
 
 	req := a.client.CoreV1().RESTClient().Post().
@@ -126,4 +113,26 @@ func (a *KubernetesDockerAdapter) AttachContainer(ctx context.Context, name stri
 		Tty:               tty,
 		TerminalSizeQueue: streams.Resize,
 	})
+}
+
+// runningPod returns the pod that runs the named container. A pod
+// Kubernetes replaced is the container's run until the new pod's container
+// starts (containerState): wait for that, rather than refuse a container
+// inspect reports running.
+func (a *KubernetesDockerAdapter) runningPod(ctx context.Context, name string) (*corev1.Pod, error) {
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	pod, err := a.currentPodForDeployment(ctx, resolved)
+	if err != nil && !errors.Is(err, errNoPod) {
+		return nil, err
+	}
+	if pod != nil && pod.Status.Phase != corev1.PodRunning {
+		pod = a.waitForContainerStarted(ctx, pod, 30*time.Second)
+	}
+	if pod == nil || pod.Status.Phase != corev1.PodRunning {
+		return nil, errdefs.Conflict(fmt.Errorf("container %s is not running", name))
+	}
+	return pod, nil
 }
