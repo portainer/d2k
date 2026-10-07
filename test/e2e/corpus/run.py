@@ -15,6 +15,7 @@ Usage:
     test/e2e/corpus/run.py            every app
     test/e2e/corpus/run.py n8n minio  only the named apps (directory names)
 """
+import http.cookiejar
 import json
 import os
 import shutil
@@ -24,6 +25,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,8 +41,8 @@ def sh(*args, timeout=60, env=ENV, cwd=None, check=False):
     return subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
 
 
-def compose(cwd, project, *args, timeout=240):
-    return sh("docker", "compose", "-p", project, *args, cwd=cwd, timeout=timeout)
+def compose(cwd, project, *args, timeout=240, env=ENV):
+    return sh("docker", "compose", "-p", project, *args, cwd=cwd, timeout=timeout, env=env)
 
 
 def kubectl(*args, timeout=60):
@@ -77,25 +79,75 @@ def http_ok(port, path, want, timeout=5):
         return False
 
 
+def http_with_jar(port, path, cookiejar, fields=None, timeout=10):
+    """GET (fields=None) or POST, through a cookiejar an earlier call's Set-Cookie
+    feeds into the next call's request -- a real browser's session, not one isolated
+    request each time."""
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookiejar))
+    data = urllib.parse.urlencode(fields).encode() if fields is not None else None
+    req = urllib.request.Request(f"http://localhost:{port}{path}", data=data, headers={"User-Agent": "corpus"})
+    with opener.open(req, timeout=timeout) as r:
+        return r.status, r.geturl(), r.read().decode("utf-8", "replace")
+
+
 class PortForward:
     """A published port becomes a LoadBalancer Service, which a bare kind cluster never
     assigns an external IP to (no cloud load balancer), so the app's host:// ports are not
     reachable from the test runner the way they would be on real Docker. `kubectl
     port-forward` to the pod reaches the app the same way a real operator would from outside
-    the cluster, and does not depend on kind's node-to-host port mapping."""
+    the cluster, and does not depend on kind's node-to-host port mapping.
 
-    def __init__(self, project, service, local_port, remote_port):
+    `compose up -d` returns as soon as the container is created, well before its pod is
+    Running (docker compose does not wait for a health check unless the service declares
+    one). `kubectl port-forward deploy/<x>` run right after that exits immediately with
+    "pod is not running. Current status=Pending" instead of waiting, so a single attempt
+    started too early fails for good. Retry starting it until the deadline.
+
+    A compose "Recreate" (e.g. after a label change) makes a Deployment/Service that keep
+    whatever throwaway name docker compose's create-then-rename dance first gave them --
+    `docker rename` only patches an annotation (internal/adapter/container.go
+    RenameContainer), it never renames the Deployment -- so `<project>-<service>-1` can
+    stop existing even though `docker ps` still shows the container by that name. Resolve
+    the target by the compose labels a rename never touches instead of assuming the name."""
+
+    def __init__(self, project, service, local_port, remote_port, ready_timeout=90):
+        self.project, self.service = project, service
         self.local_port, self.remote_port = local_port, remote_port
-        self.target = f"deploy/{project}-{service}-1"
+        self.ready_timeout = ready_timeout
         self.proc = None
 
-    def __enter__(self):
+    def _resolve(self):
+        out = kubectl("-n", NS, "get", "deploy", "-l",
+                      f"com.docker.compose.project={self.project},com.docker.compose.service={self.service}",
+                      "-o", "name")
+        names = [l for l in out.stdout.splitlines() if l.strip()]
+        return names[0] if names else f"deploy/{self.project}-{self.service}-1"
+
+    def _spawn(self):
+        target = self._resolve()
         self.proc = subprocess.Popen(
-            ["kubectl", "--context", CONTEXT, "-n", NS, "port-forward", self.target,
+            ["kubectl", "--context", CONTEXT, "-n", NS, "port-forward", target,
              f"{self.local_port}:{self.remote_port}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        eventually(20, lambda: http_ok(self.local_port, "/", "") or self._listening())
-        return self
+
+    def __enter__(self):
+        deadline = time.time() + self.ready_timeout
+        while True:
+            self._spawn()
+            while self.proc.poll() is None and not self._listening() and time.time() < deadline:
+                time.sleep(0.5)
+            if self.proc.poll() is None or time.time() >= deadline:
+                return self  # listening, or out of time either way
+            time.sleep(1)  # the forward exited (pod not Running yet) -- retry it
+
+    def ensure_up(self):
+        """kubectl port-forward exits -- not just logs and keeps going -- the moment a
+        proxied connection fails while the app inside is still starting up ("lost
+        connection to pod"), so the forward can die well before the app, and well before
+        a caller polling it for up to an app's whole startup budget would expect. Callers
+        doing their own polling loop call this each iteration to respawn it."""
+        if self.proc.poll() is not None:
+            self._spawn()
 
     def _listening(self):
         try:
@@ -147,7 +199,7 @@ def default_recreate(app, r):
     try:
         with open(path, "w") as f:
             f.write(changed)
-        up = compose(app["dir"], app["project"], "up", "-d")
+        up = compose(app["dir"], app["project"], "up", "-d", env=dict(ENV, **app.get("env", {})))
         r.step("compose up after a label change recreates the service", up.returncode == 0, up.stderr)
         check_http(r, app["project"], app["http"][:1], 90, "after the recreate")
     finally:
@@ -175,7 +227,10 @@ CORPUS = [
                ("grafana", 18184, 3000, "/api/health", '"database": "ok"')], up_timeout=120),
     dict(name="traefik-whoami", dir=os.path.join(HERE, "traefik-whoami"), project="corpus-traefik",
          main_service="whoami", services=["traefik", "whoami"],
-         http=[("traefik", 18185, 80, "/", "Hostname:")], up_timeout=60),
+         http=[("traefik", 18185, 80, "/", "Hostname:")], up_timeout=60,
+         # traefik/whoami:v1.10 is a scratch image with no shell or coreutils; exec into
+         # traefik (alpine-based) instead, same as a real operator would have to.
+         exec_service="traefik"),
     dict(name="paperless-ngx", dir=os.path.join(HERE, "paperless-ngx"), project="corpus-paperless",
          main_service="webserver", services=["webserver", "db", "broker"],
          http=[("webserver", 18187, 8000, "/api/", "correspondents")], up_timeout=300),
@@ -206,27 +261,105 @@ CORPUS = [
 def check_http(r, project, app_http, timeout, label):
     ok = True
     for service, local_port, remote_port, path, want in app_http:
-        with PortForward(project, service, local_port, remote_port):
-            this_ok = eventually(timeout, lambda p=local_port, h=path, w=want: http_ok(p, h, w))
+        with PortForward(project, service, local_port, remote_port) as pf:
+            def probe(p=local_port, h=path, w=want, pf=pf):
+                pf.ensure_up()
+                return http_ok(p, h, w)
+            this_ok = eventually(timeout, probe)
         ok = r.step(f"{label}: {path} answers as expected", this_ok) and ok
     return ok
 
 
+WP_ADMIN = dict(user="admin", password="CorpusPass123!", email="admin@example.com")
+
+
+def provision_wordpress(r, project, http_entry, timeout):
+    """A fresh wordpress image is never installed: wp-login.php redirects to the
+    install wizard until someone completes it, exactly like a real user's first visit.
+    Drive that wizard the way a browser would, so later checks see a working site
+    (and can log in), not a perpetual installer redirect."""
+    service, local_port, remote_port, _, _ = http_entry
+    jar = http.cookiejar.CookieJar()
+
+    def install_and_login(pf):
+        pf.ensure_up()
+        http_with_jar(local_port, "/wp-admin/install.php?step=1", jar, {"language": "en_US"})
+        _, _, body = http_with_jar(local_port, "/wp-admin/install.php?step=2", jar, {
+            "weblog_title": "Corpus Test", "user_name": WP_ADMIN["user"],
+            "admin_password": WP_ADMIN["password"], "admin_password2": WP_ADMIN["password"],
+            "pw_weak": "1", "admin_email": WP_ADMIN["email"],
+            "Submit": "Install WordPress", "language": "",
+        })
+        if "Success!" not in body:
+            return False
+        # wp-login.php refuses to log in without the wordpress_test_cookie a plain GET
+        # of the login page sets first -- a real browser always has it by the time it
+        # submits the form.
+        http_with_jar(local_port, "/wp-login.php", jar)
+        _, url, _ = http_with_jar(local_port, "/wp-login.php", jar, {
+            "log": WP_ADMIN["user"], "pwd": WP_ADMIN["password"], "wp-submit": "Log In",
+            "redirect_to": "/wp-admin/", "testcookie": "1",
+        })
+        return "wp-admin" in url
+
+    with PortForward(project, service, local_port, remote_port) as pf:
+        ok = eventually(timeout, lambda: install_and_login(pf))
+    r.step("WordPress install wizard completes and the admin can log in", ok)
+
+
 def project_objects(kind, project):
-    out = kubectl("-n", NS, "get", kind, "-l", f"com.docker.compose.project={project}", "-o", "name")
-    return [l for l in out.stdout.splitlines() if l.strip()]
+    """Objects d2k made for this project, for this one kind. Only Deployments and PVCs
+    carry `com.docker.compose.project`; Pods carry `d2k.portainer.io/compose-project`
+    instead, and per-container Services carry neither -- and a container recreated via
+    docker's create-then-rename dance keeps the Deployment/Service names it was first
+    created under forever (docker rename only patches an annotation, see
+    internal/adapter/container.go RenameContainer), which for a compose "Recreate" is a
+    throwaway hash, not `<project>-<service>-N`. `d2k.portainer.io/managed-by=d2k` (the
+    label env/reset.sh itself cleans up by) is the one label every kind carries; match
+    either the project's usual naming or its compose labels, which a rename never touches."""
+    out = kubectl("-n", NS, "get", kind, "-l", "d2k.portainer.io/managed-by=d2k", "-o", "json")
+    try:
+        items = json.loads(out.stdout).get("items", [])
+    except ValueError:
+        return []
+    found = []
+    for it in items:
+        meta = it.get("metadata", {})
+        name = meta.get("name", "")
+        labels = meta.get("labels", {}) or {}
+        if (labels.get("com.docker.compose.project") == project
+                or name.startswith(f"{project}-") or name == f"compose-{project}"):
+            found.append(name)
+    return found
 
 
 def run_app(app):
     r = Result(app["name"])
     print(f"== {app['name']} ({app['project']})")
     dir_, project = app["dir"], app["project"]
+    try:
+        run_app_body(app, r, dir_, project)
+    except subprocess.TimeoutExpired as e:
+        r.step(f"timed out: {e.cmd}", False, str(e))
+    except Exception as e:
+        r.step(f"crashed: {type(e).__name__}", False, str(e))
+    finally:
+        cleanup = sh("docker", "compose", "-p", project, "down", "-v", "-t", "5",
+                     cwd=dir_, env=dict(ENV, **app.get("env", {})), timeout=90)
+        if cleanup.returncode != 0:
+            print(f"         cleanup down -v failed: {cleanup.stderr.strip()[-400:]}")
+    return r
+
+
+def run_app_body(app, r, dir_, project):
     env = dict(ENV, **app.get("env", {}))
 
     up = sh("docker", "compose", "-p", project, "up", "-d", cwd=dir_, env=env, timeout=app["up_timeout"] + 30)
     if not r.step("compose up", up.returncode == 0, (up.stdout + up.stderr)[-800:]):
-        compose(dir_, project, "down", "-v", "-t", "1", timeout=120)
-        return r
+        return
+
+    if app["name"] == "wordpress-mysql":
+        provision_wordpress(r, project, app["http"][0], app["up_timeout"])
 
     check_http(r, project, app["http"], app["up_timeout"], "HTTP")
 
@@ -240,19 +373,23 @@ def run_app(app):
 
     if "secret_check" in app:
         service, local_port, remote_port, path, want = app["secret_check"]
-        with PortForward(project, service, local_port, remote_port):
-            r.step("the secret from `environment` reached the container",
-                   eventually(30, lambda p=local_port, h=path, w=want: http_ok(p, h, w)))
+        with PortForward(project, service, local_port, remote_port) as pf:
+            def probe(p=local_port, h=path, w=want, pf=pf):
+                pf.ensure_up()
+                return http_ok(p, h, w)
+            r.step("the secret from `environment` reached the container", eventually(30, probe))
 
-    ps = compose(dir_, project, "ps", "--format", "json")
+    # -a: a one-shot init/migration service (restart: "no", already exited 0) is exactly
+    # as real `docker compose ps` without it would drop it, not a d2k thing to check for.
+    ps = compose(dir_, project, "ps", "-a", "--format", "json")
     n_up = len([l for l in ps.stdout.splitlines() if l.strip()])
     r.step("compose ps lists the project's containers", n_up == len(app["services"]), ps.stdout)
 
     logs = compose(dir_, project, "logs", app["main_service"])
     r.step("compose logs returns output", bool(logs.stdout.strip()) or bool(logs.stderr.strip()))
 
-    main_ctr = f"{project}-{app['main_service']}-1"
-    ex = sh("docker", "exec", main_ctr, "sh", "-c", "echo corpus-exec-ok")
+    exec_ctr = f"{project}-{app.get('exec_service', app['main_service'])}-1"
+    ex = sh("docker", "exec", exec_ctr, "sh", "-c", "echo corpus-exec-ok")
     r.step("exec runs in the main service's container", ex.returncode == 0 and "corpus-exec-ok" in ex.stdout)
 
     down = sh("docker", "compose", "-p", project, "down", "-t", "5", cwd=dir_, env=env, timeout=90)
