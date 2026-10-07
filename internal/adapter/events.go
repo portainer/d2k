@@ -209,10 +209,47 @@ func autoRemoves(known map[string]*appsv1.Deployment, id string) bool {
 	return false
 }
 
+// attachDrain is how long autoRemove waits for a container's attaches to
+// end. An attach ends at most 10 seconds after its container's die event.
+const attachDrain = 15 * time.Second
+
+// Attaching records an attach to the container id until done is called.
+func (a *KubernetesDockerAdapter) Attaching(id string) (done func()) {
+	a.attachesMu.Lock()
+	defer a.attachesMu.Unlock()
+	if a.attaches == nil {
+		a.attaches = map[string]int{}
+	}
+	a.attaches[id]++
+	return func() {
+		a.attachesMu.Lock()
+		defer a.attachesMu.Unlock()
+		if a.attaches[id]--; a.attaches[id] == 0 {
+			delete(a.attaches, id)
+		}
+	}
+}
+
+// attached reports whether the container id has an attach in progress.
+func (a *KubernetesDockerAdapter) attached(id string) bool {
+	a.attachesMu.Lock()
+	defer a.attachesMu.Unlock()
+	return a.attaches[id] > 0
+}
+
 // autoRemove removes a container whose run ended, as Docker does for one
 // created with AutoRemove: unless a restart ended the run, or the container
 // runs again.
 func (a *KubernetesDockerAdapter) autoRemove(ctx context.Context, id string) {
+	// As Docker does, remove it only once its attaches have sent the run's
+	// output (D2K-051): docker run attaches before it starts the container.
+	for deadline := time.Now().Add(attachDrain); a.attached(id) && time.Now().Before(deadline); {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 	if resolved, err := a.resolveDeploymentName(ctx, id); err == nil {
 		if _, restarting := a.restarting.Load(resolved); restarting {
 			return
