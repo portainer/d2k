@@ -26,6 +26,7 @@ func TestRestartingContainerIsNotReportedExited(t *testing.T) {
 	a := adapter.NewWithClient(client, "d2k")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	kubeletRuns(ctx, client)
 	go a.RecordEvents(ctx)
 	h := NewHandler(a)
 
@@ -132,7 +133,7 @@ func kubeletRuns(ctx context.Context, client *fake.Clientset) {
 		go func() {
 			time.Sleep(300 * time.Millisecond)
 			p, err := client.CoreV1().Pods("d2k").Get(ctx, name, metav1.GetOptions{})
-			if err != nil {
+			if err != nil || p.Status.Phase != "" {
 				return
 			}
 			p.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{

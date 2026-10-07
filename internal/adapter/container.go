@@ -423,7 +423,14 @@ func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name str
 	if err := a.StopContainer(ctx, name); err != nil {
 		return err
 	}
-	return a.StartContainer(ctx, name)
+	if err := a.StartContainer(ctx, name); err != nil {
+		return err
+	}
+	// As Docker's restart does, return once the container runs again:
+	// clients that list containers right after, as compose pause and port
+	// do, skip one that is still starting.
+	a.waitUntilRunStarted(ctx, resolved, restartStartTimeout)
+	return nil
 }
 
 // RemoveContainer implements docker rm: deletes the Deployment and its associated Service (if any).
