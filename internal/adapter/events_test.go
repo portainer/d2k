@@ -564,6 +564,50 @@ func TestEventsFinishRestartsCutShortByD2kStopping(t *testing.T) {
 	}
 }
 
+// A restart d2k finishes when it starts is a start like any other: one whose
+// pod Kubernetes refuses to create, as a full pod quota does, leaves the
+// container stopped, not at 1 replica to start by itself once the quota
+// frees (D2K-084), and no longer restarting.
+func TestEventsFinishARestartTheQuotaRefuses(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "always"})
+	if err := a.annotate(ctx, "web", map[string]*string{"d2k.portainer.io/restarting": ptr("2026-01-01T00:00:00Z")}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Status.Conditions = []appsv1.DeploymentCondition{
+		{Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionTrue, Reason: "FailedCreate",
+			Message: `pods "web-6d4b9-x2k8p" is forbidden: exceeded quota: pods, requested: pods=1, used: pods=4, limited: pods=4`},
+	}
+	if _, err := client.AppsV1().Deployments(testNamespace).UpdateStatus(ctx, d, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	go a.RecordEvents(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, marked := d.Annotations["d2k.portainer.io/restarting"]; !marked {
+			if r := replicasOf(d); r != 0 {
+				t.Fatalf("replicas = %d after a finished restart the quota refused, want 0", r)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("still restarting at %d replicas, want the restart finished, stopped", replicasOf(d))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // A restart d2k finishes starts the container again only once the run its
 // stop ended is gone, as the restart itself does: the two never run side by
 // side on the container's volumes (D2K-083).
