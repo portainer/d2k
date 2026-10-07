@@ -887,6 +887,12 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		hostConfig.PortBindings = portMap
 	}
 
+	var stopTimeout *int
+	if grace := d.Spec.Template.Spec.TerminationGracePeriodSeconds; grace != nil {
+		seconds := int(*grace)
+		stopTimeout = &seconds
+	}
+
 	return container.InspectResponse{
 		ID:         containerID(d.UID),
 		Name:       "/" + dockerName(d),
@@ -900,6 +906,9 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		Config: &container.Config{
 			Image:        d.Annotations[types.AnnotationImageRef],
 			User:         user,
+			WorkingDir:   spec.WorkingDir,
+			Hostname:     d.Spec.Template.Spec.Hostname,
+			StopTimeout:  stopTimeout,
 			ExposedPorts: network.PortSet{},
 			Tty:          spec.TTY,
 			OpenStdin:    spec.Stdin,
