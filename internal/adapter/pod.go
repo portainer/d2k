@@ -162,9 +162,18 @@ func (a *KubernetesDockerAdapter) waitForPodsGone(ctx context.Context, deploymen
 	}
 }
 
-// podEnded reports whether the pod's container has exited for good.
+// podEnded reports whether the pod's container has exited for good. The
+// kubelet reports the container terminated, which is the container's die,
+// before it reports the pod's phase.
 func podEnded(p corev1.Pod) bool {
-	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
+	if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
+		return true
+	}
+	s := p.Status.ContainerStatuses
+	if len(s) == 0 || s[0].State.Terminated == nil {
+		return false
+	}
+	return p.Spec.RestartPolicy == corev1.RestartPolicyNever || p.Spec.RestartPolicy == corev1.RestartPolicyOnFailure && s[0].State.Terminated.ExitCode == 0
 }
 
 // annotate sets (or, for nil values, removes) annotations of the Deployment.
