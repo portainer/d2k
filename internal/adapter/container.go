@@ -414,6 +414,9 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 // starts it. As in Docker, the end of the run a restart stops does not
 // remove an AutoRemove container.
 func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name string) error {
+	// As in Docker, a client that goes away does not cancel the restart: a
+	// stop without its start would leave the container stopped (D2K-083).
+	ctx = context.WithoutCancel(ctx)
 	resolved, err := a.resolveDeploymentName(ctx, name)
 	if err != nil {
 		return err
