@@ -153,6 +153,7 @@ docker --context d2k run -d --gpus all --name ml-job pytorch/pytorch:latest
 - Docker sends `--gpus all` as `Count=-1`. d2k treats this as `1` since Kubernetes device plugins require an explicit count. Use `--gpus N` to request more.
 - Only one resource name is supported per d2k instance. Clusters with mixed GPU vendors need separate d2k deployments.
 - Fractional GPUs, MIG slicing, and vendor-specific capability selectors are not parsed — d2k only emits integer counts against a single resource name.
+- `docker inspect` reports the GPU limit as `HostConfig.DeviceRequests` in the form `--gpus N` sends (`Count=N`, capability `gpu`), whatever form created it, so Portainer's Recreate and Duplicate keep the GPUs.
 - The device plugin for your GPU vendor must be installed and healthy on the cluster. d2k does not install or manage it.
 
 ---

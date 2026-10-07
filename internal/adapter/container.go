@@ -508,6 +508,12 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 	}
 
 	result := deploymentToContainerJSON(*d, pods.Items, lbIP)
+	if c := d.Spec.Template.Spec.Containers; a.gpuResourceName != "" && len(c) > 0 {
+		if q, ok := c[0].Resources.Limits[corev1.ResourceName(a.gpuResourceName)]; ok && q.Value() > 0 {
+			// The request docker run --gpus N sends.
+			result.HostConfig.DeviceRequests = []container.DeviceRequest{{Count: int(q.Value()), Capabilities: [][]string{{"gpu"}}}}
+		}
+	}
 	return &result, nil
 }
 
