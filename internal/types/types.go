@@ -70,6 +70,12 @@ const (
 	AnnotationStartedAt = LabelPrefix + "/started-at"
 	AnnotationStoppedAt = LabelPrefix + "/stopped-at"
 
+	// AnnotationRestarting marks a container that docker restart is
+	// restarting, from before its stop until it has started again (RFC 3339
+	// time the restart began). A restart d2k stopping cut short is finished
+	// when it starts.
+	AnnotationRestarting = LabelPrefix + "/restarting"
+
 	// AnnotationNetworks stores the names of the Docker networks a container is
 	// attached to, as JSON. Compose compares them on every `up`.
 	AnnotationNetworks = LabelPrefix + "/networks"

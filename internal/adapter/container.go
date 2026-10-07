@@ -16,6 +16,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
+	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -421,8 +422,16 @@ func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name str
 	if err != nil {
 		return err
 	}
-	a.restarting.Store(resolved, true)
-	defer a.restarting.Delete(resolved)
+	// Recorded on the container, not in d2k: another d2k, as in a rollout,
+	// sees it, and finishes the restart if this one stops before the start.
+	if err := a.annotate(ctx, resolved, map[string]*string{types.AnnotationRestarting: ptr(time.Now().UTC().Format(time.RFC3339Nano))}); err != nil {
+		return fmt.Errorf("unable to restart container %q: %w", name, err)
+	}
+	defer func() {
+		if err := a.annotate(ctx, resolved, map[string]*string{types.AnnotationRestarting: nil}); err != nil && !errors.IsNotFound(err) {
+			log.Warn().Str("context", "KubernetesAdapter").Str("container", resolved).Err(err).Msg("Unable to clear the restarting mark")
+		}
+	}()
 	if err := a.StopContainer(ctx, name); err != nil {
 		return err
 	}
@@ -558,7 +567,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 	// A restart stops the container fully before it starts it again. Docker
 	// starts it again at once, so clients that inspect it on the restart's
 	// die, as compose does, see it running, not exited.
-	if _, restarting := a.restarting.Load(resolved); restarting && result.State.Status == container.StateExited {
+	if _, restarting := d.Annotations[types.AnnotationRestarting]; restarting && result.State.Status == container.StateExited {
 		result.State.Status, result.State.Running, result.State.Restarting = container.StateRestarting, true, true
 	}
 	return &result, nil
