@@ -810,8 +810,9 @@ func TestStopWaitsForThePod(t *testing.T) {
 	}
 }
 
-// cancelAwareClient fails Deployment deletes made with a cancelled context,
-// as client-go does; the fake clientset ignores the context.
+// cancelAwareClient fails Deployment deletes and updates made with a
+// cancelled context, as client-go does; the fake clientset ignores the
+// context.
 type cancelAwareClient struct{ *fake.Clientset }
 
 func (c cancelAwareClient) AppsV1() appsv1client.AppsV1Interface {
@@ -833,6 +834,40 @@ func (d cancelAwareDeployments) Delete(ctx context.Context, name string, opts me
 		return err
 	}
 	return d.DeploymentInterface.Delete(ctx, name, opts)
+}
+
+func (d cancelAwareDeployments) Update(ctx context.Context, dep *appsv1.Deployment, opts metav1.UpdateOptions) (*appsv1.Deployment, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return d.DeploymentInterface.Update(ctx, dep, opts)
+}
+
+// A client that goes away during docker restart, as Ctrl-C does, does not
+// leave the container stopped: as in Docker, the restart completes (D2K-083).
+func TestRestartCompletesWhenTheClientGoesAway(t *testing.T) {
+	_, client := newTestAdapter(t)
+	a := NewWithClient(cancelAwareClient{client}, testNamespace)
+	mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: "always"})
+	if err := a.StartContainer(context.Background(), "db"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client.PrependReactor("update", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if d := action.(k8stesting.UpdateAction).GetObject().(*appsv1.Deployment); *d.Spec.Replicas == 0 {
+			cancel()
+		}
+		return false, nil, nil
+	})
+	_ = a.RestartContainer(ctx, "db")
+	d, err := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "db", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *d.Spec.Replicas != 1 {
+		t.Fatalf("replicas = %d after the restart, want 1", *d.Spec.Replicas)
+	}
 }
 
 // A client that goes away while its container is created, as Ctrl-C on
