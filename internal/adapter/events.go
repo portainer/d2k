@@ -79,9 +79,10 @@ func (a *KubernetesDockerAdapter) SubscribeEvents() ([]events.Message, <-chan ev
 func (a *KubernetesDockerAdapter) RecordEvents(ctx context.Context) {
 	state := &eventState{
 		known:        map[string]*appsv1.Deployment{},
-		restarts:     map[string]int32{},
 		terminations: map[string]int32{},
 		podApp:       map[string]string{},
+		running:      map[string]string{},
+		died:         map[string]death{},
 		volumes:      map[string]bool{},
 	}
 	for ctx.Err() == nil {
@@ -101,10 +102,17 @@ func (a *KubernetesDockerAdapter) RecordEvents(ctx context.Context) {
 type eventState struct {
 	listed       bool
 	known        map[string]*appsv1.Deployment
-	restarts     map[string]int32
 	terminations map[string]int32
 	podApp       map[string]string
+	running      map[string]string // app of each pod whose container runs
+	died         map[string]death  // last death of each container, by app, until it runs again
 	volumes      map[string]bool
+}
+
+// death is a container's death: the pod it died in, and when.
+type death struct {
+	pod string
+	at  time.Time
 }
 
 // watchEvents lists the current state, reporting what changed since the
@@ -173,14 +181,20 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context, state *eventS
 				return fmt.Errorf("deployment watch closed")
 			}
 			if d, isDeployment := e.Object.(*appsv1.Deployment); isDeployment {
-				msgs = deploymentEvents(state.known, e.Type, d, time.Now())
+				now := time.Now()
+				if e.Type == watch.Deleted {
+					msgs = state.removedEvents(d.Name, now)
+				}
+				msgs = append(msgs, deploymentEvents(state.known, e.Type, d, now)...)
 			}
 		case e, ok := <-podWatch.ResultChan():
 			if !ok {
 				return fmt.Errorf("pod watch closed")
 			}
 			if p, isPod := e.Object.(*corev1.Pod); isPod {
-				msgs = podEvents(state.known, state.restarts, state.terminations, state.podApp, e.Type, p, time.Now())
+				now := time.Now()
+				msgs = podEvents(state.known, state.terminations, state.podApp, e.Type, p, now)
+				msgs = append(msgs, state.restartEvents(p.Labels["app"], p.Name, e.Type != watch.Deleted && containerRuns(p), len(msgs) > 0, now)...)
 			}
 		case e, ok := <-pvcWatch.ResultChan():
 			if !ok {
@@ -286,7 +300,9 @@ func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []
 	listedPods := map[string]bool{}
 	for i := range pods {
 		listedPods[pods[i].Name] = true
-		msgs = append(msgs, podEvents(s.known, s.restarts, s.terminations, s.podApp, watch.Modified, &pods[i], now)...)
+		died := podEvents(s.known, s.terminations, s.podApp, watch.Modified, &pods[i], now)
+		msgs = append(msgs, died...)
+		msgs = append(msgs, s.restartEvents(pods[i].Labels["app"], pods[i].Name, containerRuns(&pods[i]), len(died) > 0, now)...)
 	}
 	for name, app := range s.podApp {
 		if listedPods[name] {
@@ -295,12 +311,13 @@ func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []
 		// The pod disappeared while nothing watched: a relist across a watch
 		// restart (D2K-021) sees it gone rather than a Deleted event.
 		msgs = append(msgs, podLostEvent(s.known, s.terminations, app, name, now)...)
-		delete(s.restarts, name)
+		msgs = append(msgs, s.restartEvents(app, name, false, false, now)...)
 		delete(s.terminations, name)
 		delete(s.podApp, name)
 	}
 	msgs = append(msgs, changes...)
 	for _, d := range gone {
+		msgs = append(msgs, s.removedEvents(d.Name, now)...)
 		msgs = append(msgs, deploymentEvents(s.known, watch.Deleted, d, now)...)
 	}
 	goneVolumes := maps.Clone(s.volumes)
@@ -357,26 +374,23 @@ func deploymentEvents(known map[string]*appsv1.Deployment, kind watch.EventType,
 	return nil
 }
 
-// podEvents reports a container's process dying. A Deployment's pod shows
-// it as its restart count going up; a container's own pod (restart policy
-// "no" or "on-failure") as its container terminating, which terminations
-// counts. podApp remembers each pod's app label, for when it is finally
-// deleted and the event no longer carries one.
-func podEvents(known map[string]*appsv1.Deployment, restarts, terminations map[string]int32, podApp map[string]string, kind watch.EventType, p *corev1.Pod, now time.Time) []events.Message {
+// podEvents reports a container's process dying: its pod's container
+// terminating, which terminations counts. That includes a Deployment's pod
+// ended by docker stop, which the kubelet shows terminated before the pod
+// goes (D2K-058). podApp remembers each pod's app label, for when it is
+// finally deleted and the event no longer carries one.
+func podEvents(known map[string]*appsv1.Deployment, terminations map[string]int32, podApp map[string]string, kind watch.EventType, p *corev1.Pod, now time.Time) []events.Message {
 	if kind == watch.Deleted {
 		msgs := podLostEvent(known, terminations, p.Labels["app"], p.Name, now)
-		delete(restarts, p.Name)
 		delete(terminations, p.Name)
 		delete(podApp, p.Name)
 		return msgs
 	}
 	podApp[p.Name] = p.Labels["app"]
-	count, prev := restartCount(p), restarts[p.Name]
-	restarts[p.Name] = count
-	if p.Spec.RestartPolicy != "" && p.Spec.RestartPolicy != corev1.RestartPolicyAlways {
-		count, prev = terminationCount(p), terminations[p.Name]
-		terminations[p.Name] = count
-	}
+	// In back-off the kubelet shows the last crash as Waiting, with the
+	// restart count it had: the count drops by one until the restart.
+	count, prev := terminationCount(p), terminations[p.Name]
+	terminations[p.Name] = max(count, prev)
 	d, ok := known[p.Labels["app"]]
 	if !ok {
 		return nil
@@ -406,6 +420,71 @@ func podFailedWithoutTermination(d *appsv1.Deployment, terminations map[string]i
 	// when this pod is later deleted.
 	terminations[p.Name] = 1
 	return []events.Message{containerEvent(d, events.ActionDie, now, map[string]string{"exitCode": "137"})}
+}
+
+// restartEvents reports a container running again after a death that d2k's
+// own docker start did not follow: the kubelet restarting it in its pod, or
+// a new pod replacing its pod (deleted by hand, drained, evicted). As in
+// Docker, each restart is a start, on which attached compose up follows the
+// new run (D2K-070). A container that runs as a pod restarts only in the
+// pod it died in; its next pod is a docker start.
+func (s *eventState) restartEvents(app, pod string, runs, died bool, now time.Time) []events.Message {
+	if runs {
+		s.running[pod] = app
+	} else {
+		delete(s.running, pod)
+	}
+	d, ok := s.known[app]
+	if !ok {
+		delete(s.died, app)
+		return nil
+	}
+	if died {
+		s.died[app] = death{pod: pod, at: now}
+	}
+	last, ok := s.died[app]
+	if !ok {
+		return nil
+	}
+	if started, err := time.Parse(time.RFC3339Nano, d.Annotations[types.AnnotationStartedAt]); err == nil && started.After(last.at) {
+		// docker start ran it again, and reported its start.
+		delete(s.died, app)
+		return nil
+	}
+	for p, a := range s.running {
+		if a == app && (!runsAsPod(*d) || p == last.pod) {
+			delete(s.died, app)
+			return []events.Message{containerEvent(d, events.ActionStart, now, nil)}
+		}
+	}
+	return nil
+}
+
+// removedEvents reports the death of a container removed while it runs,
+// as docker rm -f kills it, with 137, before it removes it (D2K-072): its
+// Deployment is gone before its pod ends, and the pod's end is then no
+// longer reported.
+func (s *eventState) removedEvents(app string, now time.Time) []events.Message {
+	d, ok := s.known[app]
+	delete(s.died, app)
+	runs := false
+	for p, a := range s.running {
+		if a == app {
+			runs = true
+			delete(s.running, p)
+		}
+	}
+	if !ok || !runs {
+		return nil
+	}
+	return []events.Message{containerEvent(d, events.ActionDie, now, map[string]string{"exitCode": "137"})}
+}
+
+// containerRuns reports whether the pod's container is running, in a pod
+// that is not being deleted.
+func containerRuns(p *corev1.Pod) bool {
+	s := p.Status.ContainerStatuses
+	return p.DeletionTimestamp == nil && len(s) > 0 && s[0].State.Running != nil
 }
 
 // podLostEvent reports a run-once container's pod ending without ever
@@ -486,11 +565,4 @@ func replicasOf(d *appsv1.Deployment) int32 {
 		return 1
 	}
 	return *d.Spec.Replicas
-}
-
-func restartCount(p *corev1.Pod) int32 {
-	if s := p.Status.ContainerStatuses; len(s) > 0 {
-		return s[0].RestartCount
-	}
-	return 0
 }

@@ -514,6 +514,12 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 			result.HostConfig.DeviceRequests = []container.DeviceRequest{{Count: int(q.Value()), Capabilities: [][]string{{"gpu"}}}}
 		}
 	}
+	// A restart stops the container fully before it starts it again. Docker
+	// starts it again at once, so clients that inspect it on the restart's
+	// die, as compose does, see it running, not exited.
+	if _, restarting := a.restarting.Load(resolved); restarting && result.State.Status == container.StateExited {
+		result.State.Status, result.State.Running, result.State.Restarting = container.StateRestarting, true, true
+	}
 	return &result, nil
 }
 

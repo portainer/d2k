@@ -285,15 +285,16 @@ func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A container that is starting is running, as far as the client knows:
-	// wait for its run to begin.
-	if adapter.IsStarting(ctr.State) {
-		if _, ok := waitUntilStarted(r.Context(), h.adapter, ctr.ID, ""); !ok {
-			httputils.WriteErrorFrom(w, errdefs.NotFound(fmt.Errorf("no such container: %s", name)))
-			return
-		}
-		if ctr, err = h.adapter.InspectContainer(r.Context(), name); err != nil {
-			httputils.WriteErrorFrom(w, err)
-			return
+	// wait for its run to begin. A --rm run that ends before it is seen
+	// running is removed meanwhile: its die and destroy events answer.
+	starting := adapter.IsStarting(ctr.State)
+	if starting {
+		if _, ok := waitUntilStarted(r.Context(), h.adapter, ctr.ID, ""); ok {
+			if ctr, err = h.adapter.InspectContainer(r.Context(), name); err != nil {
+				httputils.WriteErrorFrom(w, err)
+				return
+			}
+			starting = false
 		}
 	}
 
@@ -304,7 +305,7 @@ func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
 	}
 	respond := func(code int) { _ = json.NewEncoder(w).Encode(container.WaitResponse{StatusCode: int64(code)}) }
 
-	if (condition == "" || condition == "not-running") && !ctr.State.Running {
+	if (condition == "" || condition == "not-running") && !ctr.State.Running && !starting {
 		respond(ctr.State.ExitCode)
 		return
 	}

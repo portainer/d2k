@@ -2,6 +2,7 @@ package containers
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -12,7 +13,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/remotecommand"
 
 	"github.com/moby/moby/api/types/events"
@@ -264,4 +267,50 @@ func TestAttachSendsTheOutputOfARemovedRun(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("the container was not removed once the attach ended")
+}
+
+// docker start -a (and an attached compose up) attaches to an exited
+// container, then starts it. Until the new run's pod exists, or when it
+// cannot be created, the attach must not take the container for a new run
+// that already ended: it would send nothing and end.
+func TestWaitUntilStartedWhileTheNewRunHasNoPod(t *testing.T) {
+	client := fake.NewClientset()
+	a := adapter.NewWithClient(client, "d2k")
+	ctx := context.Background()
+	if _, _, err := a.CreateContainer(ctx, adapter.RunOptions{Name: "job", Image: "busybox", RestartPolicy: "no"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartContainer(ctx, "job"); err != nil {
+		t.Fatal(err)
+	}
+	pods, err := client.CoreV1().Pods("d2k").List(ctx, metav1.ListOptions{LabelSelector: "app=job"})
+	if err != nil || len(pods.Items) != 1 {
+		t.Fatalf("pods = %v, %v", pods, err)
+	}
+	p := pods.Items[0]
+	p.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3, StartedAt: metav1.Now(), FinishedAt: metav1.Now()}},
+	}}}
+	if _, err := client.CoreV1().Pods("d2k").UpdateStatus(ctx, &p, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := a.InspectContainer(ctx, "job")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("exceeded quota")
+	})
+	if err := a.StartContainer(ctx, "job"); err == nil {
+		t.Fatal("start with a pod that cannot be created succeeded")
+	}
+	pollCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if _, ended := waitUntilStarted(pollCtx, a, before.ID, before.State.StartedAt); ended {
+		t.Error("the attach took the container for a new run that already ended")
+	}
+	if after, err := a.InspectContainer(ctx, "job"); err != nil || after.State.ExitCode != 3 {
+		t.Errorf("state after a failed start = %+v, %v; want the last run's, exit code 3", after.State, err)
+	}
 }
