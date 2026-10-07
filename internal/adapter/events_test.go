@@ -386,3 +386,95 @@ func TestPodEventsReportAStopAsADeath(t *testing.T) {
 		t.Fatalf("events = %q %v, want a die for the crash and one, with exit code 0, for the stop", actions(got), got)
 	}
 }
+
+// A container its Deployment restarts runs again after each death, in the
+// same pod (a crash) or a new one (the pod deleted by hand, drained or
+// evicted). As in Docker, each restart is a start, which attached compose
+// up waits for to follow the new run's output (D2K-070).
+func TestEventsReportARestartAsAStart(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	id, _, err := a.CreateContainer(ctx, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "always"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	pods := client.CoreV1().Pods(testNamespace)
+	setPod := func(name string, restarts int32, state corev1.ContainerState) {
+		t.Helper()
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace, Labels: managedLabels("web")},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+				RestartCount: restarts, State: state,
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3}},
+			}}},
+		}
+		if _, err := pods.Get(ctx, name, metav1.GetOptions{}); err != nil {
+			if _, err := pods.Create(ctx, p, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if _, err := pods.UpdateStatus(ctx, p, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	crashed := corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3}}
+	setPod("web-a", 0, running)
+
+	_, live, unsubscribe := a.SubscribeEvents()
+	defer unsubscribe()
+	go a.RecordEvents(ctx)
+	time.Sleep(200 * time.Millisecond)
+
+	var got []string
+	next := func() {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case m := <-live:
+				if m.Actor.ID == id && (m.Action == events.ActionDie || m.Action == events.ActionStart) {
+					got = append(got, string(m.Action))
+					return
+				}
+			case <-deadline:
+				t.Fatalf("events = %q, then nothing", got)
+			}
+		}
+	}
+	// A crash: the kubelet restarts the container in its pod.
+	setPod("web-a", 0, crashed)
+	next()
+	setPod("web-a", 1, running)
+	next()
+	// The pod is deleted: its container ends and a new pod replaces it.
+	setPod("web-a", 1, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}})
+	next()
+	if err := pods.Delete(ctx, "web-a", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	setPod("web-b", 0, running)
+	next()
+	if want := []string{"die", "start", "die", "start"}; !slices.Equal(got, want) {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
+// A death that docker start follows is not restarted by Kubernetes: the
+// start the Deployment's change reports is the only one.
+func TestRestartEventsLeaveDockerStartsAlone(t *testing.T) {
+	stopped := time.Now()
+	d := eventDeployment(1, map[string]string{types.AnnotationStartedAt: stopped.Add(time.Second).UTC().Format(time.RFC3339Nano)})
+	s := &eventState{known: map[string]*appsv1.Deployment{"web-k8s": d}, running: map[string]string{}, died: map[string]death{}}
+	if got := s.restartEvents("web-k8s", "web-k8s-a", false, true, stopped); got != nil {
+		t.Fatalf("death = %q, want no event", actions(got))
+	}
+	if got := s.restartEvents("web-k8s", "web-k8s-b", true, false, stopped.Add(2*time.Second)); got != nil {
+		t.Fatalf("pod of docker start runs = %q, want no event: docker start reported it", actions(got))
+	}
+}

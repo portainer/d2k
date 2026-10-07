@@ -33,6 +33,13 @@ func containerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) conta
 	}
 
 	status := newestContainerStatus(pods)
+	if status == nil || creating(status) {
+		// A pod Kubernetes replaces (deleted by hand, drained, evicted) is
+		// the container's run until the new pod's container starts.
+		if ran := newestRunStatus(pods); ran != nil {
+			status = ran
+		}
+	}
 	switch {
 	case status == nil:
 	case status.State.Running != nil:
@@ -174,6 +181,32 @@ func newestContainerStatus(pods []corev1.Pod) *corev1.ContainerStatus {
 		p := &pods[i]
 		// A pod being deleted belongs to a run that is over.
 		if p.DeletionTimestamp == nil && len(p.Status.ContainerStatuses) > 0 && (newest == nil || p.CreationTimestamp.After(newest.CreationTimestamp.Time)) {
+			newest = p
+		}
+	}
+	if newest == nil {
+		return nil
+	}
+	return &newest.Status.ContainerStatuses[0]
+}
+
+// creating reports whether the container has not run yet in its pod.
+func creating(s *corev1.ContainerStatus) bool {
+	return s.RestartCount == 0 && s.State.Waiting != nil && waitingWhileCreating[s.State.Waiting.Reason]
+}
+
+// newestRunStatus returns the status of the container in the most recently
+// created pod, being deleted or not, whose container has run. A pod that
+// ended and is kept (evicted) belongs to an earlier run.
+func newestRunStatus(pods []corev1.Pod) *corev1.ContainerStatus {
+	var newest *corev1.Pod
+	for i := range pods {
+		p := &pods[i]
+		if p.DeletionTimestamp == nil && (p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded) {
+			continue
+		}
+		if s := p.Status.ContainerStatuses; len(s) > 0 && (s[0].State.Running != nil || s[0].State.Terminated != nil || s[0].RestartCount > 0) &&
+			(newest == nil || p.CreationTimestamp.After(newest.CreationTimestamp.Time)) {
 			newest = p
 		}
 	}
