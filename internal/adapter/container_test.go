@@ -810,6 +810,67 @@ func TestStopWaitsForThePod(t *testing.T) {
 	}
 }
 
+// As Docker's rm -f does, docker rm kills the container at once rather than
+// leaving its pod to its stop grace period, and returns once it is gone:
+// its volumes and name are free right after.
+func TestRemoveKillsThePodAtOnce(t *testing.T) {
+	for _, policy := range []string{"always", "no"} {
+		t.Run(policy, func(t *testing.T) {
+			a, client := newTestAdapter(t)
+			ctx := context.Background()
+			grace := int64(30)
+			mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: policy, StopTimeout: &grace})
+			if err := a.StartContainer(ctx, "db"); err != nil {
+				t.Fatal(err)
+			}
+			if policy == "always" {
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-abc-xyz", Namespace: testNamespace,
+					Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}}}
+				if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			podsGVR := corev1.SchemeGroupVersion.WithResource("pods")
+			// The garbage collector deletes the pods of a deleted Deployment
+			// with their own grace period.
+			client.PrependReactor("delete", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+				list, _ := client.Tracker().List(podsGVR, corev1.SchemeGroupVersion.WithKind("Pod"), testNamespace)
+				for _, p := range list.(*corev1.PodList).Items {
+					p.DeletionTimestamp, p.DeletionGracePeriodSeconds = ptr(metav1.Now()), &grace
+					if err := client.Tracker().Update(podsGVR, &p, testNamespace); err != nil {
+						t.Error(err)
+					}
+				}
+				return false, nil, nil
+			})
+			var graces []*int64
+			client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				del := action.(k8stesting.DeleteAction)
+				if obj, err := client.Tracker().Get(podsGVR, testNamespace, del.GetName()); err == nil && obj.(*corev1.Pod).DeletionTimestamp == nil {
+					t.Errorf("pod %s deleted before the garbage collector: its ReplicaSet would start another", del.GetName())
+				}
+				graces = append(graces, del.GetDeleteOptions().GracePeriodSeconds)
+				return false, nil, nil
+			})
+
+			if err := a.RemoveContainer(ctx, "db"); err != nil {
+				t.Fatal(err)
+			}
+			if pods, _ := client.CoreV1().Pods(testNamespace).List(ctx, podsOf("db")); len(pods.Items) != 0 {
+				t.Errorf("docker rm returned with %d pods of the container left", len(pods.Items))
+			}
+			if len(graces) == 0 {
+				t.Fatal("docker rm deleted no pod: it stops with its 30 s grace period")
+			}
+			for _, g := range graces {
+				if g == nil || *g > 1 {
+					t.Errorf("pod deleted with grace period %v, want at most 1 s", g)
+				}
+			}
+		})
+	}
+}
+
 // cancelAwareClient fails Deployment deletes and updates made with a
 // cancelled context, as client-go does; the fake clientset ignores the
 // context.

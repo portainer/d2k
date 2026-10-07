@@ -454,12 +454,43 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
 	}
+	a.killPods(ctx, resolved)
 
 	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
 	a.deleteOwnService(ctx, serviceName(resolved), resolved)
 	a.deleteOwnService(ctx, publishedServiceName(resolved), resolved)
 
 	return nil
+}
+
+// killPods ends a removed container's pods at once, as Docker's rm -f kills
+// the container, and waits until they are gone: the garbage collector
+// deletes them with their stop grace period.
+func (a *KubernetesDockerAdapter) killPods(ctx context.Context, name string) {
+	// Not 0: that removes the pod from the API before the kubelet has killed
+	// its container, so its volumes would be released while it still runs.
+	grace := int64(1)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(corev1.DefaultTerminationGracePeriodSeconds+30)*time.Second)
+	defer cancel()
+	pods := a.client.CoreV1().Pods(a.namespace)
+	for {
+		list, err := pods.List(ctx, podsOf(name))
+		if err != nil || len(list.Items) == 0 {
+			return
+		}
+		for _, p := range list.Items {
+			// Only a pod the collector is deleting: its ReplicaSet, which d2k
+			// may not touch, would replace one deleted before.
+			if g := p.DeletionGracePeriodSeconds; p.DeletionTimestamp != nil && (g == nil || *g > grace) {
+				_ = pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // RenameContainer implements docker rename. The Docker name lives in an
