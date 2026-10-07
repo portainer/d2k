@@ -139,10 +139,16 @@ func TestVolumeNamesSharingAPVCName(t *testing.T) {
 }
 
 // Recreating a volume while its old PVC is still terminating (Kubernetes
-// deletion is not instant, unlike Docker's local driver) must not silently
-// hand back the dying PVC: a container that then mounts it would be
-// scheduled against a claim that is about to vanish for good, and never run.
+// deletion is not instant, unlike Docker's local driver) that never clears
+// still gets a retryable conflict, not a hang: a container that mounted the
+// dying PVC would be scheduled against a claim about to vanish for good,
+// and never run. volumeTerminationTimeout is shortened so the test doesn't
+// take the real 30s.
 func TestCreateVolumeWhileOldOneIsTerminating(t *testing.T) {
+	orig := volumeTerminationTimeout
+	volumeTerminationTimeout = 50 * time.Millisecond
+	defer func() { volumeTerminationTimeout = orig }()
+
 	now := metav1.Now()
 	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
 		Name: "data", Namespace: testNamespace,
@@ -153,7 +159,7 @@ func TestCreateVolumeWhileOldOneIsTerminating(t *testing.T) {
 	}}
 	a, _ := newTestAdapter(t, pvc)
 	if _, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data"}); !errdefs.IsConflict(err) {
-		t.Fatalf("create while the old PVC is terminating = %v, want a retryable conflict, not success with the dying PVC", err)
+		t.Fatalf("create while the old PVC never clears = %v, want a retryable conflict, not success with the dying PVC", err)
 	}
 }
 
