@@ -16,6 +16,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
+	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -415,7 +416,15 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 	if err := a.scaleDeployment(ctx, name, 1); err != nil {
 		return err
 	}
-	return a.waitUntilPodCreated(ctx, resolved, podCreateTimeout)
+	if err := a.waitUntilPodCreated(ctx, resolved, podCreateTimeout); err != nil {
+		// As Docker's failed start does, leave the container stopped: at 1
+		// replica it would start by itself once the quota frees.
+		if scaleErr := a.scaleDeployment(context.WithoutCancel(ctx), resolved, 0); scaleErr != nil {
+			log.Warn().Str("context", "KubernetesAdapter").Str("container", resolved).Err(scaleErr).Msg("Unable to stop a container whose start failed")
+		}
+		return err
+	}
+	return nil
 }
 
 // RestartContainer implements docker restart: it stops the container, then
