@@ -21,6 +21,16 @@ import (
 
 const nfsCsiProvisioner = "nfs.csi.k8s.io"
 
+// volumeTerminationTimeout bounds how long createPVC waits for an old PVC of
+// the same name to finish terminating before giving up. Kubernetes'
+// pvc-protection finalizer holds a PVC until the pod that mounted it is
+// gone, which can take as long as that pod's termination grace period —
+// corev1.DefaultTerminationGracePeriodSeconds, 30s — if the container does
+// not exit as soon as it is sent SIGTERM (docker rm -f deletes the
+// Deployment but does not force-kill the pod). Measured live: a container
+// that ignored SIGTERM kept its PVC terminating for about 33s end to end.
+var volumeTerminationTimeout = 30 * time.Second
+
 // CreateVolumeOptions mirrors docker volume create flags.
 type CreateVolumeOptions struct {
 	Name       string
@@ -176,13 +186,24 @@ func (a *KubernetesDockerAdapter) volumeMeta(opts CreateVolumeOptions) (metav1.O
 }
 
 // createPVC creates the PVC for volume name. Creating a volume that exists
-// returns it, as in Docker.
+// returns it, as in Docker. If a PVC of the same name is still terminating,
+// it waits up to volumeTerminationTimeout for the delete to finish — PVC
+// deletion is asynchronous, unlike Docker's synchronous local driver — and
+// retries the create, rather than handing back a claim about to be garbage
+// collected or refusing a recreate Docker would have let through.
 func (a *KubernetesDockerAdapter) createPVC(ctx context.Context, name string, pvc *corev1.PersistentVolumeClaim) (*volume.Volume, error) {
 	created, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, pvc, metav1.CreateOptions{})
 	if errors.IsAlreadyExists(err) {
 		old, getErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
 		if getErr == nil && old.DeletionTimestamp != nil {
-			return nil, errdefs.Conflict(fmt.Errorf("volume %q is being deleted: try again once it is gone", name))
+			if !a.waitForPVCGone(ctx, pvc.Name, volumeTerminationTimeout) {
+				return nil, errdefs.Conflict(fmt.Errorf("volume %q is being deleted: try again once it is gone", name))
+			}
+			created, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, pvc, metav1.CreateOptions{})
+			if err != nil {
+				return nil, fmt.Errorf("unable to create PVC %q: %w", pvc.Name, err)
+			}
+			return pvcToVolume(*created), nil
 		}
 		existing, err := a.InspectVolume(ctx, name)
 		if errdefs.IsNotFound(err) {
@@ -194,6 +215,24 @@ func (a *KubernetesDockerAdapter) createPVC(ctx context.Context, name string, pv
 		return nil, fmt.Errorf("unable to create PVC %q: %w", pvc.Name, err)
 	}
 	return pvcToVolume(*created), nil
+}
+
+// waitForPVCGone waits until the PVC named name no longer exists, or
+// timeout passes. It returns whether the PVC is confirmed gone.
+func (a *KubernetesDockerAdapter) waitForPVCGone(ctx context.Context, name string, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		_, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, name, metav1.GetOptions{})
+		if errors.IsNotFound(err) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // ListVolumes implements docker volume ls.
