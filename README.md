@@ -21,11 +21,11 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | Docker concept | Kubernetes translation |
 |---|---|
 | `docker run` | Deployment, the container's record. `--restart always` and `unless-stopped`: its replica runs the container. `--restart no` (the default) and `on-failure`: a pod created from it runs the container |
-| `docker stop` | Scale the Deployment to 0, or delete the pod and record its exit code; returns once the pod is gone |
+| `docker stop` | Scale the Deployment to 0, or delete the pod; record its exit code and return once the pod is gone |
 | `docker start` | Scale the Deployment to 1, or run a new pod |
-| `docker restart` | Stop, then start; as in Docker, returns once the container runs again (or fails to), waiting at most 30 s |
+| `docker restart` | Stop, then start; as in Docker, returns once the container runs again (or fails to), waiting at most 30 s; a client that goes away (Ctrl-C) does not stop it halfway |
 | `docker run --rm` | As in Docker, the container is removed when its run ends, once an attached `docker run` has its output; it cannot have a restart policy |
-| `docker rm` | Delete the Deployment (and its pod) + Service. As in Docker, a running container needs `-f` |
+| `docker rm` | Delete the Deployment (and its pod) + Service. As in Docker, a running container needs `-f`, which kills it at once (1 s grace, not its stop timeout) and returns once the pod is gone |
 | `-p <host>:<container>` | LoadBalancer Service |
 | `-P` (publish all) | NodePort Service |
 | No port flags | No Service created |
@@ -39,7 +39,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `--gpus all` / `--gpus N` | Pod resource limits via device plugin (opt-in) |
 | `-u`, `-w`, `-t`, `-i`, `-m`, `--cpus`, `--cpu-shares`, `--memory-reservation`, `--add-host`, `--cap-add/--cap-drop`, `--read-only`, `--privileged`, `--stop-timeout` | Container and pod settings (`-u` must be numeric) |
 | `--health-*`, compose `healthcheck:` | Readiness probe; `State.Health` reports starting/healthy/unhealthy. Traffic is not affected, as in Docker. A `HEALTHCHECK` defined only in the image is not seen |
-| `--restart` | `always` and `unless-stopped`: the Deployment restarts the container. `no` (the default): the pod's container runs once (`restartPolicy: Never`) and exits with its exit code. `on-failure`: `restartPolicy: OnFailure`; a maximum retry count returns a warning. A pod is not rescheduled if its node fails. A restart the kubelet makes, or a new pod replacing the container's pod (deleted, drained, evicted), is reported as Docker reports a restart: `die`, `restarting` while it waits, then `start` |
+| `--restart` | `always` and `unless-stopped`: the Deployment restarts the container. `no` (the default): the pod's container runs once (`restartPolicy: Never`) and exits with its exit code. `on-failure`: `restartPolicy: OnFailure`; a maximum retry count returns a warning. A pod is not rescheduled if its node fails. A restart the kubelet makes, or a new pod replacing the container's pod (deleted, drained, evicted), is reported as Docker reports a restart: `die`, `restarting` while it waits, then `start`. `docker inspect`'s `RestartCount` is the current pod's container restart count; a pod Kubernetes replaces (deleted by hand, drained, evicted) restarts that count from zero, unlike Docker's, which counts for the container's whole life |
 | Any other setting | Ignored, and named in a warning on create (`docker run` prints it) |
 
 ---

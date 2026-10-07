@@ -389,7 +389,12 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 	if getErr == nil && d.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
 		grace = *d.Spec.Template.Spec.TerminationGracePeriodSeconds
 	}
-	a.waitForPodsGone(ctx, resolved, time.Duration(grace+30)*time.Second)
+	if code, ok := a.waitForPodsGone(ctx, resolved, time.Duration(grace+30)*time.Second); ok {
+		// A container removed meanwhile has no state left to record.
+		if err := a.annotate(ctx, resolved, map[string]*string{types.AnnotationExitCode: &code}); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -414,6 +419,9 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 // starts it. As in Docker, the end of the run a restart stops does not
 // remove an AutoRemove container.
 func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name string) error {
+	// As in Docker, a client that goes away does not cancel the restart: a
+	// stop without its start would leave the container stopped (D2K-083).
+	ctx = context.WithoutCancel(ctx)
 	resolved, err := a.resolveDeploymentName(ctx, name)
 	if err != nil {
 		return err
@@ -451,12 +459,43 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
 	}
+	a.killPods(ctx, resolved)
 
 	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
 	a.deleteOwnService(ctx, serviceName(resolved), resolved)
 	a.deleteOwnService(ctx, publishedServiceName(resolved), resolved)
 
 	return nil
+}
+
+// killPods ends a removed container's pods at once, as Docker's rm -f kills
+// the container, and waits until they are gone: the garbage collector
+// deletes them with their stop grace period.
+func (a *KubernetesDockerAdapter) killPods(ctx context.Context, name string) {
+	// Not 0: that removes the pod from the API before the kubelet has killed
+	// its container, so its volumes would be released while it still runs.
+	grace := int64(1)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(corev1.DefaultTerminationGracePeriodSeconds+30)*time.Second)
+	defer cancel()
+	pods := a.client.CoreV1().Pods(a.namespace)
+	for {
+		list, err := pods.List(ctx, podsOf(name))
+		if err != nil || len(list.Items) == 0 {
+			return
+		}
+		for _, p := range list.Items {
+			// Only a pod the collector is deleting: its ReplicaSet, which d2k
+			// may not touch, would replace one deleted before.
+			if g := p.DeletionGracePeriodSeconds; p.DeletionTimestamp != nil && (g == nil || *g > grace) {
+				_ = pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // RenameContainer implements docker rename. The Docker name lives in an
@@ -775,6 +814,7 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 		stamp := types.AnnotationStoppedAt
 		if replicas > 0 {
 			stamp = types.AnnotationStartedAt
+			delete(d.Annotations, types.AnnotationExitCode)
 		}
 		d.Annotations[stamp] = time.Now().UTC().Format(time.RFC3339Nano)
 		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, d, metav1.UpdateOptions{})
@@ -916,15 +956,16 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 	}
 
 	return container.InspectResponse{
-		ID:         containerID(d.UID),
-		Name:       "/" + dockerName(d),
-		Image:      d.Annotations[types.AnnotationImageRef],
-		Created:    d.CreationTimestamp.Format(time.RFC3339),
-		Path:       path,
-		Args:       args,
-		State:      &state,
-		HostConfig: hostConfig,
-		Mounts:     containerMounts(d),
+		ID:           containerID(d.UID),
+		Name:         "/" + dockerName(d),
+		Image:        d.Annotations[types.AnnotationImageRef],
+		Created:      d.CreationTimestamp.Format(time.RFC3339),
+		Path:         path,
+		Args:         args,
+		State:        &state,
+		RestartCount: containerRestartCount(d, pods),
+		HostConfig:   hostConfig,
+		Mounts:       containerMounts(d),
 		Config: &container.Config{
 			Image:        d.Annotations[types.AnnotationImageRef],
 			User:         user,

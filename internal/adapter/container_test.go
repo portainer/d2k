@@ -237,6 +237,38 @@ func TestInspectPortsHaveHostIP(t *testing.T) {
 	}
 }
 
+// docker inspect's RestartCount, and the restart count Portainer reads from
+// it, must reflect a crash-looping container's restarts rather than stay 0
+// (D2K-080).
+func TestInspectReportsRestartCount(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "always"})
+	if err := a.StartContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "web-abc", Namespace: testNamespace,
+		Labels: map[string]string{"app": "web", types.LabelManagedBy: types.LabelManagedByValue}}}
+	if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status = corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		RestartCount: 4,
+		State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+	}}}
+	if _, err := client.CoreV1().Pods(testNamespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	inspect, err := a.InspectContainer(ctx, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspect.RestartCount != 4 {
+		t.Errorf("RestartCount = %d, want 4 for a crash-looping restart:always container", inspect.RestartCount)
+	}
+}
+
 func TestCreateContainerNamedVolumes(t *testing.T) {
 	a, client := newTestAdapter(t)
 	_, warnings, err := a.CreateContainer(context.Background(), RunOptions{
@@ -810,8 +842,121 @@ func TestStopWaitsForThePod(t *testing.T) {
 	}
 }
 
-// cancelAwareClient fails Deployment deletes made with a cancelled context,
-// as client-go does; the fake clientset ignores the context.
+// As in Docker, a container docker stop ended reports its process's exit
+// code: 137 when it was killed at the end of the stop timeout, not 0.
+// docker ps, compose ps and Portainer show it as "Exited (137)".
+func TestStopRecordsTheExitCode(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: "always"})
+	if err := a.StartContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	// The kubelet shows the container killed before the pod goes.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-abc", Namespace: testNamespace,
+			Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137}},
+		}}},
+	}
+	if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(700 * time.Millisecond)
+		_ = client.CoreV1().Pods(testNamespace).Delete(ctx, "db-abc", metav1.DeleteOptions{})
+	}()
+	if err := a.StopContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	ctr, err := a.InspectContainer(ctx, "db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctr.State.Status != container.StateExited || ctr.State.ExitCode != 137 {
+		t.Fatalf("after stop: %s with exit code %d, want exited with 137", ctr.State.Status, ctr.State.ExitCode)
+	}
+
+	// A later stop that saw no exit does not report the earlier one's.
+	if err := a.StartContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StopContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	if ctr, err = a.InspectContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	if ctr.State.ExitCode != 0 {
+		t.Fatalf("after the second stop: exit code %d, want 0, not the first stop's", ctr.State.ExitCode)
+	}
+}
+
+// As Docker's rm -f does, docker rm kills the container at once rather than
+// leaving its pod to its stop grace period, and returns once it is gone:
+// its volumes and name are free right after.
+func TestRemoveKillsThePodAtOnce(t *testing.T) {
+	for _, policy := range []string{"always", "no"} {
+		t.Run(policy, func(t *testing.T) {
+			a, client := newTestAdapter(t)
+			ctx := context.Background()
+			grace := int64(30)
+			mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: policy, StopTimeout: &grace})
+			if err := a.StartContainer(ctx, "db"); err != nil {
+				t.Fatal(err)
+			}
+			if policy == "always" {
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-abc-xyz", Namespace: testNamespace,
+					Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}}}
+				if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			podsGVR := corev1.SchemeGroupVersion.WithResource("pods")
+			// The garbage collector deletes the pods of a deleted Deployment
+			// with their own grace period.
+			client.PrependReactor("delete", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+				list, _ := client.Tracker().List(podsGVR, corev1.SchemeGroupVersion.WithKind("Pod"), testNamespace)
+				for _, p := range list.(*corev1.PodList).Items {
+					p.DeletionTimestamp, p.DeletionGracePeriodSeconds = ptr(metav1.Now()), &grace
+					if err := client.Tracker().Update(podsGVR, &p, testNamespace); err != nil {
+						t.Error(err)
+					}
+				}
+				return false, nil, nil
+			})
+			var graces []*int64
+			client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				del := action.(k8stesting.DeleteAction)
+				if obj, err := client.Tracker().Get(podsGVR, testNamespace, del.GetName()); err == nil && obj.(*corev1.Pod).DeletionTimestamp == nil {
+					t.Errorf("pod %s deleted before the garbage collector: its ReplicaSet would start another", del.GetName())
+				}
+				graces = append(graces, del.GetDeleteOptions().GracePeriodSeconds)
+				return false, nil, nil
+			})
+
+			if err := a.RemoveContainer(ctx, "db"); err != nil {
+				t.Fatal(err)
+			}
+			if pods, _ := client.CoreV1().Pods(testNamespace).List(ctx, podsOf("db")); len(pods.Items) != 0 {
+				t.Errorf("docker rm returned with %d pods of the container left", len(pods.Items))
+			}
+			if len(graces) == 0 {
+				t.Fatal("docker rm deleted no pod: it stops with its 30 s grace period")
+			}
+			for _, g := range graces {
+				if g == nil || *g > 1 {
+					t.Errorf("pod deleted with grace period %v, want at most 1 s", g)
+				}
+			}
+		})
+	}
+}
+
+// cancelAwareClient fails Deployment deletes and updates made with a
+// cancelled context, as client-go does; the fake clientset ignores the
+// context.
 type cancelAwareClient struct{ *fake.Clientset }
 
 func (c cancelAwareClient) AppsV1() appsv1client.AppsV1Interface {
@@ -833,6 +978,40 @@ func (d cancelAwareDeployments) Delete(ctx context.Context, name string, opts me
 		return err
 	}
 	return d.DeploymentInterface.Delete(ctx, name, opts)
+}
+
+func (d cancelAwareDeployments) Update(ctx context.Context, dep *appsv1.Deployment, opts metav1.UpdateOptions) (*appsv1.Deployment, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return d.DeploymentInterface.Update(ctx, dep, opts)
+}
+
+// A client that goes away during docker restart, as Ctrl-C does, does not
+// leave the container stopped: as in Docker, the restart completes (D2K-083).
+func TestRestartCompletesWhenTheClientGoesAway(t *testing.T) {
+	_, client := newTestAdapter(t)
+	a := NewWithClient(cancelAwareClient{client}, testNamespace)
+	mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: "always"})
+	if err := a.StartContainer(context.Background(), "db"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client.PrependReactor("update", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if d := action.(k8stesting.UpdateAction).GetObject().(*appsv1.Deployment); *d.Spec.Replicas == 0 {
+			cancel()
+		}
+		return false, nil, nil
+	})
+	_ = a.RestartContainer(ctx, "db")
+	d, err := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "db", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *d.Spec.Replicas != 1 {
+		t.Fatalf("replicas = %d after the restart, want 1", *d.Spec.Replicas)
+	}
 }
 
 // A client that goes away while its container is created, as Ctrl-C on
