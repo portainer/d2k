@@ -79,7 +79,6 @@ func (a *KubernetesDockerAdapter) SubscribeEvents() ([]events.Message, <-chan ev
 func (a *KubernetesDockerAdapter) RecordEvents(ctx context.Context) {
 	state := &eventState{
 		known:        map[string]*appsv1.Deployment{},
-		restarts:     map[string]int32{},
 		terminations: map[string]int32{},
 		podApp:       map[string]string{},
 		volumes:      map[string]bool{},
@@ -101,7 +100,6 @@ func (a *KubernetesDockerAdapter) RecordEvents(ctx context.Context) {
 type eventState struct {
 	listed       bool
 	known        map[string]*appsv1.Deployment
-	restarts     map[string]int32
 	terminations map[string]int32
 	podApp       map[string]string
 	volumes      map[string]bool
@@ -180,7 +178,7 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context, state *eventS
 				return fmt.Errorf("pod watch closed")
 			}
 			if p, isPod := e.Object.(*corev1.Pod); isPod {
-				msgs = podEvents(state.known, state.restarts, state.terminations, state.podApp, e.Type, p, time.Now())
+				msgs = podEvents(state.known, state.terminations, state.podApp, e.Type, p, time.Now())
 			}
 		case e, ok := <-pvcWatch.ResultChan():
 			if !ok {
@@ -286,7 +284,7 @@ func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []
 	listedPods := map[string]bool{}
 	for i := range pods {
 		listedPods[pods[i].Name] = true
-		msgs = append(msgs, podEvents(s.known, s.restarts, s.terminations, s.podApp, watch.Modified, &pods[i], now)...)
+		msgs = append(msgs, podEvents(s.known, s.terminations, s.podApp, watch.Modified, &pods[i], now)...)
 	}
 	for name, app := range s.podApp {
 		if listedPods[name] {
@@ -295,7 +293,6 @@ func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []
 		// The pod disappeared while nothing watched: a relist across a watch
 		// restart (D2K-021) sees it gone rather than a Deleted event.
 		msgs = append(msgs, podLostEvent(s.known, s.terminations, app, name, now)...)
-		delete(s.restarts, name)
 		delete(s.terminations, name)
 		delete(s.podApp, name)
 	}
@@ -357,28 +354,23 @@ func deploymentEvents(known map[string]*appsv1.Deployment, kind watch.EventType,
 	return nil
 }
 
-// podEvents reports a container's process dying. A Deployment's pod shows
-// it as its restart count going up; a container's own pod (restart policy
-// "no" or "on-failure") as its container terminating, which terminations
-// counts. podApp remembers each pod's app label, for when it is finally
-// deleted and the event no longer carries one.
-func podEvents(known map[string]*appsv1.Deployment, restarts, terminations map[string]int32, podApp map[string]string, kind watch.EventType, p *corev1.Pod, now time.Time) []events.Message {
+// podEvents reports a container's process dying: its pod's container
+// terminating, which terminations counts. That includes a Deployment's pod
+// ended by docker stop, which the kubelet shows terminated before the pod
+// goes (D2K-058). podApp remembers each pod's app label, for when it is
+// finally deleted and the event no longer carries one.
+func podEvents(known map[string]*appsv1.Deployment, terminations map[string]int32, podApp map[string]string, kind watch.EventType, p *corev1.Pod, now time.Time) []events.Message {
 	if kind == watch.Deleted {
 		msgs := podLostEvent(known, terminations, p.Labels["app"], p.Name, now)
-		delete(restarts, p.Name)
 		delete(terminations, p.Name)
 		delete(podApp, p.Name)
 		return msgs
 	}
 	podApp[p.Name] = p.Labels["app"]
-	count, prev := restartCount(p), restarts[p.Name]
-	restarts[p.Name] = count
-	if p.Spec.RestartPolicy != "" && p.Spec.RestartPolicy != corev1.RestartPolicyAlways {
-		// In back-off the kubelet shows the last crash as Waiting, with the
-		// restart count it had: the count drops by one until the restart.
-		count, prev = terminationCount(p), terminations[p.Name]
-		terminations[p.Name] = max(count, prev)
-	}
+	// In back-off the kubelet shows the last crash as Waiting, with the
+	// restart count it had: the count drops by one until the restart.
+	count, prev := terminationCount(p), terminations[p.Name]
+	terminations[p.Name] = max(count, prev)
 	d, ok := known[p.Labels["app"]]
 	if !ok || count <= prev {
 		return nil
@@ -470,11 +462,4 @@ func replicasOf(d *appsv1.Deployment) int32 {
 		return 1
 	}
 	return *d.Spec.Replicas
-}
-
-func restartCount(p *corev1.Pod) int32 {
-	if s := p.Status.ContainerStatuses; len(s) > 0 {
-		return s[0].RestartCount
-	}
-	return 0
 }

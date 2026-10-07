@@ -139,18 +139,18 @@ func TestRunOnceContainer(t *testing.T) {
 func TestRunOnceContainerDies(t *testing.T) {
 	d := deployment("job", "uid-1", managed())
 	known := map[string]*appsv1.Deployment{"job": d}
-	restarts, terminations, podApp := map[string]int32{}, map[string]int32{}, map[string]string{}
+	terminations, podApp := map[string]int32{}, map[string]string{}
 	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "job-x", Labels: map[string]string{"app": "job"}},
 		Spec: corev1.PodSpec{RestartPolicy: corev1.RestartPolicyNever}}
-	if msgs := podEvents(known, restarts, terminations, podApp, watch.Added, p, time.Now()); len(msgs) != 0 {
+	if msgs := podEvents(known, terminations, podApp, watch.Added, p, time.Now()); len(msgs) != 0 {
 		t.Fatalf("events for a new pod = %+v", msgs)
 	}
 	p.Status.ContainerStatuses = []corev1.ContainerStatus{{State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3}}}}
-	msgs := podEvents(known, restarts, terminations, podApp, watch.Modified, p, time.Now())
+	msgs := podEvents(known, terminations, podApp, watch.Modified, p, time.Now())
 	if len(msgs) != 1 || msgs[0].Action != events.ActionDie || msgs[0].Actor.Attributes["exitCode"] != "3" {
 		t.Fatalf("events for an exited pod = %+v, want die with exit code 3", msgs)
 	}
-	if msgs := podEvents(known, restarts, terminations, podApp, watch.Modified, p, time.Now()); len(msgs) != 0 {
+	if msgs := podEvents(known, terminations, podApp, watch.Modified, p, time.Now()); len(msgs) != 0 {
 		t.Fatalf("events for the same exit = %+v, want none", msgs)
 	}
 }
