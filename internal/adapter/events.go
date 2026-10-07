@@ -378,8 +378,11 @@ func podEvents(known map[string]*appsv1.Deployment, restarts, terminations map[s
 		terminations[p.Name] = count
 	}
 	d, ok := known[p.Labels["app"]]
-	if !ok || count <= prev {
+	if !ok {
 		return nil
+	}
+	if count <= prev {
+		return podFailedWithoutTermination(d, terminations, p, now)
 	}
 	extra := map[string]string{}
 	if s := p.Status.ContainerStatuses; len(s) > 0 {
@@ -388,6 +391,21 @@ func podEvents(known map[string]*appsv1.Deployment, restarts, terminations map[s
 		}
 	}
 	return []events.Message{containerEvent(d, events.ActionDie, now, extra)}
+}
+
+// podFailedWithoutTermination reports a run-once pod that ended Failed
+// without the kubelet ever recording a container termination: rejected by
+// admission (e.g. OutOfcpu) before it got to run. Without this, no die is
+// sent until the pod is later deleted (docker start replacing it to retry),
+// arriving stale during that next run.
+func podFailedWithoutTermination(d *appsv1.Deployment, terminations map[string]int32, p *corev1.Pod, now time.Time) []events.Message {
+	if !runsAsPod(*d) || p.Status.Phase != corev1.PodFailed || len(p.Status.ContainerStatuses) > 0 || terminations[p.Name] != 0 {
+		return nil
+	}
+	// Mark it reported so podLostEvent does not send a second, stale die
+	// when this pod is later deleted.
+	terminations[p.Name] = 1
+	return []events.Message{containerEvent(d, events.ActionDie, now, map[string]string{"exitCode": "137"})}
 }
 
 // podLostEvent reports a run-once container's pod ending without ever
