@@ -916,15 +916,16 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 	}
 
 	return container.InspectResponse{
-		ID:         containerID(d.UID),
-		Name:       "/" + dockerName(d),
-		Image:      d.Annotations[types.AnnotationImageRef],
-		Created:    d.CreationTimestamp.Format(time.RFC3339),
-		Path:       path,
-		Args:       args,
-		State:      &state,
-		HostConfig: hostConfig,
-		Mounts:     containerMounts(d),
+		ID:           containerID(d.UID),
+		Name:         "/" + dockerName(d),
+		Image:        d.Annotations[types.AnnotationImageRef],
+		Created:      d.CreationTimestamp.Format(time.RFC3339),
+		Path:         path,
+		Args:         args,
+		State:        &state,
+		RestartCount: containerRestartCount(d, pods),
+		HostConfig:   hostConfig,
+		Mounts:       containerMounts(d),
 		Config: &container.Config{
 			Image:        d.Annotations[types.AnnotationImageRef],
 			User:         user,
