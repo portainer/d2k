@@ -81,6 +81,8 @@ func (a *KubernetesDockerAdapter) RecordEvents(ctx context.Context) {
 		known:        map[string]*appsv1.Deployment{},
 		terminations: map[string]int32{},
 		podApp:       map[string]string{},
+		running:      map[string]string{},
+		died:         map[string]death{},
 		volumes:      map[string]bool{},
 	}
 	for ctx.Err() == nil {
@@ -102,7 +104,15 @@ type eventState struct {
 	known        map[string]*appsv1.Deployment
 	terminations map[string]int32
 	podApp       map[string]string
+	running      map[string]string // app of each pod whose container runs
+	died         map[string]death  // last death of each container, by app, until it runs again
 	volumes      map[string]bool
+}
+
+// death is a container's death: the pod it died in, and when.
+type death struct {
+	pod string
+	at  time.Time
 }
 
 // watchEvents lists the current state, reporting what changed since the
@@ -178,7 +188,9 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context, state *eventS
 				return fmt.Errorf("pod watch closed")
 			}
 			if p, isPod := e.Object.(*corev1.Pod); isPod {
-				msgs = podEvents(state.known, state.terminations, state.podApp, e.Type, p, time.Now())
+				now := time.Now()
+				msgs = podEvents(state.known, state.terminations, state.podApp, e.Type, p, now)
+				msgs = append(msgs, state.restartEvents(p.Labels["app"], p.Name, e.Type != watch.Deleted && containerRuns(p), len(msgs) > 0, now)...)
 			}
 		case e, ok := <-pvcWatch.ResultChan():
 			if !ok {
@@ -284,7 +296,9 @@ func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []
 	listedPods := map[string]bool{}
 	for i := range pods {
 		listedPods[pods[i].Name] = true
-		msgs = append(msgs, podEvents(s.known, s.terminations, s.podApp, watch.Modified, &pods[i], now)...)
+		died := podEvents(s.known, s.terminations, s.podApp, watch.Modified, &pods[i], now)
+		msgs = append(msgs, died...)
+		msgs = append(msgs, s.restartEvents(pods[i].Labels["app"], pods[i].Name, containerRuns(&pods[i]), len(died) > 0, now)...)
 	}
 	for name, app := range s.podApp {
 		if listedPods[name] {
@@ -293,6 +307,7 @@ func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []
 		// The pod disappeared while nothing watched: a relist across a watch
 		// restart (D2K-021) sees it gone rather than a Deleted event.
 		msgs = append(msgs, podLostEvent(s.known, s.terminations, app, name, now)...)
+		msgs = append(msgs, s.restartEvents(app, name, false, false, now)...)
 		delete(s.terminations, name)
 		delete(s.podApp, name)
 	}
@@ -400,6 +415,51 @@ func podFailedWithoutTermination(d *appsv1.Deployment, terminations map[string]i
 	// when this pod is later deleted.
 	terminations[p.Name] = 1
 	return []events.Message{containerEvent(d, events.ActionDie, now, map[string]string{"exitCode": "137"})}
+}
+
+// restartEvents reports a container running again after a death that d2k's
+// own docker start did not follow: the kubelet restarting it in its pod, or
+// a new pod replacing its pod (deleted by hand, drained, evicted). As in
+// Docker, each restart is a start, on which attached compose up follows the
+// new run (D2K-070). A container that runs as a pod restarts only in the
+// pod it died in; its next pod is a docker start.
+func (s *eventState) restartEvents(app, pod string, runs, died bool, now time.Time) []events.Message {
+	if runs {
+		s.running[pod] = app
+	} else {
+		delete(s.running, pod)
+	}
+	d, ok := s.known[app]
+	if !ok {
+		delete(s.died, app)
+		return nil
+	}
+	if died {
+		s.died[app] = death{pod: pod, at: now}
+	}
+	last, ok := s.died[app]
+	if !ok {
+		return nil
+	}
+	if started, err := time.Parse(time.RFC3339Nano, d.Annotations[types.AnnotationStartedAt]); err == nil && started.After(last.at) {
+		// docker start ran it again, and reported its start.
+		delete(s.died, app)
+		return nil
+	}
+	for p, a := range s.running {
+		if a == app && (!runsAsPod(*d) || p == last.pod) {
+			delete(s.died, app)
+			return []events.Message{containerEvent(d, events.ActionStart, now, nil)}
+		}
+	}
+	return nil
+}
+
+// containerRuns reports whether the pod's container is running, in a pod
+// that is not being deleted.
+func containerRuns(p *corev1.Pod) bool {
+	s := p.Status.ContainerStatuses
+	return p.DeletionTimestamp == nil && len(s) > 0 && s[0].State.Running != nil
 }
 
 // podLostEvent reports a run-once container's pod ending without ever

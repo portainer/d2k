@@ -464,3 +464,17 @@ func TestEventsReportARestartAsAStart(t *testing.T) {
 		t.Fatalf("events = %q, want %q", got, want)
 	}
 }
+
+// A death that docker start follows is not restarted by Kubernetes: the
+// start the Deployment's change reports is the only one.
+func TestRestartEventsLeaveDockerStartsAlone(t *testing.T) {
+	stopped := time.Now()
+	d := eventDeployment(1, map[string]string{types.AnnotationStartedAt: stopped.Add(time.Second).UTC().Format(time.RFC3339Nano)})
+	s := &eventState{known: map[string]*appsv1.Deployment{"web-k8s": d}, running: map[string]string{}, died: map[string]death{}}
+	if got := s.restartEvents("web-k8s", "web-k8s-a", false, true, stopped); got != nil {
+		t.Fatalf("death = %q, want no event", actions(got))
+	}
+	if got := s.restartEvents("web-k8s", "web-k8s-b", true, false, stopped.Add(2*time.Second)); got != nil {
+		t.Fatalf("pod of docker start runs = %q, want no event: docker start reported it", actions(got))
+	}
+}
