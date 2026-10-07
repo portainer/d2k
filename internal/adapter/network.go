@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -296,23 +297,55 @@ func (a *KubernetesDockerAdapter) joinedNetwork(ctx context.Context, name string
 // runs, or is starting. As in Docker, where only those have an endpoint on
 // it, created and stopped containers do not hold a network.
 func (a *KubernetesDockerAdapter) runsOnNetwork(ctx context.Context, name string) (bool, error) {
+	containers, err := a.networkContainers(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	return len(containers) > 0, nil
+}
+
+// networkContainers returns the endpoint of each container that runs, or is
+// starting, on the named network - the same set runsOnNetwork refuses to
+// remove the network for - keyed by container ID as Docker's network
+// inspect does. EndpointID and MacAddress are always left empty: d2k has no
+// libnetwork endpoint of its own, and Kubernetes does not expose a pod's MAC
+// address. IPv4Address comes from the container's published Service, the
+// same address InspectContainer reports as the container's own IP, and is
+// left empty when no LoadBalancer IP has been assigned yet.
+func (a *KubernetesDockerAdapter) networkContainers(ctx context.Context, name string) (map[string]any, error) {
 	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
 	if err != nil {
-		return false, fmt.Errorf("unable to list deployments: %w", err)
+		return nil, fmt.Errorf("unable to list deployments: %w", err)
 	}
+	containers := map[string]any{}
 	for _, d := range deps.Items {
 		if !slices.Contains(containerNetworks(d), name) {
 			continue
 		}
 		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(d.Name))
 		if err != nil {
-			return false, fmt.Errorf("unable to list pods: %w", err)
+			return nil, fmt.Errorf("unable to list pods: %w", err)
 		}
-		if state := containerState(d, pods.Items, time.Now()); state.Running || IsStarting(&state) {
-			return true, nil
+		if state := containerState(d, pods.Items, time.Now()); !state.Running && !IsStarting(&state) {
+			continue
+		}
+
+		ipv4 := ""
+		svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName(d.Name), metav1GetOptions())
+		if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
+			if ip, err := netip.ParseAddr(svc.Status.LoadBalancer.Ingress[0].IP); err == nil {
+				ipv4 = netip.PrefixFrom(ip, 32).String()
+			}
+		}
+
+		containers[containerID(d.UID)] = map[string]any{
+			"Name":        dockerName(d),
+			"EndpointID":  "",
+			"MacAddress":  "",
+			"IPv4Address": ipv4,
 		}
 	}
-	return false, nil
+	return containers, nil
 }
 
 // InspectNetworkDetail returns a full Docker network inspect response suitable
@@ -337,6 +370,11 @@ func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, name
 		return nil, err
 	}
 
+	containers, err := a.networkContainers(ctx, network.Name)
+	if err != nil {
+		return nil, err
+	}
+
 	return map[string]any{
 		"Name":       network.Name,
 		"Id":         network.ID,
@@ -354,7 +392,7 @@ func (a *KubernetesDockerAdapter) InspectNetworkDetail(ctx context.Context, name
 		"Ingress":    network.Name == "ingress",
 		"ConfigFrom": map[string]any{"Network": ""},
 		"ConfigOnly": false,
-		"Containers": map[string]any{},
+		"Containers": containers,
 		"Options":    map[string]string{},
 		"Labels":     network.Labels,
 	}, nil
