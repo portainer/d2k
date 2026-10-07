@@ -115,10 +115,18 @@ roleRef:
 # (matching the API server host to a control-plane node IP).
 # Node state changes (drain/pause/active) and label mutations are intentionally
 # blocked — d2k is a workload consumption tool, not a cluster administration tool.
+#
+# This object and the ClusterRoleBinding below are cluster-scoped: if you
+# install d2k into more than one namespace of this cluster, their names must
+# be made unique per install (e.g. by appending the namespace), or the second
+# install's apply silently overwrites the first's binding and takes over its
+# subject — leaving the first install's ServiceAccount unable to list nodes.
+# Rename both objects below (and roleRef.name) together, the same way you
+# change "namespace: d2k".
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: d2k-node-reader
+  name: d2k-node-reader   # make unique per install, e.g. d2k-node-reader-<namespace>
   labels:
     app: d2k
 rules:
@@ -134,7 +142,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: d2k-node-reader
+  name: d2k-node-reader   # make unique per install, e.g. d2k-node-reader-<namespace>
   labels:
     app: d2k
 subjects:
@@ -143,7 +151,7 @@ subjects:
     namespace: d2k   # change to your target namespace
 roleRef:
   kind: ClusterRole
-  name: d2k-node-reader
+  name: d2k-node-reader   # must match the ClusterRole name above
   apiGroup: rbac.authorization.k8s.io
 
 ---
