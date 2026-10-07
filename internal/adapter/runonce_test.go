@@ -255,3 +255,25 @@ func TestRunOncePodGoneAfterStopAndStart(t *testing.T) {
 		t.Fatalf("state after the pod of the second run is lost = %s, exit %d, finished %s; want exited 137, not the first run's stop", s.Status, s.ExitCode, s.FinishedAt)
 	}
 }
+
+// docker start right after a run ends starts a new run. The kubelet reports
+// the container terminated, and docker run, docker start -a and docker wait
+// return, before it reports the pod's phase: the run is over meanwhile.
+func TestStartRightAfterTheRunEndsRunsAgain(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+	for _, policy := range []string{"no", "on-failure"} {
+		mustCreate(t, a, RunOptions{Name: "job-" + policy, Image: "busybox", RestartPolicy: policy})
+		if err := a.StartContainer(ctx, "job-"+policy); err != nil {
+			t.Fatal(err)
+		}
+		first := podOf(t, a, "job-"+policy)
+		setStatus(t, a, first, corev1.PodRunning, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, FinishedAt: metav1.Now()}})
+		if err := a.StartContainer(ctx, "job-"+policy); err != nil {
+			t.Fatal(err)
+		}
+		if p := podOf(t, a, "job-"+policy); p.Name == first.Name {
+			t.Errorf("restart policy %s: pod after starting a container whose run ended = %s, the ended run's: no new run", policy, p.Name)
+		}
+	}
+}
