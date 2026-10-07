@@ -389,7 +389,12 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 	if getErr == nil && d.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
 		grace = *d.Spec.Template.Spec.TerminationGracePeriodSeconds
 	}
-	a.waitForPodsGone(ctx, resolved, time.Duration(grace+30)*time.Second)
+	if code, ok := a.waitForPodsGone(ctx, resolved, time.Duration(grace+30)*time.Second); ok {
+		// A container removed meanwhile has no state left to record.
+		if err := a.annotate(ctx, resolved, map[string]*string{types.AnnotationExitCode: &code}); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -816,6 +821,7 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 		stamp := types.AnnotationStoppedAt
 		if replicas > 0 {
 			stamp = types.AnnotationStartedAt
+			delete(d.Annotations, types.AnnotationExitCode)
 		}
 		d.Annotations[stamp] = time.Now().UTC().Format(time.RFC3339Nano)
 		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, d, metav1.UpdateOptions{})

@@ -147,18 +147,25 @@ func (a *KubernetesDockerAdapter) waitForPodGone(ctx context.Context, name strin
 	}
 }
 
-// waitForPodsGone waits until the Deployment has no pods left.
-func (a *KubernetesDockerAdapter) waitForPodsGone(ctx context.Context, deployment string, timeout time.Duration) {
+// waitForPodsGone waits until the Deployment has no pods left, and returns
+// the exit code of their container if it saw one.
+func (a *KubernetesDockerAdapter) waitForPodsGone(ctx context.Context, deployment string, timeout time.Duration) (string, bool) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	code, seen := "", false
 	for {
 		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(deployment))
 		if err != nil || len(pods.Items) == 0 {
-			return
+			return code, seen
+		}
+		for _, p := range pods.Items {
+			if s := p.Status.ContainerStatuses; len(s) > 0 && s[0].State.Terminated != nil {
+				code, seen = strconv.Itoa(int(s[0].State.Terminated.ExitCode)), true
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return code, seen
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
