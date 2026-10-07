@@ -84,6 +84,29 @@ func TestInjectQuotaDefaultsLimits(t *testing.T) {
 	}
 }
 
+// The injected default request must never exceed a limit the caller set
+// lower than it (docker run -m 16m): Kubernetes rejects a pod whose request
+// exceeds its limit, and would itself default the request down to the limit.
+func TestInjectQuotaDefaultsRequestNeverExceedsCallerLimit(t *testing.T) {
+	quota := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: "compute", Namespace: testNamespace},
+		Spec: corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
+			corev1.ResourceRequestsCPU:    resource.MustParse("4"),
+			corev1.ResourceRequestsMemory: resource.MustParse("8Gi"),
+		}},
+	}
+	a, _ := newTestAdapter(t, quota)
+
+	preset := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("16Mi")}}
+	got, err := a.injectQuotaDefaults(context.Background(), preset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mem := got.Requests[corev1.ResourceMemory]; mem.Cmp(resource.MustParse("16Mi")) > 0 {
+		t.Fatalf("requests.memory = %s, want it capped at the caller's 16Mi limit, not the 32Mi default", mem.String())
+	}
+}
+
 // A quota enforcing both requests.cpu and limits.cpu, with the caller asking
 // for more CPU than the default but setting no limit, must inject a limit at
 // least as large as that request: Kubernetes rejects a pod whose limit is

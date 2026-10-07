@@ -251,6 +251,22 @@ func TestNativeTranslations(t *testing.T) {
 // compose sends an anonymous volume (volumes: ["/data"]) as a volume mount
 // with no source. It must not fail the create: it is ignored with a
 // warning, as docker run's anonymous volumes (Config.Volumes) are.
+// Every pod already runs with its own cgroup namespace (deploymentToContainerJSON
+// reports CgroupnsMode "private"), so a Recreate that sends inspect's own
+// HostConfig back must not warn about it. A value no d2k pod ever has, "host",
+// is still unsupported and must still warn.
+func TestCgroupnsModePrivateRoundTripsSilently(t *testing.T) {
+	_, warnings := RunOptionsFromRequest("web", request(t, `{"Image":"app","HostConfig":{"CgroupnsMode":"private"}}`))
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %q, want none: \"private\" is what d2k itself reports", warnings)
+	}
+
+	_, warnings = RunOptionsFromRequest("web", request(t, `{"Image":"app","HostConfig":{"CgroupnsMode":"host"}}`))
+	if text := strings.Join(warnings, "\n"); !strings.Contains(text, `cgroup namespace mode "host"`) {
+		t.Fatalf("warnings = %q, want one naming the unsupported \"host\" mode", warnings)
+	}
+}
+
 func TestAnonymousVolumeWarns(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	req := request(t, `{"Image":"app","HostConfig":{"Mounts":[{"Type":"volume","Target":"/data"},{"Type":"volume","Source":"named","Target":"/named"}]}}`)

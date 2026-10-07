@@ -143,6 +143,31 @@ func TestPodEventsReportsALostPodKilled(t *testing.T) {
 	}
 }
 
+// A run-once pod the kubelet never even started (rejected by admission, e.g.
+// OutOfcpu) ends Failed with no ContainerStatuses at all: no termination is
+// ever reported, so the normal die-on-termination path never fires. Without
+// this, nothing dies until the pod is later deleted (by the next docker
+// start replacing it), delivering a stale die during that next run.
+func TestPodEventsReportsAnAdmissionRejectionDead(t *testing.T) {
+	d := eventDeployment(0, map[string]string{types.AnnotationRestartPolicy: "no", types.AnnotationStartedAt: "2026-01-01T00:00:00Z"})
+	known := map[string]*appsv1.Deployment{"web-k8s": d}
+	restarts, terminations, podApp := map[string]int32{}, map[string]int32{}, map[string]string{}
+	rejected := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-k8s-abc", Labels: map[string]string{"app": "web-k8s"}},
+		Status:     corev1.PodStatus{Phase: corev1.PodFailed},
+	}
+
+	died := podEvents(known, restarts, terminations, podApp, watch.Modified, rejected, time.Now())
+	if got := actions(died); !slices.Equal(got, []string{"container die"}) || died[0].Actor.Attributes["exitCode"] != "137" {
+		t.Fatalf("admission-rejected pod = %q %v, want a single die with exit code 137", got, died)
+	}
+
+	// docker start later deletes the rejected pod to retry: no stale die.
+	if got := podEvents(known, restarts, terminations, podApp, watch.Deleted, rejected, time.Now()); got != nil {
+		t.Fatalf("delete after the rejection was already reported = %q, want no event", actions(got))
+	}
+}
+
 func TestEventHub(t *testing.T) {
 	var hub eventHub
 	for i := range eventHistorySize + 10 {
