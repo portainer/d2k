@@ -390,8 +390,24 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 	}
 
 	// The Docker CLI sends the ID (e.g. "d2k-d2k-example-app_backend")
-	// rather than the name. A network that is not found is not an error, as
-	// d2k has always answered.
+	// rather than the name; resolve it back to the recorded name so
+	// joinedNetwork, which only knows names, can check it.
+	name := nameOrID
+	if records, err := a.networkRecords(ctx); err == nil {
+		for _, r := range records {
+			if r.Name == nameOrID || networkIDForName(r.Name, a.namespace) == nameOrID {
+				name = r.Name
+				break
+			}
+		}
+	}
+	if joined, err := a.joinedNetwork(ctx, name); err != nil {
+		return err
+	} else if joined {
+		return errdefs.Forbidden(fmt.Errorf("network %s has active endpoints", nameOrID))
+	}
+
+	// A network that is not found is not an error, as d2k has always answered.
 	return a.removeNetworks(ctx, func(r networkRecord) bool {
 		return r.Name == nameOrID || networkIDForName(r.Name, a.namespace) == nameOrID
 	})
