@@ -2,6 +2,8 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -11,11 +13,14 @@ import (
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	metav1validation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes/fake"
@@ -332,6 +337,79 @@ func TestContainerNetworkAttachments(t *testing.T) {
 	inspect, _ := a.InspectContainer(ctx, "web")
 	if _, ok := inspect.NetworkSettings.Networks["demo_back"]; ok || len(inspect.NetworkSettings.Networks) != 1 {
 		t.Fatalf("after disconnect Networks = %v, want only demo_front", inspect.NetworkSettings.Networks)
+	}
+}
+
+// Portainer's Duplicate/Edit flow reconnects a container's "extra networks"
+// concurrently (Promise.all over one POST /networks/{id}/connect per
+// network), exactly like compose attaching several networks after create.
+// ConnectNetwork's read-modify-write (Get the Deployment, compute the new
+// network list, write the whole annotation back) has no retry on conflict,
+// so when a second connect's Get-to-write lands inside the first's, the
+// second call's write is silently lost.
+//
+// A real race between two goroutines can't be forced through the fake
+// clientset (its Invokes holds one lock for the whole reaction chain, so
+// blocking inside a reactor deadlocks any other action), so this reproduces
+// the interleaving deterministically: a reactor on the first call's write
+// writes a second network straight to the tracker, simulating the other
+// connect's Get-and-write completing in the gap. The reactor fires on
+// either "patch" or "update" so the same test demonstrates the bug against
+// a blind write and the retry-on-conflict fix against a conflict-checked
+// one.
+func TestConcurrentConnectNetworkLosesAnUpdate(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Networks: []string{"demo_base"}})
+
+	gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	gr := schema.GroupResource{Group: "apps", Resource: "deployments"}
+	injected := false
+	raceReactor := func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if injected {
+			return false, nil, nil
+		}
+		injected = true
+
+		obj, err := client.Tracker().Get(gvr, testNamespace, "web")
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := obj.(*appsv1.Deployment)
+		networks := append(containerNetworks(*d), "demo_side")
+		encoded, err := json.Marshal(networks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Annotations[types.AnnotationNetworks] = string(encoded)
+		if err := client.Tracker().Update(gvr, d, testNamespace); err != nil {
+			t.Fatal(err)
+		}
+
+		if action.GetVerb() == "update" {
+			// A conflict-checked write sees the injected change and must retry.
+			return true, nil, apierrors.NewConflict(gr, "web", errors.New("concurrent connect"))
+		}
+		return false, nil, nil
+	}
+	client.PrependReactor("patch", "deployments", raceReactor)
+	client.PrependReactor("update", "deployments", raceReactor)
+
+	if err := a.ConnectNetwork(ctx, "demo_front", "web", true); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrs, err := a.ListContainers(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"demo_base":  networkIDForName("demo_base", testNamespace),
+		"demo_front": networkIDForName("demo_front", testNamespace),
+		"demo_side":  networkIDForName("demo_side", testNamespace),
+	}
+	if !maps.Equal(ctrs[0].Networks, want) {
+		t.Fatalf("Networks after two interleaved connects = %v, want %v (one connect's write overwrote the other's)", ctrs[0].Networks, want)
 	}
 }
 

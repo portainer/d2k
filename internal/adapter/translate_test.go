@@ -266,6 +266,39 @@ func TestAnonymousVolumeWarns(t *testing.T) {
 	}
 }
 
+// Portainer's own GPU create-form request
+// (app/react/docker/containers/CreateView/ResourcesTab/GpuFieldset/toRequest.ts)
+// always sets Driver: "nvidia" and never puts "gpu" in Capabilities (the
+// default is ["compute", "utility"]; Docker's own CLI --gpus is the one
+// that always adds "gpu"). The daemon (daemon/devices.go handleDevice)
+// selects the nvidia driver from Driver alone when it is set, independent
+// of Capabilities, so this is a GPU request Docker honours.
+func TestGPURequestWithoutTheGPUCapability(t *testing.T) {
+	req := request(t, `{"Image":"ml","HostConfig":{"DeviceRequests":[
+		{"Driver":"nvidia","Count":-1,"DeviceIDs":[],"Capabilities":[["compute","utility"]]}]}}`)
+	opts, warnings := RunOptionsFromRequest("ml", req)
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %q, want none", warnings)
+	}
+	if opts.GPUCount != 1 {
+		t.Fatalf("GPUCount = %d, want 1 (Driver: nvidia alone is a GPU request)", opts.GPUCount)
+	}
+}
+
+// Portainer's "use specific GPUs" option sends Count: 0 with the chosen
+// DeviceIDs (toRequest.ts: "deviceRequest.Count = 0" when useSpecific).
+func TestGPURequestForSpecificDeviceIDs(t *testing.T) {
+	req := request(t, `{"Image":"ml","HostConfig":{"DeviceRequests":[
+		{"Driver":"nvidia","Count":0,"DeviceIDs":["0","1"],"Capabilities":[["compute","utility"]]}]}}`)
+	opts, warnings := RunOptionsFromRequest("ml", req)
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %q, want none", warnings)
+	}
+	if opts.GPUCount != 2 {
+		t.Fatalf("GPUCount = %d, want 2 (len(DeviceIDs), Count: 0 means specific devices, not zero)", opts.GPUCount)
+	}
+}
+
 // dockerSize must accept every size string github.com/docker/go-units
 // RAMInBytes accepts (the "b"/"kb"/"kib" suffixes docker's --tmpfs and
 // compose's tmpfs size= use), not just k/m/g.
