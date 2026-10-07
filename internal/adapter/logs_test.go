@@ -115,3 +115,37 @@ func TestGetContainerLogsWaitsWhenNoContainerStatusYet(t *testing.T) {
 		t.Fatal("GetContainerLogs did not return once the pod started running")
 	}
 }
+
+// A pod the scheduler cannot place has no container status either, but it
+// is not about to start: docker logs answers at once, as Docker does for a
+// created container.
+func TestGetContainerLogsDoesNotWaitForAnUnschedulablePod(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "big", Image: "nginx", RestartPolicy: "no"})
+	if err := a.StartContainer(ctx, "big"); err != nil {
+		t.Fatal(err)
+	}
+	pods, err := client.CoreV1().Pods(testNamespace).List(ctx, podsOf("big"))
+	if err != nil || len(pods.Items) != 1 {
+		t.Fatalf("expected one pod for big, got %v, %v", pods, err)
+	}
+	pod := pods.Items[0]
+	pod.Status = corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+		Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+	}}}
+	if _, err := client.CoreV1().Pods(testNamespace).UpdateStatus(ctx, &pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		_, _, _ = a.GetContainerLogs(ctx, "big", LogOptions{})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetContainerLogs waited for a pod the scheduler cannot place")
+	}
+}
