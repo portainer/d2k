@@ -309,9 +309,14 @@ func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []
 			continue
 		}
 		// The pod disappeared while nothing watched: a relist across a watch
-		// restart (D2K-021) sees it gone rather than a Deleted event.
-		msgs = append(msgs, podLostEvent(s.known, s.terminations, app, name, now)...)
-		msgs = append(msgs, s.restartEvents(app, name, false, false, now)...)
+		// restart (D2K-021) sees it gone rather than a Deleted event. If its
+		// container was last seen running, its end was never reported.
+		lost := podLostEvent(s.known, s.terminations, app, name, now)
+		if d, ok := s.known[app]; ok && len(lost) == 0 && s.running[name] == app {
+			lost = []events.Message{containerEvent(d, events.ActionDie, now, map[string]string{"exitCode": "137"})}
+		}
+		msgs = append(msgs, lost...)
+		msgs = append(msgs, s.restartEvents(app, name, false, len(lost) > 0, now)...)
 		delete(s.terminations, name)
 		delete(s.podApp, name)
 	}

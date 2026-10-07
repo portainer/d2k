@@ -500,4 +500,14 @@ func TestRelistReportsAStoppedContainerWhosePodWentDead(t *testing.T) {
 	if want := []string{"container die", "container stop"}; !slices.Equal(got, want) {
 		t.Fatalf("relist after a stop = %q, want %q", got, want)
 	}
+
+	// Kubernetes replaced the pod while nothing watched: the container died
+	// and runs again, as a restart policy restart does in Docker.
+	s.relist([]appsv1.Deployment{*eventDeployment(1, always)}, []corev1.Pod{running}, nil, time.Now())
+	replacement := *running.DeepCopy()
+	replacement.Name = "web-k8s-def"
+	got = actions(s.relist([]appsv1.Deployment{*eventDeployment(1, always)}, []corev1.Pod{replacement}, nil, time.Now()))
+	if want := []string{"container die", "container start"}; !slices.Equal(got, want) {
+		t.Fatalf("relist after a pod replacement = %q, want %q", got, want)
+	}
 }
