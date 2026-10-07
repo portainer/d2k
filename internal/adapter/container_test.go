@@ -1181,3 +1181,30 @@ func TestFailedStartLeavesTheContainerStopped(t *testing.T) {
 		t.Fatalf("replicas = %d after the failed start, want 0", r)
 	}
 }
+
+// Docker removes an AutoRemove container whose start fails (moby
+// daemon/start.go:119-127), the same as one whose run ends: a --rm
+// container is gone either way. d2k's failed start only scaled the
+// Deployment back to 0, leaving the container behind as Exited.
+func TestFailedStartOfAnAutoRemoveContainerRemovesIt(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", AutoRemove: true})
+	d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Status.Conditions = []appsv1.DeploymentCondition{
+		{Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionTrue, Reason: "FailedCreate",
+			Message: `pods "web-6d4b9-x2k8p" is forbidden: exceeded quota: pods, requested: pods=1, used: pods=4, limited: pods=4`},
+	}
+	if _, err := client.AppsV1().Deployments(testNamespace).UpdateStatus(ctx, d, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartContainer(ctx, "web"); err == nil {
+		t.Fatal("StartContainer succeeded, want the quota's refusal")
+	}
+	if _, err := a.InspectContainer(ctx, "web"); !errdefs.IsNotFound(err) {
+		t.Fatalf("inspect after the failed start of an AutoRemove container = %v, want not found", err)
+	}
+}

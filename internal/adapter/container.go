@@ -417,9 +417,18 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 		return err
 	}
 	if err := a.waitUntilPodCreated(ctx, resolved, podCreateTimeout); err != nil {
+		cleanupCtx := context.WithoutCancel(ctx)
+		if d.Annotations[types.AnnotationAutoRemove] == "true" {
+			// As Docker removes an AutoRemove container whose start fails,
+			// the same as one whose run ends.
+			if rmErr := a.RemoveContainer(cleanupCtx, resolved); rmErr != nil {
+				log.Warn().Str("context", "KubernetesAdapter").Str("container", resolved).Err(rmErr).Msg("Unable to remove an AutoRemove container whose start failed")
+			}
+			return err
+		}
 		// As Docker's failed start does, leave the container stopped: at 1
 		// replica it would start by itself once the quota frees.
-		if scaleErr := a.scaleDeployment(context.WithoutCancel(ctx), resolved, 0); scaleErr != nil {
+		if scaleErr := a.scaleDeployment(cleanupCtx, resolved, 0); scaleErr != nil {
 			log.Warn().Str("context", "KubernetesAdapter").Str("container", resolved).Err(scaleErr).Msg("Unable to stop a container whose start failed")
 		}
 		return err
