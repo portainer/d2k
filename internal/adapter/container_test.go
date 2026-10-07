@@ -897,7 +897,7 @@ func TestStopRecordsTheExitCode(t *testing.T) {
 // leaving its pod to its stop grace period, and returns once it is gone:
 // its volumes and name are free right after.
 func TestRemoveKillsThePodAtOnce(t *testing.T) {
-	for _, policy := range []string{"always", "no"} {
+	for _, policy := range []string{"always", "unless-stopped"} {
 		t.Run(policy, func(t *testing.T) {
 			a, client := newTestAdapter(t)
 			ctx := context.Background()
@@ -906,12 +906,10 @@ func TestRemoveKillsThePodAtOnce(t *testing.T) {
 			if err := a.StartContainer(ctx, "db"); err != nil {
 				t.Fatal(err)
 			}
-			if policy == "always" {
-				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-abc-xyz", Namespace: testNamespace,
-					Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}}}
-				if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
-					t.Fatal(err)
-				}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-abc-xyz", Namespace: testNamespace,
+				Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}}}
+			if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
 			}
 			podsGVR := corev1.SchemeGroupVersion.WithResource("pods")
 			// The garbage collector deletes the pods of a deleted Deployment

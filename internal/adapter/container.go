@@ -471,6 +471,9 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
 		return errdefs.Conflict(fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead"))
 	}
+	if getErr == nil && runsAsPod(*d) {
+		a.killRunOncePods(ctx, resolved)
+	}
 
 	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
@@ -484,9 +487,28 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	return nil
 }
 
-// killPods ends a removed container's pods at once, as Docker's rm -f kills
-// the container, and waits until they are gone: the garbage collector
-// deletes them with their stop grace period.
+// killRunOncePods deletes a run-once container's pods with a 1 s grace
+// period before its Deployment goes. The kubelet stops a pod with the grace
+// period of the first delete it sees, and the garbage collector's would be
+// the full stop grace period. Nothing replaces these pods.
+func (a *KubernetesDockerAdapter) killRunOncePods(ctx context.Context, name string) {
+	grace := int64(1)
+	pods := a.client.CoreV1().Pods(a.namespace)
+	list, err := pods.List(ctx, podsOf(name))
+	if err != nil {
+		return
+	}
+	for _, p := range list.Items {
+		if p.DeletionTimestamp == nil {
+			_ = pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
+		}
+	}
+}
+
+// killPods cuts the grace period of a removed container's pods to 1 s, as
+// Docker's rm -f kills the container, and waits until they are gone: the
+// garbage collector deletes them with their stop grace period. A kubelet
+// that has already begun stopping a pod keeps the longer one.
 func (a *KubernetesDockerAdapter) killPods(ctx context.Context, name string) {
 	// Not 0: that removes the pod from the API before the kubelet has killed
 	// its container, so its volumes would be released while it still runs.
