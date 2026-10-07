@@ -200,3 +200,40 @@ func newFakeCluster() *fake.Clientset {
 	})
 	return client
 }
+
+// docker run -d --rm, then docker wait: a short run that ends, and is
+// removed, while the wait still sees the container starting answers with
+// the run's exit code, as in Docker, rather than "no such container".
+func TestWaitOnAStartingRunRemovedWhenItEnds(t *testing.T) {
+	client := newFakeCluster()
+	a := adapter.NewWithClient(client, "d2k")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go a.RecordEvents(ctx)
+	h := NewHandler(a)
+	p := runRemovable(t, ctx, client, a, h, "job")
+
+	waited := make(chan *httptest.ResponseRecorder)
+	go func() {
+		rec := httptest.NewRecorder()
+		h.Wait(rec, httptest.NewRequest("POST", "/containers/job/wait", nil).WithContext(ctx))
+		waited <- rec
+	}()
+	time.Sleep(100 * time.Millisecond) // the wait sees the container starting
+	p.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{{
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 3, FinishedAt: metav1.Now()}},
+	}}}
+	if _, err := client.CoreV1().Pods("d2k").UpdateStatus(ctx, &p, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case rec := <-waited:
+		var resp container.WaitResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); rec.Code != http.StatusOK || err != nil || resp.StatusCode != 3 {
+			t.Errorf("wait = %d %s, want 200 with exit code 3", rec.Code, rec.Body)
+		}
+	case <-ctx.Done():
+		t.Fatal("wait did not return")
+	}
+}
