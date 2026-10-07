@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -655,21 +656,27 @@ func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 	// A run that already ended has no process to attach to: its output is
 	// sent below.
 	if stdin && stream && running {
-		err := h.adapter.AttachContainer(ctx, ctr.ID, tty, adapter.ExecStreams{Stdin: in, Stdout: out, Stderr: errOut, Resize: resize})
+		var sent atomic.Int64
+		err := h.adapter.AttachContainer(ctx, ctr.ID, tty, adapter.ExecStreams{Stdin: in, Stdout: counting(out, &sent), Stderr: counting(errOut, &sent), Resize: resize})
 		if err != nil {
 			log.Warn().Str("context", "ContainersAPI").Str("name", name).Err(err).Msg("Attach ended")
 		}
-		return
-	}
-
-	// Without stdin the client sends nothing, and the Docker CLI half-closes
-	// its side at once: EOF is not a disconnect. A read error is; so is a
-	// failed write of the next log line.
-	go func() {
-		if _, err := io.Copy(io.Discard, in); err != nil {
-			stop()
+		// A run can end between being seen running and the process attach
+		// connecting, which the kubelet then refuses: its output is then
+		// only in its log.
+		if wasRunning || sent.Load() > 0 {
+			return
 		}
-	}()
+	} else {
+		// Without stdin the client sends nothing, and the Docker CLI
+		// half-closes its side at once: EOF is not a disconnect. A read
+		// error is; so is a failed write of the next log line.
+		go func() {
+			if _, err := io.Copy(io.Discard, in); err != nil {
+				stop()
+			}
+		}()
+	}
 	tail := "0"
 	if withLogs || !wasRunning {
 		tail = "all"
@@ -686,6 +693,26 @@ func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 	if out != nil {
 		_, _ = io.Copy(out, logs)
 	}
+}
+
+// countingWriter counts the bytes written to w in n.
+type countingWriter struct {
+	w io.Writer
+	n *atomic.Int64
+}
+
+func (c countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// counting returns w counting its bytes in n, or nil for no writer.
+func counting(w io.Writer, n *atomic.Int64) io.Writer {
+	if w == nil {
+		return nil
+	}
+	return countingWriter{w, n}
 }
 
 // waitUntilStarted polls until the container runs, or a run started after

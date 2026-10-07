@@ -314,3 +314,72 @@ func TestWaitUntilStartedWhileTheNewRunHasNoPod(t *testing.T) {
 		t.Errorf("state after a failed start = %+v, %v; want the last run's, exit code 3", after.State, err)
 	}
 }
+
+// docker run -i busybox echo hi, and compose run (interactive by default),
+// attach with stdin, to the container's process. A short run can end
+// between being seen running and the process attach connecting, which the
+// kubelet then refuses: the attach must still send the run's output.
+func TestStdinAttachSendsTheOutputOfARunThatEndedFirst(t *testing.T) {
+	client := newFakeCluster()
+	a := adapter.NewWithClient(client, "d2k")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	h := NewHandler(a)
+
+	rec := httptest.NewRecorder()
+	h.Create(rec, httptest.NewRequest("POST", "/containers/create?name=job", strings.NewReader(`{"Image":"busybox","Cmd":["echo","hi"],"OpenStdin":true,"AttachStdin":true}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	// The run ends as soon as it has been seen running.
+	podsGVR := corev1.SchemeGroupVersion.WithResource("pods")
+	client.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		obj, err := client.Tracker().List(podsGVR, corev1.SchemeGroupVersion.WithKind("Pod"), "d2k")
+		if err != nil {
+			return true, nil, err
+		}
+		for _, p := range obj.(*corev1.PodList).Items {
+			if p.Status.Phase == corev1.PodRunning {
+				p.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{
+					State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, StartedAt: metav1.Now(), FinishedAt: metav1.Now()}},
+				}}}
+				_ = client.Tracker().Update(podsGVR, &p, "d2k")
+			}
+		}
+		return true, obj, nil
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(h.Attach))
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.WriteString(conn, "POST /containers/job/attach?stream=1&stdin=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: d2k\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.(*net.TCPConn).CloseWrite() // stdin ends at once, as with </dev/null
+	time.Sleep(200 * time.Millisecond)   // the attach waits for the run
+
+	if err := a.StartContainer(ctx, "job"); err != nil {
+		t.Fatal(err)
+	}
+	pods, err := client.CoreV1().Pods("d2k").List(ctx, metav1.ListOptions{LabelSelector: "app=job"})
+	if err != nil || len(pods.Items) != 1 {
+		t.Fatalf("pods = %v, %v", pods, err)
+	}
+	p := pods.Items[0]
+	p.Status = corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
+	}}}
+	if _, err := client.CoreV1().Pods("d2k").UpdateStatus(ctx, &p, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fake cluster's log of any pod is "fake logs".
+	if out, _ := io.ReadAll(conn); !strings.Contains(string(out), "fake logs") {
+		t.Fatalf("attach sent %q, want the container's log", out)
+	}
+}
