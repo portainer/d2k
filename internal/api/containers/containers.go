@@ -601,6 +601,7 @@ func (h *Handler) Attach(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
+	defer h.adapter.Attaching(ctr.ID)()
 	tty := ctr.Config.Tty
 	conn, in, err := streams.Hijack(w, r, tty)
 	if err != nil {

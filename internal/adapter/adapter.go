@@ -68,6 +68,11 @@ type KubernetesDockerAdapter struct {
 	// restarting holds the Deployment names of the containers being
 	// restarted, whose run's end does not remove them.
 	restarting sync.Map
+
+	// attaches counts each container's attaches in progress, by container
+	// ID (Attaching).
+	attaches   map[string]int
+	attachesMu sync.Mutex
 }
 
 // Options configures a new KubernetesDockerAdapter.
