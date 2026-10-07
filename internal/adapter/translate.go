@@ -35,6 +35,7 @@ var (
 		"CPUShares": true, "CPUQuota": true, "CPUPeriod": true, "DeviceRequests": true,
 		"DNS": true, "DNSSearch": true, "DNSOptions": true, "Sysctls": true, "ShmSize": true, "Tmpfs": true,
 		"SecurityOpt": true, "GroupAdd": true, "Annotations": true, "AutoRemove": true,
+		"CgroupnsMode": true,
 	}
 	// Links are reported with HostConfig.Links, where compose also sets them.
 	endpointHandled = map[string]bool{"Aliases": true, "Links": true}
@@ -135,6 +136,10 @@ func RunOptionsFromRequest(name string, req container.CreateRequest) (RunOptions
 	}
 	if len(host.LogConfig.Config) > 0 {
 		warnings = append(warnings, fmt.Sprintf("log options %s ignored: the kubelet rotates container logs", strings.Join(slices.Sorted(maps.Keys(host.LogConfig.Config)), ", ")))
+	}
+
+	if host.CgroupnsMode == container.CgroupnsModeHost {
+		warnings = append(warnings, fmt.Sprintf("cgroup namespace mode %q is not supported by d2k: each pod has its own cgroup namespace", host.CgroupnsMode))
 	}
 
 	switch mode := string(host.NetworkMode); {
