@@ -408,7 +408,10 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 	if runsAsPod(*d) {
 		return a.startPod(ctx, d)
 	}
-	return a.scaleDeployment(ctx, name, 1)
+	if err := a.scaleDeployment(ctx, name, 1); err != nil {
+		return err
+	}
+	return a.waitUntilPodCreated(ctx, resolved, podCreateTimeout)
 }
 
 // RestartContainer implements docker restart: it stops the container, then
