@@ -2,8 +2,11 @@ package containers
 
 import (
 	"context"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,5 +141,63 @@ func TestResizeReachesTheRemainingAttach(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("the first attach never got the resize")
+	}
+}
+
+// `docker run busybox echo hi` attaches before it starts the container,
+// which exits at once. Its die event arrives while the attach still waits
+// for it to run, or still copies its log: the attach must send that output
+// rather than end on the die with nothing written.
+func TestAttachSendsTheOutputOfARunThatEnded(t *testing.T) {
+	client := newFakeCluster()
+	a := adapter.NewWithClient(client, "d2k")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go a.RecordEvents(ctx)
+	h := NewHandler(a)
+
+	rec := httptest.NewRecorder()
+	h.Create(rec, httptest.NewRequest("POST", "/containers/create?name=job", strings.NewReader(`{"Image":"busybox","Cmd":["echo","hi"]}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	time.Sleep(200 * time.Millisecond) // the watch lists
+
+	srv := httptest.NewServer(http.HandlerFunc(h.Attach))
+	defer srv.Close()
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.WriteString(conn, "POST /containers/job/attach?stream=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: d2k\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(conn)
+		got <- string(b)
+	}()
+	time.Sleep(200 * time.Millisecond) // the attach subscribes and waits for the run
+
+	if err := a.StartContainer(ctx, "job"); err != nil {
+		t.Fatal(err)
+	}
+	pods, err := client.CoreV1().Pods("d2k").List(ctx, metav1.ListOptions{LabelSelector: "app=job"})
+	if err != nil || len(pods.Items) != 1 {
+		t.Fatalf("pods = %v, %v", pods, err)
+	}
+	p := pods.Items[0]
+	p.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, FinishedAt: metav1.Now()}},
+	}}}
+	if _, err := client.CoreV1().Pods("d2k").UpdateStatus(ctx, &p, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fake cluster's log of any pod is "fake logs".
+	if out := <-got; !strings.Contains(out, "fake logs") {
+		t.Fatalf("attach sent %q, want the container's log", out)
 	}
 }
