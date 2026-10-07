@@ -180,6 +180,10 @@ func (a *KubernetesDockerAdapter) volumeMeta(opts CreateVolumeOptions) (metav1.O
 func (a *KubernetesDockerAdapter) createPVC(ctx context.Context, name string, pvc *corev1.PersistentVolumeClaim) (*volume.Volume, error) {
 	created, err := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Create(ctx, pvc, metav1.CreateOptions{})
 	if errors.IsAlreadyExists(err) {
+		old, getErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
+		if getErr == nil && old.DeletionTimestamp != nil {
+			return nil, errdefs.Conflict(fmt.Errorf("volume %q is being deleted: try again once it is gone", name))
+		}
 		existing, err := a.InspectVolume(ctx, name)
 		if errdefs.IsNotFound(err) {
 			return nil, errdefs.Conflict(fmt.Errorf("volume name %q is used by a PersistentVolumeClaim not managed by d2k", name))
