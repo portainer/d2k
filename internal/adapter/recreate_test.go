@@ -8,7 +8,6 @@ import (
 	"github.com/moby/moby/api/types/mount"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -185,8 +184,8 @@ func TestRecreateFromInspectKeepsStorageSettings(t *testing.T) {
 	want := d.Spec.Template.Spec
 
 	type tmpfs struct {
-		target string
-		size   *resource.Quantity
+		Target string
+		Size   int64
 	}
 	tmpfsMounts := func(pod corev1.PodSpec) map[string]tmpfs {
 		volumes := map[string]*corev1.EmptyDirVolumeSource{}
@@ -198,7 +197,11 @@ func TestRecreateFromInspectKeepsStorageSettings(t *testing.T) {
 		out := map[string]tmpfs{}
 		for _, m := range pod.Containers[0].VolumeMounts {
 			if v, ok := volumes[m.Name]; ok {
-				out[m.MountPath] = tmpfs{m.MountPath, v.SizeLimit}
+				var size int64
+				if v.SizeLimit != nil {
+					size = v.SizeLimit.Value()
+				}
+				out[m.MountPath] = tmpfs{m.MountPath, size}
 			}
 		}
 		return out

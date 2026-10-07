@@ -848,6 +848,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 	user, capAdd, capDrop, privileged, readOnly, securityOpt := dockerSecurityContext(spec.SecurityContext)
 	groupAdd, sysctls := dockerPodSecurityContext(d.Spec.Template.Spec.SecurityContext)
 	dnsSearch, dnsOptions := dockerDNSConfig(d.Spec.Template.Spec.DNSConfig)
+	shmSize, tmpfs := dockerTmpfs(d)
 
 	hostConfig := &container.HostConfig{
 		LogConfig: container.LogConfig{
@@ -868,6 +869,8 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		ExtraHosts:     dockerExtraHosts(d.Spec.Template.Spec.HostAliases),
 		DNSSearch:      dnsSearch,
 		DNSOptions:     dnsOptions,
+		ShmSize:        shmSize,
+		Tmpfs:          tmpfs,
 	}
 	hostConfig.Binds, hostConfig.Mounts = volumeConfig(d)
 	process := append(append([]string{}, spec.Command...), spec.Args...)
@@ -1286,6 +1289,39 @@ func volumeConfig(d appsv1.Deployment) ([]string, []mount.Mount) {
 		}
 	}
 	return binds, mounts
+}
+
+// dockerTmpfs returns the container's memory-backed mounts as the
+// HostConfig that creates them: ShmSize for /dev/shm, Tmpfs for the rest.
+func dockerTmpfs(d appsv1.Deployment) (shmSize int64, tmpfs map[string]string) {
+	if len(d.Spec.Template.Spec.Containers) == 0 {
+		return 0, nil
+	}
+	volumes := map[string]*corev1.EmptyDirVolumeSource{}
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
+			volumes[v.Name] = v.EmptyDir
+		}
+	}
+	for _, m := range d.Spec.Template.Spec.Containers[0].VolumeMounts {
+		v, ok := volumes[m.Name]
+		if !ok {
+			continue
+		}
+		var size string
+		if v.SizeLimit != nil {
+			size = "size=" + strconv.FormatInt(v.SizeLimit.Value(), 10)
+		}
+		if m.MountPath == "/dev/shm" && v.SizeLimit != nil {
+			shmSize = v.SizeLimit.Value()
+			continue
+		}
+		if tmpfs == nil {
+			tmpfs = map[string]string{}
+		}
+		tmpfs[m.MountPath] = size
+	}
+	return shmSize, tmpfs
 }
 
 // containerMounts returns the container's named-volume mounts.
