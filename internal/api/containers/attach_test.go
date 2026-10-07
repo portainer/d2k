@@ -34,7 +34,7 @@ func TestStopOnDeathCancelsOnDie(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		stopOnDeath(ctx, stop, "ctr1", live)
+		stopOnDeath(ctx, stop, "ctr1", live, 0)
 		close(done)
 	}()
 
@@ -56,7 +56,7 @@ func TestStopOnDeathIgnoresOtherEvents(t *testing.T) {
 	live := make(chan events.Message, 1)
 	done := make(chan struct{})
 	go func() {
-		stopOnDeath(ctx, stop, "ctr1", live)
+		stopOnDeath(ctx, stop, "ctr1", live, 0)
 		close(done)
 	}()
 
