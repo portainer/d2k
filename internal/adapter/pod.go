@@ -50,19 +50,9 @@ func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deploy
 	if slices.ContainsFunc(previous.Items, func(p corev1.Pod) bool { return p.DeletionTimestamp == nil && !podEnded(p) }) {
 		return nil
 	}
-	for _, p := range previous.Items {
-		if err := pods.Delete(ctx, p.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("unable to delete the previous pod of %q: %w", d.Name, err)
-		}
-	}
-	if err := a.annotate(ctx, d.Name, map[string]*string{
-		types.AnnotationStartedAt: ptr(time.Now().UTC().Format(time.RFC3339Nano)),
-		types.AnnotationStoppedAt: nil,
-		types.AnnotationExitCode:  nil,
-	}); err != nil {
-		return err
-	}
 
+	// The previous run is replaced only once the new pod exists: a start
+	// Kubernetes rejects keeps it, and the container is never without a run.
 	tmpl := d.Spec.Template.DeepCopy()
 	tmpl.Spec.RestartPolicy = corev1.RestartPolicyNever
 	if restartPolicyOf(*d) == container.RestartPolicyOnFailure {
@@ -82,6 +72,18 @@ func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deploy
 	}
 	if _, err := pods.Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("unable to create the pod of %q: %w", d.Name, err)
+	}
+	if err := a.annotate(ctx, d.Name, map[string]*string{
+		types.AnnotationStartedAt: ptr(time.Now().UTC().Format(time.RFC3339Nano)),
+		types.AnnotationStoppedAt: nil,
+		types.AnnotationExitCode:  nil,
+	}); err != nil {
+		return err
+	}
+	for _, p := range previous.Items {
+		if err := pods.Delete(ctx, p.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("unable to delete the previous pod of %q: %w", d.Name, err)
+		}
 	}
 	return nil
 }
