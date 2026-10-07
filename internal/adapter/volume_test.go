@@ -239,3 +239,41 @@ func TestConcurrentNFSVolumes(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// Two containers created at once on a volume whose old PVC is terminating,
+// as compose up does for two services sharing a volume right after
+// compose down -v, both wait for it to go; then only one create wins. The
+// other must get the volume the first one created, as Docker returns an
+// existing volume, not wait out the timeout and fail.
+func TestCreateVolumeConcurrentlyWhileOldOneIsTerminating(t *testing.T) {
+	orig := volumeTerminationTimeout
+	volumeTerminationTimeout = 3 * time.Second
+	defer func() { volumeTerminationTimeout = orig }()
+
+	now := metav1.Now()
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data", Namespace: testNamespace,
+		Labels:            managedLabels("data"),
+		Annotations:       map[string]string{"d2k.portainer.io/docker-name": "data"},
+		DeletionTimestamp: &now,
+		Finalizers:        []string{"kubernetes.io/pvc-protection"},
+	}}
+	a, client := newTestAdapter(t, pvc)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data"})
+		}()
+	}
+	time.Sleep(200 * time.Millisecond)
+	_ = client.CoreV1().PersistentVolumeClaims(testNamespace).Delete(context.Background(), "data", metav1.DeleteOptions{})
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("create %d once the old PVC is gone = %v, want the volume", i, err)
+		}
+	}
+}
