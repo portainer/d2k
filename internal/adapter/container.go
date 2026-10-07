@@ -1352,26 +1352,31 @@ func (a *KubernetesDockerAdapter) ConnectNetwork(ctx context.Context, networkNam
 	if err != nil {
 		return err
 	}
-	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
-	if err != nil {
-		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
-	}
 
 	name := strings.TrimPrefix(networkNameOrID, networkIDForName("", a.namespace))
-	networks := slices.DeleteFunc(containerNetworks(*d), func(n string) bool { return n == name })
-	if connect {
-		networks = append(networks, name)
-	}
-	encoded, err := json.Marshal(networks)
-	if err != nil {
+
+	// Portainer reconnects a container's networks with one request per
+	// network, concurrently; retry so a losing request's own read isn't
+	// stale by the time it writes back the full network list.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+		if err != nil {
+			return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+		}
+
+		networks := slices.DeleteFunc(containerNetworks(*d), func(n string) bool { return n == name })
+		if connect {
+			networks = append(networks, name)
+		}
+		encoded, err := json.Marshal(networks)
+		if err != nil {
+			return err
+		}
+		if d.Annotations == nil {
+			d.Annotations = map[string]string{}
+		}
+		d.Annotations[types.AnnotationNetworks] = string(encoded)
+		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, d, metav1.UpdateOptions{})
 		return err
-	}
-	patch, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{"annotations": map[string]string{types.AnnotationNetworks: string(encoded)}},
 	})
-	if err != nil {
-		return err
-	}
-	_, err = a.client.AppsV1().Deployments(a.namespace).Patch(ctx, resolved, k8stypes.MergePatchType, patch, metav1.PatchOptions{})
-	return err
 }
