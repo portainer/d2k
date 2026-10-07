@@ -329,3 +329,35 @@ func TestPodEventsReportEachCrashOnce(t *testing.T) {
 		t.Fatalf("die events = %d for 3 crashes, want 3", died)
 	}
 }
+
+// docker stop of a container its Deployment restarts ends its pod without a
+// restart: the kubelet shows its container terminated before the pod goes.
+// As in Docker, that is a death, which compose's attached up waits for
+// before it returns (D2K-058); a crash is still reported once.
+func TestPodEventsReportAStopAsADeath(t *testing.T) {
+	known := map[string]*appsv1.Deployment{"web-k8s": eventDeployment(1, nil)}
+	restarts, terminations, podApp := map[string]int32{}, map[string]int32{}, map[string]string{}
+	pod := func(restarts int32, state corev1.ContainerState) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "web-k8s-abc", Labels: map[string]string{"app": "web-k8s"}},
+			Spec:       corev1.PodSpec{RestartPolicy: corev1.RestartPolicyAlways},
+			Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				RestartCount: restarts, State: state,
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+			}}},
+		}
+	}
+	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	var got []events.Message
+	for _, p := range []*corev1.Pod{
+		pod(0, running),
+		pod(0, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}), // a crash
+		pod(1, running),
+		pod(1, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}), // docker stop
+	} {
+		got = append(got, podEvents(known, restarts, terminations, podApp, watch.Modified, p, time.Now())...)
+	}
+	if len(got) != 2 || got[1].Action != events.ActionDie || got[1].Actor.Attributes["exitCode"] != "0" {
+		t.Fatalf("events = %q %v, want a die for the crash and one, with exit code 0, for the stop", actions(got), got)
+	}
+}
