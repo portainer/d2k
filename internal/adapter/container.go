@@ -845,6 +845,9 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		endpoints[name] = &network.EndpointSettings{NetworkID: id, IPAddress: ip}
 	}
 
+	user, capAdd, capDrop, privileged, readOnly, securityOpt := dockerSecurityContext(spec.SecurityContext)
+	groupAdd, sysctls := dockerPodSecurityContext(d.Spec.Template.Spec.SecurityContext)
+
 	hostConfig := &container.HostConfig{
 		LogConfig: container.LogConfig{
 			Type: "json-file",
@@ -852,8 +855,15 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		RestartPolicy: container.RestartPolicy{Name: restartPolicyOf(d)},
 		AutoRemove:    d.Annotations[types.AnnotationAutoRemove] == "true",
 		// Each pod has its own cgroup namespace, as with Docker's default on cgroup v2.
-		CgroupnsMode: container.CgroupnsModePrivate,
-		Resources:    dockerResources(spec.Resources),
+		CgroupnsMode:   container.CgroupnsModePrivate,
+		Resources:      dockerResources(spec.Resources),
+		CapAdd:         capAdd,
+		CapDrop:        capDrop,
+		Privileged:     privileged,
+		ReadonlyRootfs: readOnly,
+		GroupAdd:       groupAdd,
+		Sysctls:        sysctls,
+		SecurityOpt:    securityOpt,
 	}
 	hostConfig.Binds, hostConfig.Mounts = volumeConfig(d)
 	process := append(append([]string{}, spec.Command...), spec.Args...)
@@ -885,6 +895,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		Mounts:     containerMounts(d),
 		Config: &container.Config{
 			Image:        d.Annotations[types.AnnotationImageRef],
+			User:         user,
 			ExposedPorts: network.PortSet{},
 			Tty:          spec.TTY,
 			OpenStdin:    spec.Stdin,

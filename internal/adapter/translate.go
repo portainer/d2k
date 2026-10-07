@@ -339,6 +339,81 @@ func dockerResources(r corev1.ResourceRequirements) container.Resources {
 	return out
 }
 
+// dockerSecurityContext is the inverse of containerSecurityContext: the
+// Docker user, capability, privileged, read-only and security-opt settings
+// of a container's security context.
+func dockerSecurityContext(sc *corev1.SecurityContext) (user string, capAdd, capDrop []string, privileged, readOnly bool, securityOpt []string) {
+	if sc == nil {
+		return "", nil, nil, false, false, nil
+	}
+	if sc.RunAsUser != nil {
+		user = strconv.FormatInt(*sc.RunAsUser, 10)
+		if sc.RunAsGroup != nil {
+			user += ":" + strconv.FormatInt(*sc.RunAsGroup, 10)
+		}
+	}
+	if sc.Capabilities != nil {
+		for _, c := range sc.Capabilities.Add {
+			capAdd = append(capAdd, string(c))
+		}
+		for _, c := range sc.Capabilities.Drop {
+			capDrop = append(capDrop, string(c))
+		}
+	}
+	if sc.Privileged != nil {
+		privileged = *sc.Privileged
+	}
+	if sc.ReadOnlyRootFilesystem != nil {
+		readOnly = *sc.ReadOnlyRootFilesystem
+	}
+	if sc.AllowPrivilegeEscalation != nil && !*sc.AllowPrivilegeEscalation {
+		securityOpt = append(securityOpt, "no-new-privileges")
+	}
+	if p := sc.SeccompProfile; p != nil && p.Type == corev1.SeccompProfileTypeUnconfined {
+		securityOpt = append(securityOpt, "seccomp=unconfined")
+	}
+	if p := sc.AppArmorProfile; p != nil {
+		switch p.Type {
+		case corev1.AppArmorProfileTypeUnconfined:
+			securityOpt = append(securityOpt, "apparmor=unconfined")
+		case corev1.AppArmorProfileTypeRuntimeDefault:
+			securityOpt = append(securityOpt, "apparmor=docker-default")
+		case corev1.AppArmorProfileTypeLocalhost:
+			if p.LocalhostProfile != nil {
+				securityOpt = append(securityOpt, "apparmor="+*p.LocalhostProfile)
+			}
+		}
+	}
+	if l := sc.SELinuxOptions; l != nil {
+		for _, field := range []struct{ name, value string }{
+			{"user", l.User}, {"role", l.Role}, {"type", l.Type}, {"level", l.Level},
+		} {
+			if field.value != "" {
+				securityOpt = append(securityOpt, "label="+field.name+":"+field.value)
+			}
+		}
+	}
+	return user, capAdd, capDrop, privileged, readOnly, securityOpt
+}
+
+// dockerPodSecurityContext is the inverse of podSecurityContext: the Docker
+// GroupAdd and Sysctls settings of a pod's security context.
+func dockerPodSecurityContext(sc *corev1.PodSecurityContext) (groupAdd []string, sysctls map[string]string) {
+	if sc == nil {
+		return nil, nil
+	}
+	for _, g := range sc.SupplementalGroups {
+		groupAdd = append(groupAdd, strconv.FormatInt(g, 10))
+	}
+	if len(sc.Sysctls) > 0 {
+		sysctls = map[string]string{}
+		for _, s := range sc.Sysctls {
+			sysctls[s.Name] = s.Value
+		}
+	}
+	return groupAdd, sysctls
+}
+
 // Docker's healthcheck defaults.
 const (
 	defaultHealthInterval = 30 * time.Second
