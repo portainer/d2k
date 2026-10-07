@@ -164,6 +164,36 @@ func (a *KubernetesDockerAdapter) waitForPodsGone(ctx context.Context, deploymen
 	}
 }
 
+// restartStartTimeout bounds how long a restart waits for the container to
+// run again. A pod that takes longer, pulling its image on another node for
+// one, is reported starting meanwhile.
+const restartStartTimeout = 30 * time.Second
+
+// waitUntilRunStarted waits until the container's run has begun, or failed
+// to, or timeout passes.
+func (a *KubernetesDockerAdapter) waitUntilRunStarted(ctx context.Context, deployment string, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, deployment, metav1GetOptions())
+		if err != nil {
+			return
+		}
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(deployment))
+		if err != nil {
+			return
+		}
+		if state := containerState(*d, pods.Items, time.Now()); !IsStarting(&state) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
 // podEnded reports whether the pod's container has exited for good. The
 // kubelet reports the container terminated, which is the container's die,
 // before it reports the pod's phase.

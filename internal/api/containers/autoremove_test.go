@@ -158,6 +158,7 @@ func TestAutoRemoveRestart(t *testing.T) {
 	a := adapter.NewWithClient(client, "d2k")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	kubeletRuns(ctx, client)
 	go a.RecordEvents(ctx)
 	h := NewHandler(a)
 	runRemovable(t, ctx, client, a, h, "job")
