@@ -51,8 +51,8 @@ const (
 	// containers created before it was recorded, as Deployment replicas.
 	AnnotationRestartPolicy = LabelPrefix + "/restart-policy"
 
-	// AnnotationExitCode records the exit code of a container that runs as a
-	// pod, once its pod is gone.
+	// AnnotationExitCode records the exit code of a container docker stop
+	// ended, once its pod is gone.
 	AnnotationExitCode = LabelPrefix + "/exit-code"
 
 	// AnnotationAutoRemove marks a container that is removed when its run
