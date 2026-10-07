@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -291,6 +292,29 @@ func (a *KubernetesDockerAdapter) joinedNetwork(ctx context.Context, name string
 	return false, nil
 }
 
+// runsOnNetwork reports whether a container that joined the named network
+// runs, or is starting. As in Docker, where only those have an endpoint on
+// it, created and stopped containers do not hold a network.
+func (a *KubernetesDockerAdapter) runsOnNetwork(ctx context.Context, name string) (bool, error) {
+	deps, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return false, fmt.Errorf("unable to list deployments: %w", err)
+	}
+	for _, d := range deps.Items {
+		if !slices.Contains(containerNetworks(d), name) {
+			continue
+		}
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(d.Name))
+		if err != nil {
+			return false, fmt.Errorf("unable to list pods: %w", err)
+		}
+		if state := containerState(d, pods.Items, time.Now()); state.Running || IsStarting(&state) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // InspectNetworkDetail returns a full Docker network inspect response suitable
 // for Portainer and other tooling that expects more fields than the list view.
 //
@@ -391,7 +415,7 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 
 	// The Docker CLI sends the ID (e.g. "d2k-d2k-example-app_backend")
 	// rather than the name; resolve it back to the recorded name so
-	// joinedNetwork, which only knows names, can check it.
+	// runsOnNetwork, which only knows names, can check it.
 	name := nameOrID
 	if records, err := a.networkRecords(ctx); err == nil {
 		for _, r := range records {
@@ -401,9 +425,9 @@ func (a *KubernetesDockerAdapter) RemoveNetwork(ctx context.Context, nameOrID st
 			}
 		}
 	}
-	if joined, err := a.joinedNetwork(ctx, name); err != nil {
+	if runs, err := a.runsOnNetwork(ctx, name); err != nil {
 		return err
-	} else if joined {
+	} else if runs {
 		return errdefs.Forbidden(fmt.Errorf("network %s has active endpoints", nameOrID))
 	}
 

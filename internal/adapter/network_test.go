@@ -123,7 +123,10 @@ func TestRemoveNetworkRefusesWhileAContainerIsJoined(t *testing.T) {
 	if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "demo_back"}); err != nil {
 		t.Fatal(err)
 	}
-	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Networks: []string{"demo_back"}})
+	id := mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Networks: []string{"demo_back"}})
+	if err := a.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := a.RemoveNetwork(ctx, "demo_back"); !errdefs.IsForbidden(err) {
 		t.Fatalf("remove while a container is joined = %v, want forbidden (has active endpoints)", err)
