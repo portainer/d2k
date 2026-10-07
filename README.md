@@ -259,6 +259,12 @@ kubectl apply -f deploy/kubernetes.yaml
 
 For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included.
 
+### Multiple installs on one cluster
+
+Portainer can point several environments at the same cluster, each as its own d2k install in its own namespace. Everything namespace-scoped (the Role, RoleBinding, ServiceAccount, Deployment, Service, Secret) is already isolated by `namespace: d2k` in the manifest, and the ValidatingAdmissionPolicy is written once and shared safely: it derives the expected ServiceAccount from whichever namespace is being patched, so re-applying it for every install is a no-op after the first.
+
+The ClusterRole and ClusterRoleBinding named `d2k-node-reader` are the exception: they are cluster-scoped, so their names must be made unique per install (for example by appending the namespace, as `test/e2e/setup.sh` and the overnight environment's `install.sh` both do). If two installs keep the default name, the second `kubectl apply` silently overwrites the first's ClusterRoleBinding subject, and the first install's ServiceAccount loses its cluster-wide node list access (`docker info`'s node/manager counts, `docker node ls` in Swarm mode, and `/info`'s leader-election check all stop working, with no error at apply time). Rename both objects (and `roleRef.name`) together, the same way you rename `namespace: d2k`.
+
 Restarting d2k (`kubectl rollout restart`, a pod delete, a reschedule) takes about 5 seconds longer than it used to: a `preStop` hook delays SIGTERM so kube-proxy has time to stop routing to the terminating pod before d2k stops accepting connections. Without it, a client can hit the pod in that window and see its connection reset.
 
 Connect Portainer or the Docker CLI to the d2k Service:
