@@ -187,8 +187,8 @@ CASES = [
     case("mem_limit", YES, "Memory limit.", "mem_limit: 64m", ok(lambda d: ctr(d)["resources"]["limits"]["memory"] == "64Mi")),
     case("mem_reservation", YES, "Memory request.", "mem_reservation: 32m",
          ok(lambda d: ctr(d)["resources"]["requests"]["memory"] == "32Mi")),
-    case("gpus", PARTIAL, "A GPU limit on the cluster's GPU resource (`nvidia.com/gpu` or `amd.com/gpu`); `all` "
-         "requests one. Ignored with a warning when no node offers GPUs.", "gpus: all", warns("GPU request ignored")),
+    case("gpus", PARTIAL, "A GPU limit on the resource named by `D2K_GPU_RESOURCE_NAME` (such as `nvidia.com/gpu`); "
+         "`all` requests one. Ignored with a warning when `D2K_GPU_RESOURCE_NAME` is not set.", "gpus: all", warns("GPU request ignored")),
     case("cpu_count", NO, "Windows only.", "cpu_count: 2", warns("CpuCount")),
     case("cpu_percent", NO, "Windows only.", "cpu_percent: 50", warns("CpuPercent")),
     case("cpu_rt_period", NO, "", "cpu_rt_period: 1000000", warns("CpuRealtimePeriod")),

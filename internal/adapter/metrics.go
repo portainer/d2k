@@ -43,9 +43,11 @@ func (a *KubernetesDockerAdapter) ContainerUsage(ctx context.Context, name strin
 	if err != nil {
 		return Usage{}, fmt.Errorf("unable to get deployment %q: %w", resolved, err)
 	}
+	// docker stats answers from the container's own limit, as reported
+	// below, when host-wide node access isn't granted; see /info's Info.
 	ncpu, hostMemory, err := a.HostResources(ctx)
 	if err != nil {
-		return Usage{}, err
+		log.Warn().Str("context", "KubernetesAdapter").Err(err).Msg("ContainerUsage: unable to read host resources")
 	}
 	u := Usage{OnlineCPUs: max(ncpu, 1), MemoryLimit: hostMemory}
 	if c := d.Spec.Template.Spec.Containers; len(c) > 0 {

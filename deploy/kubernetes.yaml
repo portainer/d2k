@@ -1,7 +1,6 @@
-# Namespace that d2k is deployed into. Change this to your target namespace.
-# If the namespace doesn't exist, d2k will create it on startup.
-# Note: d2k does not need to be in the same namespace as your workloads,
-# but it's simplest to manage if it is.
+# Namespace that d2k is deployed into and manages. Change this to your
+# target namespace. D2K_NAMESPACE below is set from it, and the admission
+# policy protects only the namespace d2k's own ServiceAccount lives in.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -12,7 +11,8 @@ metadata:
   # here would override that policy on every apply.
 ---
 # ServiceAccount that d2k runs as. Bound to the namespace Role below for
-# workload management, and to the ClusterRole below for read-only node access.
+# workload management, and to the ClusterRole below for read-only node and
+# StorageClass access.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -57,7 +57,8 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
-  # Secrets — used for swarm secrets
+  # Secrets — swarm secrets, and the Secret holding a container's compose
+  # secrets and configs and files copied in with docker cp
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -87,7 +88,8 @@ rules:
     resources: ["pods"]
     verbs: ["get", "list"]
 
-  # Events — read-only, used for docker events history
+  # Events — read-only; not used by the code at this commit (docker events
+  # come from Deployment, Pod and PVC watches)
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list"]
@@ -111,8 +113,9 @@ roleRef:
 ---
 # ClusterRole grants read-only access to nodes across the cluster.
 # Nodes are a cluster-scoped resource and cannot be granted via a namespaced Role.
-# Required for: SwarmListNodes, SwarmInspectNode, and leader election in /info
-# (matching the API server host to a control-plane node IP).
+# Required in both modes: /info's CPUs and memory and docker stats' limits
+# (node allocatable), NFS volume matching (StorageClasses), and in Swarm mode
+# SwarmListNodes, SwarmInspectNode and leader election in /info.
 # Node state changes (drain/pause/active) and label mutations are intentionally
 # blocked — d2k is a workload consumption tool, not a cluster administration tool.
 #
