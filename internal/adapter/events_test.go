@@ -294,3 +294,38 @@ func TestEventsRemoveRunsThatEndedBeforeTheWatch(t *testing.T) {
 		}
 	}
 }
+
+// An on-failure container that crashes is reported dead once per crash. The
+// kubelet shows each crash as Terminated, then Waiting in back-off with the
+// same restart count, then Running with the count raised: only the
+// Terminated status is a new death.
+func TestPodEventsReportEachCrashOnce(t *testing.T) {
+	d := eventDeployment(0, map[string]string{types.AnnotationRestartPolicy: "on-failure", types.AnnotationStartedAt: "2026-01-01T00:00:00Z"})
+	known := map[string]*appsv1.Deployment{"web-k8s": d}
+	restarts, terminations, podApp := map[string]int32{}, map[string]int32{}, map[string]string{}
+	running := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+	terminated := corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}}
+	backOff := corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+	var died int
+	for _, s := range []struct {
+		restarts int32
+		state    corev1.ContainerState
+	}{
+		{0, running}, {0, terminated}, {1, running},
+		{1, terminated}, {1, backOff}, {2, running},
+		{2, terminated}, {2, backOff}, {3, running},
+	} {
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "web-k8s-abc", Labels: map[string]string{"app": "web-k8s"}},
+			Spec:       corev1.PodSpec{RestartPolicy: corev1.RestartPolicyOnFailure},
+			Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				RestartCount: s.restarts, State: s.state,
+				LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+			}}},
+		}
+		died += len(podEvents(known, restarts, terminations, podApp, watch.Modified, p, time.Now()))
+	}
+	if died != 3 {
+		t.Fatalf("die events = %d for 3 crashes, want 3", died)
+	}
+}
