@@ -1208,3 +1208,23 @@ func TestFailedStartOfAnAutoRemoveContainerRemovesIt(t *testing.T) {
 		t.Fatalf("inspect after the failed start of an AutoRemove container = %v, want not found", err)
 	}
 }
+
+// An AutoRemove container runs once, as a pod: the API makes restart policy
+// "no" the default and refuses AutoRemove with any other. Its failed start
+// removes it too, as Docker's does. docker run --rm waits for the removal
+// before it reports the start's error, and would hang without it.
+func TestFailedStartOfARunOnceAutoRemoveContainerRemovesIt(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "job", Image: "busybox", RestartPolicy: "no", AutoRemove: true})
+	client.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "job-x2k8p",
+			errors.New("exceeded quota: pods, requested: pods=1, used: pods=4, limited: pods=4"))
+	})
+	if err := a.StartContainer(ctx, "job"); err == nil {
+		t.Fatal("StartContainer succeeded, want the quota's refusal")
+	}
+	if _, err := a.InspectContainer(ctx, "job"); !errdefs.IsNotFound(err) {
+		t.Fatalf("inspect after the failed start of an AutoRemove container = %v, want not found", err)
+	}
+}
