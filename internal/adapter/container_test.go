@@ -237,6 +237,38 @@ func TestInspectPortsHaveHostIP(t *testing.T) {
 	}
 }
 
+// docker inspect's RestartCount, and the restart count Portainer reads from
+// it, must reflect a crash-looping container's restarts rather than stay 0
+// (D2K-080).
+func TestInspectReportsRestartCount(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "always"})
+	if err := a.StartContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "web-abc", Namespace: testNamespace,
+		Labels: map[string]string{"app": "web", types.LabelManagedBy: types.LabelManagedByValue}}}
+	if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	pod.Status = corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		RestartCount: 4,
+		State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+	}}}
+	if _, err := client.CoreV1().Pods(testNamespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	inspect, err := a.InspectContainer(ctx, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspect.RestartCount != 4 {
+		t.Errorf("RestartCount = %d, want 4 for a crash-looping restart:always container", inspect.RestartCount)
+	}
+}
+
 func TestCreateContainerNamedVolumes(t *testing.T) {
 	a, client := newTestAdapter(t)
 	_, warnings, err := a.CreateContainer(context.Background(), RunOptions{

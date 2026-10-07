@@ -64,6 +64,26 @@ func containerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) conta
 	return state
 }
 
+// containerRestartCount reports the Docker-visible restart count for the
+// container the Deployment backs: the restarts of the pod containerState
+// itself reads. A pod Kubernetes replaces (deleted by hand, drained,
+// evicted, or a new run-once pod) starts its own container status at zero,
+// so a replacement understates it against Docker, whose restart count is
+// for the container's whole life; Kubernetes keeps no restart history once
+// a pod is gone, so there is nothing more to add it to.
+func containerRestartCount(d appsv1.Deployment, pods []corev1.Pod) int {
+	status := newestContainerStatus(pods)
+	if status == nil || creating(status) {
+		if ran := newestRunStatus(pods); ran != nil {
+			status = ran
+		}
+	}
+	if status == nil {
+		return 0
+	}
+	return int(status.RestartCount)
+}
+
 // podContainerState derives the state of a container that runs as a pod.
 func podContainerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) container.State {
 	state := container.State{Status: container.StateCreated, StartedAt: d.Annotations[types.AnnotationStartedAt]}

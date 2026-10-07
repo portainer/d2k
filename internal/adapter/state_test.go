@@ -152,6 +152,36 @@ func TestContainerStateImagePullErrorIsReported(t *testing.T) {
 	}
 }
 
+// A crash-looping container's RestartCount must come from its pod, the way
+// a real daemon's own restart manager counts it (D2K-080): docker inspect
+// and the "restart count" Portainer reads from it must not stay 0 while a
+// restart:always/on-failure container keeps crashing.
+func TestContainerRestartCount(t *testing.T) {
+	started := map[string]string{types.AnnotationStartedAt: now.Add(-time.Hour).Format(time.RFC3339Nano)}
+	crashLooping := podWith(corev1.ContainerStatus{
+		RestartCount: 5,
+		State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+	})
+	if got := containerRestartCount(withReplicas(1, started), []corev1.Pod{crashLooping}); got != 5 {
+		t.Errorf("restart count = %d, want 5 for a crash-looping Deployment-backed container", got)
+	}
+
+	onFailure := podWith(corev1.ContainerStatus{
+		RestartCount: 2,
+		State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+	})
+	if got := containerRestartCount(withReplicas(0, map[string]string{
+		types.AnnotationRestartPolicy: "on-failure",
+		types.AnnotationStartedAt:     now.Add(-time.Hour).Format(time.RFC3339Nano),
+	}), []corev1.Pod{onFailure}); got != 2 {
+		t.Errorf("restart count = %d, want 2 for a crash-looping run-once container", got)
+	}
+
+	if got := containerRestartCount(withReplicas(0, nil), nil); got != 0 {
+		t.Errorf("restart count = %d, want 0 with no pod", got)
+	}
+}
+
 func TestContainerHealth(t *testing.T) {
 	probe := &corev1.Probe{PeriodSeconds: 5, FailureThreshold: 3, InitialDelaySeconds: 10}
 	withProbe := withReplicas(1, nil)
