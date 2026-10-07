@@ -8,6 +8,7 @@ import (
 	"github.com/moby/moby/api/types/mount"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -91,5 +92,119 @@ func TestRecreateFromInspectKeepsResources(t *testing.T) {
 	}
 	if got := recreate(t, a, "api", "api2").Containers[0].Resources; !equality.Semantic.DeepEqual(got, want) {
 		t.Errorf("recreated container resources = %v, want %v", got, want)
+	}
+}
+
+func TestRecreateFromInspectKeepsSecuritySettings(t *testing.T) {
+	a, client := newTestAdapter(t)
+	opts, _ := RunOptionsFromRequest("sec", container.CreateRequest{
+		Config: &container.Config{Image: "alpine", User: "1000:1000"},
+		HostConfig: &container.HostConfig{
+			CapAdd: []string{"NET_ADMIN"}, CapDrop: []string{"MKNOD"},
+			Privileged: true, ReadonlyRootfs: true,
+			GroupAdd: []string{"1001", "1002"},
+			Sysctls:  map[string]string{"net.ipv4.ip_forward": "1"},
+			SecurityOpt: []string{
+				"no-new-privileges",
+				"seccomp=unconfined",
+				"label=user:system_u",
+			},
+		},
+	})
+	mustCreate(t, a, opts)
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "sec", metav1.GetOptions{})
+	wantSC, wantPodSC := d.Spec.Template.Spec.Containers[0].SecurityContext, d.Spec.Template.Spec.SecurityContext
+
+	got := recreate(t, a, "sec", "sec2")
+	if !equality.Semantic.DeepEqual(got.Containers[0].SecurityContext, wantSC) {
+		t.Errorf("recreated container SecurityContext = %+v, want %+v", got.Containers[0].SecurityContext, wantSC)
+	}
+	if !equality.Semantic.DeepEqual(got.SecurityContext, wantPodSC) {
+		t.Errorf("recreated pod SecurityContext = %+v, want %+v", got.SecurityContext, wantPodSC)
+	}
+}
+
+func TestRecreateFromInspectKeepsNetworkingSettings(t *testing.T) {
+	a, client := newTestAdapter(t)
+	opts, _ := RunOptionsFromRequest("net", container.CreateRequest{
+		Config: &container.Config{Image: "alpine"},
+		HostConfig: &container.HostConfig{
+			ExtraHosts: []string{"foo.example:10.0.0.5", "bar.example:10.0.0.5"},
+			DNSSearch:  []string{"svc.cluster.local"},
+			DNSOptions: []string{"ndots:2", "timeout:1"},
+		},
+	})
+	mustCreate(t, a, opts)
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "net", metav1.GetOptions{})
+	wantAliases, wantDNS := d.Spec.Template.Spec.HostAliases, d.Spec.Template.Spec.DNSConfig
+
+	got := recreate(t, a, "net", "net2")
+	if !equality.Semantic.DeepEqual(got.HostAliases, wantAliases) {
+		t.Errorf("recreated pod HostAliases = %+v, want %+v", got.HostAliases, wantAliases)
+	}
+	if !equality.Semantic.DeepEqual(got.DNSConfig, wantDNS) {
+		t.Errorf("recreated pod DNSConfig = %+v, want %+v", got.DNSConfig, wantDNS)
+	}
+}
+
+func TestRecreateFromInspectKeepsProcessSettings(t *testing.T) {
+	a, client := newTestAdapter(t)
+	grace := 42
+	opts, _ := RunOptionsFromRequest("proc", container.CreateRequest{
+		Config: &container.Config{
+			Image: "alpine", WorkingDir: "/srv", Hostname: "myhost", StopTimeout: &grace,
+		},
+	})
+	mustCreate(t, a, opts)
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "proc", metav1.GetOptions{})
+	want := d.Spec.Template.Spec
+
+	got := recreate(t, a, "proc", "proc2")
+	if got.Containers[0].WorkingDir != want.Containers[0].WorkingDir {
+		t.Errorf("recreated WorkingDir = %q, want %q", got.Containers[0].WorkingDir, want.Containers[0].WorkingDir)
+	}
+	if got.Hostname != want.Hostname {
+		t.Errorf("recreated Hostname = %q, want %q", got.Hostname, want.Hostname)
+	}
+	if !equality.Semantic.DeepEqual(got.TerminationGracePeriodSeconds, want.TerminationGracePeriodSeconds) {
+		t.Errorf("recreated TerminationGracePeriodSeconds = %v, want %v", got.TerminationGracePeriodSeconds, want.TerminationGracePeriodSeconds)
+	}
+}
+
+func TestRecreateFromInspectKeepsStorageSettings(t *testing.T) {
+	a, client := newTestAdapter(t)
+	opts, _ := RunOptionsFromRequest("store", container.CreateRequest{
+		Config: &container.Config{Image: "alpine"},
+		HostConfig: &container.HostConfig{
+			ShmSize: 128 << 20,
+			Tmpfs:   map[string]string{"/cache": "size=64m"},
+		},
+	})
+	mustCreate(t, a, opts)
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "store", metav1.GetOptions{})
+	want := d.Spec.Template.Spec
+
+	type tmpfs struct {
+		target string
+		size   *resource.Quantity
+	}
+	tmpfsMounts := func(pod corev1.PodSpec) map[string]tmpfs {
+		volumes := map[string]*corev1.EmptyDirVolumeSource{}
+		for _, v := range pod.Volumes {
+			if v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
+				volumes[v.Name] = v.EmptyDir
+			}
+		}
+		out := map[string]tmpfs{}
+		for _, m := range pod.Containers[0].VolumeMounts {
+			if v, ok := volumes[m.Name]; ok {
+				out[m.MountPath] = tmpfs{m.MountPath, v.SizeLimit}
+			}
+		}
+		return out
+	}
+	wantMounts, gotMounts := tmpfsMounts(want), tmpfsMounts(recreate(t, a, "store", "store2"))
+	if !equality.Semantic.DeepEqual(gotMounts, wantMounts) {
+		t.Errorf("recreated tmpfs mounts = %+v, want %+v", gotMounts, wantMounts)
 	}
 }
