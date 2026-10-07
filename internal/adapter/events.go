@@ -374,8 +374,10 @@ func podEvents(known map[string]*appsv1.Deployment, restarts, terminations map[s
 	count, prev := restartCount(p), restarts[p.Name]
 	restarts[p.Name] = count
 	if p.Spec.RestartPolicy != "" && p.Spec.RestartPolicy != corev1.RestartPolicyAlways {
+		// In back-off the kubelet shows the last crash as Waiting, with the
+		// restart count it had: the count drops by one until the restart.
 		count, prev = terminationCount(p), terminations[p.Name]
-		terminations[p.Name] = count
+		terminations[p.Name] = max(count, prev)
 	}
 	d, ok := known[p.Labels["app"]]
 	if !ok || count <= prev {
