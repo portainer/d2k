@@ -396,6 +396,34 @@ func dockerSecurityContext(sc *corev1.SecurityContext) (user string, capAdd, cap
 	return user, capAdd, capDrop, privileged, readOnly, securityOpt
 }
 
+// dockerExtraHosts is the inverse of hostAliases: the --add-host entries a
+// pod's host aliases were set from.
+func dockerExtraHosts(aliases []corev1.HostAlias) []string {
+	var hosts []string
+	for _, a := range aliases {
+		for _, host := range a.Hostnames {
+			hosts = append(hosts, host+":"+a.IP)
+		}
+	}
+	return hosts
+}
+
+// dockerDNSConfig is the inverse of dnsConfig: the DNSSearch and DNSOptions
+// settings of a pod's DNS config.
+func dockerDNSConfig(c *corev1.PodDNSConfig) (search []string, options []string) {
+	if c == nil {
+		return nil, nil
+	}
+	for _, o := range c.Options {
+		if o.Value != nil {
+			options = append(options, o.Name+":"+*o.Value)
+		} else {
+			options = append(options, o.Name)
+		}
+	}
+	return c.Searches, options
+}
+
 // dockerPodSecurityContext is the inverse of podSecurityContext: the Docker
 // GroupAdd and Sysctls settings of a pod's security context.
 func dockerPodSecurityContext(sc *corev1.PodSecurityContext) (groupAdd []string, sysctls map[string]string) {

@@ -847,6 +847,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 
 	user, capAdd, capDrop, privileged, readOnly, securityOpt := dockerSecurityContext(spec.SecurityContext)
 	groupAdd, sysctls := dockerPodSecurityContext(d.Spec.Template.Spec.SecurityContext)
+	dnsSearch, dnsOptions := dockerDNSConfig(d.Spec.Template.Spec.DNSConfig)
 
 	hostConfig := &container.HostConfig{
 		LogConfig: container.LogConfig{
@@ -864,6 +865,9 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 		GroupAdd:       groupAdd,
 		Sysctls:        sysctls,
 		SecurityOpt:    securityOpt,
+		ExtraHosts:     dockerExtraHosts(d.Spec.Template.Spec.HostAliases),
+		DNSSearch:      dnsSearch,
+		DNSOptions:     dnsOptions,
 	}
 	hostConfig.Binds, hostConfig.Mounts = volumeConfig(d)
 	process := append(append([]string{}, spec.Command...), spec.Args...)
