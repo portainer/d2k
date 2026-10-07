@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -63,5 +64,53 @@ func TestWaitAfterStartWaitsForTheRun(t *testing.T) {
 	}()
 	if rec := do(t, h, "POST", "/containers/job/wait", ""); !strings.Contains(rec.Body.String(), `"StatusCode":3`) {
 		t.Fatalf("wait = %d %s, want the run's exit code 3", rec.Code, rec.Body)
+	}
+}
+
+// Docker refuses exec into a container its restart policy is restarting:
+// 409 "is restarting, wait until the container is running", at create and
+// at start. d2k reports a crash-looping pod's container as restarting, and
+// the kubelet cannot exec into it either.
+func TestExecRefusesARestartingContainer(t *testing.T) {
+	h, client := newTestRouter()
+	if rec := do(t, h, "POST", "/containers/create?name=web", `{"Image":"busybox","HostConfig":{"RestartPolicy":{"Name":"always"}}}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/containers/web/start", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("start = %d %s", rec.Code, rec.Body)
+	}
+	ctx := context.Background()
+	pod, err := client.CoreV1().Pods("d2k").Create(ctx, &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-abc", Namespace: "d2k", Labels: map[string]string{"app": "web", "d2k.portainer.io/managed-by": "d2k"}, CreationTimestamp: metav1.Now()},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
+		}}},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := do(t, h, "POST", "/containers/web/exec", `{"Cmd":["true"]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("exec create on a running container = %d %s", rec.Code, rec.Body)
+	}
+	var created struct{ Id string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	// The container crashes; the kubelet backs off before restarting it.
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		RestartCount:         1,
+		State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 2, FinishedAt: metav1.Now()}},
+	}}
+	if _, err := client.CoreV1().Pods("d2k").UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(t, h, "POST", "/containers/web/exec", `{"Cmd":["true"]}`); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "is restarting") {
+		t.Errorf("exec create on a restarting container = %d %s, want 409 is restarting", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/exec/"+created.Id+"/start", `{}`); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "is restarting") {
+		t.Errorf("exec start on a restarting container = %d %s, want 409 is restarting", rec.Code, rec.Body)
 	}
 }

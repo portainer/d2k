@@ -478,3 +478,36 @@ func TestRestartEventsLeaveDockerStartsAlone(t *testing.T) {
 		t.Fatalf("pod of docker start runs = %q, want no event: docker start reported it", actions(got))
 	}
 }
+
+// A container stopped while d2k's watch restarts may have its pod gone by
+// the relist, its termination never seen. Docker reports die, then stop;
+// attached compose up drops a container only on its die (D2K-058).
+func TestRelistReportsAStoppedContainerWhosePodWentDead(t *testing.T) {
+	s := &eventState{
+		known: map[string]*appsv1.Deployment{}, terminations: map[string]int32{}, podApp: map[string]string{},
+		running: map[string]string{}, died: map[string]death{}, volumes: map[string]bool{},
+	}
+	running := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-k8s-abc", Labels: map[string]string{"app": "web-k8s"}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}},
+	}
+	always := map[string]string{types.AnnotationRestartPolicy: "always"}
+	s.relist([]appsv1.Deployment{*eventDeployment(1, always)}, []corev1.Pod{running}, nil, time.Now())
+
+	got := actions(s.relist([]appsv1.Deployment{*eventDeployment(0, always)}, nil, nil, time.Now()))
+	if want := []string{"container die", "container stop"}; !slices.Equal(got, want) {
+		t.Fatalf("relist after a stop = %q, want %q", got, want)
+	}
+
+	// Kubernetes replaced the pod while nothing watched: the container died
+	// and runs again, as a restart policy restart does in Docker.
+	s.relist([]appsv1.Deployment{*eventDeployment(1, always)}, []corev1.Pod{running}, nil, time.Now())
+	replacement := *running.DeepCopy()
+	replacement.Name = "web-k8s-def"
+	got = actions(s.relist([]appsv1.Deployment{*eventDeployment(1, always)}, []corev1.Pod{replacement}, nil, time.Now()))
+	if want := []string{"container die", "container start"}; !slices.Equal(got, want) {
+		t.Fatalf("relist after a pod replacement = %q, want %q", got, want)
+	}
+}
