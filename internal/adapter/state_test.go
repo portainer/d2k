@@ -99,6 +99,42 @@ func TestRunOncePodGoneWithoutExitCodeIsNotReportedAsCleanExit(t *testing.T) {
 	}
 }
 
+// A container whose pod Kubernetes replaces (kubectl delete pod, a drain,
+// an eviction) is, as in Docker for a killed restart:always container,
+// running until its process ends, then restarting until it runs again:
+// never created. Attached compose up inspects it on the die and stops
+// following a container that is neither (D2K-071).
+func TestContainerStateWhilePodIsReplaced(t *testing.T) {
+	started := map[string]string{types.AnnotationStartedAt: now.Add(-time.Hour).Format(time.RFC3339Nano)}
+	finished := metav1.NewTime(now.Add(-time.Second))
+	replaced := func(state corev1.ContainerState) corev1.Pod {
+		p := podWith(corev1.ContainerStatus{State: state})
+		p.CreationTimestamp = metav1.NewTime(now.Add(-time.Hour))
+		p.DeletionTimestamp = &metav1.Time{Time: now.Add(-5 * time.Second)}
+		return p
+	}
+	creating := podWith(corev1.ContainerStatus{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}})
+	creating.CreationTimestamp = metav1.NewTime(now.Add(-5 * time.Second))
+	scheduled := corev1.Pod{ObjectMeta: metav1.ObjectMeta{CreationTimestamp: creating.CreationTimestamp}}
+
+	for _, tt := range []struct {
+		name string
+		pods []corev1.Pod
+		want container.ContainerState
+	}{
+		{"old process still stopping", []corev1.Pod{replaced(corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(now.Add(-time.Hour))}}), creating}, container.StateRunning},
+		{"old process ended, new one creating", []corev1.Pod{replaced(corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, FinishedAt: finished}}), creating}, container.StateRestarting},
+		{"old process ended, new pod not started", []corev1.Pod{replaced(corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, FinishedAt: finished}}), scheduled}, container.StateRestarting},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := containerState(withReplicas(1, started), tt.pods, now)
+			if got.Status != tt.want || !got.Running {
+				t.Fatalf("state = %s (running %v), want %s", got.Status, got.Running, tt.want)
+			}
+		})
+	}
+}
+
 func TestContainerStateImagePullErrorIsReported(t *testing.T) {
 	got := containerState(withReplicas(1, nil), []corev1.Pod{podWith(corev1.ContainerStatus{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
 		Reason: "ImagePullBackOff", Message: `Back-off pulling image "nope:latest"`,
