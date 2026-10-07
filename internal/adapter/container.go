@@ -179,7 +179,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		opts.Hostname = ""
 	}
 	if opts.GPUCount > 0 && a.gpuResourceName == "" {
-		warnings = append(warnings, "GPU request ignored: no node in the cluster offers a GPU resource")
+		warnings = append(warnings, "GPU request ignored: set D2K_GPU_RESOURCE_NAME to the device plugin resource name")
 	}
 
 	// Build and create the Deployment.
