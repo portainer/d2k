@@ -1023,3 +1023,29 @@ func TestRestartRecordsItIsRestarting(t *testing.T) {
 		t.Errorf("restarting = %q after the restart, want it cleared", v)
 	}
 }
+
+// A start whose pod Kubernetes refuses to create, as a full pod quota does,
+// fails with Kubernetes' reason, as Docker's start fails when the container
+// cannot run (D2K-084).
+func TestStartFailsWhenThePodCannotBeCreated(t *testing.T) {
+	a, client := newTestAdapter(t)
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "always"})
+	d, err := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the Deployment controller records once its ReplicaSet fails to
+	// create the pod.
+	const reason = `pods "web-6d4b9-x2k8p" is forbidden: exceeded quota: pods, requested: pods=1, used: pods=4, limited: pods=4`
+	d.Status.Conditions = []appsv1.DeploymentCondition{
+		{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionFalse, Reason: "MinimumReplicasUnavailable"},
+		{Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionTrue, Reason: "FailedCreate", Message: reason},
+	}
+	if _, err := client.AppsV1().Deployments(testNamespace).UpdateStatus(context.Background(), d, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	err = a.StartContainer(context.Background(), "web")
+	if err == nil || !strings.Contains(err.Error(), reason) {
+		t.Fatalf("StartContainer error = %v, want it to give %q", err, reason)
+	}
+}
