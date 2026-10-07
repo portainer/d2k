@@ -411,29 +411,37 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
 	}
 	if runsAsPod(*d) {
-		return a.startPod(ctx, d)
+		err := a.startPod(ctx, d)
+		if err != nil && d.Annotations[types.AnnotationAutoRemove] == "true" {
+			a.removeFailedStart(ctx, resolved)
+		}
+		return err
 	}
 	if err := a.scaleDeployment(ctx, name, 1); err != nil {
 		return err
 	}
 	if err := a.waitUntilPodCreated(ctx, resolved, podCreateTimeout); err != nil {
-		cleanupCtx := context.WithoutCancel(ctx)
 		if d.Annotations[types.AnnotationAutoRemove] == "true" {
-			// As Docker removes an AutoRemove container whose start fails,
-			// the same as one whose run ends.
-			if rmErr := a.RemoveContainer(cleanupCtx, resolved); rmErr != nil {
-				log.Warn().Str("context", "KubernetesAdapter").Str("container", resolved).Err(rmErr).Msg("Unable to remove an AutoRemove container whose start failed")
-			}
+			a.removeFailedStart(ctx, resolved)
 			return err
 		}
 		// As Docker's failed start does, leave the container stopped: at 1
 		// replica it would start by itself once the quota frees.
-		if scaleErr := a.scaleDeployment(cleanupCtx, resolved, 0); scaleErr != nil {
+		if scaleErr := a.scaleDeployment(context.WithoutCancel(ctx), resolved, 0); scaleErr != nil {
 			log.Warn().Str("context", "KubernetesAdapter").Str("container", resolved).Err(scaleErr).Msg("Unable to stop a container whose start failed")
 		}
 		return err
 	}
 	return nil
+}
+
+// removeFailedStart removes an AutoRemove container whose start failed, as
+// Docker does, the same as one whose run ends: docker run --rm waits for
+// the removal before it reports the start's error.
+func (a *KubernetesDockerAdapter) removeFailedStart(ctx context.Context, name string) {
+	if err := a.RemoveContainer(context.WithoutCancel(ctx), name); err != nil {
+		log.Warn().Str("context", "KubernetesAdapter").Str("container", name).Err(err).Msg("Unable to remove an AutoRemove container whose start failed")
+	}
 }
 
 // RestartContainer implements docker restart: it stops the container, then
