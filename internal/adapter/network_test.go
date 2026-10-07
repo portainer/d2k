@@ -123,7 +123,10 @@ func TestRemoveNetworkRefusesWhileAContainerIsJoined(t *testing.T) {
 	if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "demo_back"}); err != nil {
 		t.Fatal(err)
 	}
-	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Networks: []string{"demo_back"}})
+	id := mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Networks: []string{"demo_back"}})
+	if err := a.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := a.RemoveNetwork(ctx, "demo_back"); !errdefs.IsForbidden(err) {
 		t.Fatalf("remove while a container is joined = %v, want forbidden (has active endpoints)", err)
@@ -138,6 +141,37 @@ func TestRemoveNetworkRefusesWhileAContainerIsJoined(t *testing.T) {
 	}
 	if err := a.RemoveNetwork(ctx, "demo_back"); err != nil {
 		t.Fatalf("remove after the container left = %v, want nil", err)
+	}
+}
+
+// Only a running container has an endpoint on its networks in Docker: a
+// network that only created or stopped containers joined is removed. compose
+// down removes the project's networks while a one-off container compose run
+// left stopped is still on them, as it does not remove those containers.
+func TestRemoveNetworkOfStoppedContainers(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+	if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "demo_default"}); err != nil {
+		t.Fatal(err)
+	}
+	// compose run without --rm: a container that runs once, and has ended.
+	job := mustCreate(t, a, RunOptions{Name: "demo-web-run-1", Image: "busybox", RestartPolicy: "no", Networks: []string{"demo_default"}})
+	if err := a.StartContainer(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	setStatus(t, a, podOf(t, a, "demo-web-run-1"), corev1.PodSucceeded, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}})
+	// A container that was stopped, and one never started.
+	web := mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Networks: []string{"demo_default"}})
+	if err := a.StartContainer(ctx, web); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StopContainer(ctx, web); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, a, RunOptions{Name: "idle", Image: "nginx", Networks: []string{"demo_default"}})
+
+	if err := a.RemoveNetwork(ctx, "demo_default"); err != nil {
+		t.Fatalf("remove of a network only stopped containers joined = %v, want nil", err)
 	}
 }
 
