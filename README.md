@@ -22,8 +22,8 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 |---|---|
 | `docker run` | Deployment, the container's record. `--restart always` and `unless-stopped`: its replica runs the container. `--restart no` (the default) and `on-failure`: a pod created from it runs the container |
 | `docker stop` | Scale the Deployment to 0, or delete the pod; record its exit code and return once the pod is gone |
-| `docker start` | Scale the Deployment to 1, or run a new pod |
-| `docker restart` | Stop, then start; as in Docker, returns once the container runs again (or fails to), waiting at most 30 s; a client that goes away (Ctrl-C) does not stop it halfway |
+| `docker start` | Scale the Deployment to 1, or run a new pod; fails with Kubernetes' reason when it refuses to create the pod (a full pod quota), as Docker's start fails when the container cannot run. A pod waiting to be scheduled is not a failure |
+| `docker restart` | Stop, then start; as in Docker, returns once the container runs again (or fails to), waiting at most 30 s; a client that goes away (Ctrl-C) does not stop it halfway; if d2k itself stops halfway (upgrade, rollout, node drain), an `always` or `unless-stopped` container is started again when d2k starts, and a run-once container stays stopped, as Docker leaves them after a daemon restart |
 | `docker run --rm` | As in Docker, the container is removed when its run ends, once an attached `docker run` has its output; it cannot have a restart policy |
 | `docker rm` | Delete the Deployment (and its pod) + Service. As in Docker, a running container needs `-f`, which kills it at once (1 s grace, not its stop timeout) and returns once the pod is gone |
 | `-p <host>:<container>` | LoadBalancer Service |

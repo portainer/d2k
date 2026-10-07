@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 
@@ -138,6 +139,7 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context, state *eventS
 		}
 	}
 	if first {
+		a.finishRestarts(ctx, deps.Items)
 		// As the Docker daemon does when it starts, remove the AutoRemove
 		// containers whose run ended while nothing watched.
 		podsByContainer := map[string][]corev1.Pod{}
@@ -213,6 +215,42 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context, state *eventS
 	}
 }
 
+// finishRestarts finishes the restarts d2k stopping cut short, as the Docker
+// daemon starts its always and unless-stopped containers when it starts. A
+// container that runs once stays as the restart left it, as in Docker.
+func (a *KubernetesDockerAdapter) finishRestarts(ctx context.Context, deps []appsv1.Deployment) {
+	for _, d := range deps {
+		if _, restarting := d.Annotations[types.AnnotationRestarting]; !restarting {
+			continue
+		}
+		if runsAsPod(d) || d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
+			a.clearRestarting(ctx, d.Name)
+			continue
+		}
+		go func() {
+			// As the restart does, start it once the run its stop ended is
+			// gone: the two would share the container's volumes.
+			grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
+			if g := d.Spec.Template.Spec.TerminationGracePeriodSeconds; g != nil {
+				grace = *g
+			}
+			a.waitForPodsGone(ctx, d.Name, time.Duration(grace+30)*time.Second)
+			if err := a.scaleDeployment(ctx, d.Name, 1); err != nil {
+				log.Warn().Str("context", "KubernetesAdapter").Str("container", d.Name).Err(err).Msg("Unable to finish a restart")
+				return
+			}
+			a.clearRestarting(ctx, d.Name)
+		}()
+	}
+}
+
+// clearRestarting clears the container's restarting mark.
+func (a *KubernetesDockerAdapter) clearRestarting(ctx context.Context, name string) {
+	if err := a.annotate(ctx, name, map[string]*string{types.AnnotationRestarting: nil}); err != nil && !apierrors.IsNotFound(err) {
+		log.Warn().Str("context", "KubernetesAdapter").Str("container", name).Err(err).Msg("Unable to clear the restarting mark")
+	}
+}
+
 // autoRemoves reports whether the container is removed when its run ends.
 func autoRemoves(known map[string]*appsv1.Deployment, id string) bool {
 	for _, d := range known {
@@ -264,11 +302,7 @@ func (a *KubernetesDockerAdapter) autoRemove(ctx context.Context, id string) {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	if resolved, err := a.resolveDeploymentName(ctx, id); err == nil {
-		if _, restarting := a.restarting.Load(resolved); restarting {
-			return
-		}
-	}
+	// A container being restarted inspects as running.
 	if ctr, err := a.InspectContainer(ctx, id); err == nil && (ctr.State.Running || IsStarting(ctr.State)) {
 		return
 	}

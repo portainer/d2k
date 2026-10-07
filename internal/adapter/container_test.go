@@ -1033,3 +1033,70 @@ func TestCreateContainerCancelledMidwayLeavesNoDeployment(t *testing.T) {
 		t.Fatalf("Deployments left = %d (%v), want none", len(deps.Items), err)
 	}
 }
+
+// docker restart records on the container that it is restarting before it
+// stops it, and clears that once the container runs again: a d2k that stops
+// in between finishes the restart when it starts (D2K-083).
+func TestRestartRecordsItIsRestarting(t *testing.T) {
+	a, client := newTestAdapter(t)
+	mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: "always"})
+	if err := a.StartContainer(context.Background(), "db"); err != nil {
+		t.Fatal(err)
+	}
+	recorded := false
+	client.PrependReactor("update", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		switch d := action.(k8stesting.UpdateAction).GetObject().(*appsv1.Deployment); *d.Spec.Replicas {
+		case 0:
+			_, recorded = d.Annotations["d2k.portainer.io/restarting"]
+		case 1:
+			// Its pod runs, so the restart does not wait for it.
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "db-abc", Namespace: testNamespace, Labels: d.Spec.Template.Labels},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}},
+			}
+			if err := client.Tracker().Add(pod); err != nil && !apierrors.IsAlreadyExists(err) {
+				t.Error(err)
+			}
+		}
+		return false, nil, nil
+	})
+	if err := a.RestartContainer(context.Background(), "db"); err != nil {
+		t.Fatal(err)
+	}
+	if !recorded {
+		t.Error("the restart stopped the container without recording it is restarting")
+	}
+	d, err := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "db", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := d.Annotations["d2k.portainer.io/restarting"]; ok {
+		t.Errorf("restarting = %q after the restart, want it cleared", v)
+	}
+}
+
+// A start whose pod Kubernetes refuses to create, as a full pod quota does,
+// fails with Kubernetes' reason, as Docker's start fails when the container
+// cannot run (D2K-084).
+func TestStartFailsWhenThePodCannotBeCreated(t *testing.T) {
+	a, client := newTestAdapter(t)
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "always"})
+	d, err := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the Deployment controller records once its ReplicaSet fails to
+	// create the pod.
+	const reason = `pods "web-6d4b9-x2k8p" is forbidden: exceeded quota: pods, requested: pods=1, used: pods=4, limited: pods=4`
+	d.Status.Conditions = []appsv1.DeploymentCondition{
+		{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionFalse, Reason: "MinimumReplicasUnavailable"},
+		{Type: appsv1.DeploymentReplicaFailure, Status: corev1.ConditionTrue, Reason: "FailedCreate", Message: reason},
+	}
+	if _, err := client.AppsV1().Deployments(testNamespace).UpdateStatus(context.Background(), d, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	err = a.StartContainer(context.Background(), "web")
+	if err == nil || !strings.Contains(err.Error(), reason) {
+		t.Fatalf("StartContainer error = %v, want it to give %q", err, reason)
+	}
+}

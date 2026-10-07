@@ -201,6 +201,43 @@ func (a *KubernetesDockerAdapter) waitUntilRunStarted(ctx context.Context, deplo
 	}
 }
 
+// podCreateTimeout bounds how long a start waits for Kubernetes to create
+// the container's pod, or refuse to.
+const podCreateTimeout = 10 * time.Second
+
+// waitUntilPodCreated waits until the Deployment's pod has been created,
+// and fails with the reason Kubernetes gives when it cannot be, as a full pod
+// quota makes it (D2K-084): Docker's start fails when the container cannot
+// run. A pod that waits to be scheduled is not a failure here.
+func (a *KubernetesDockerAdapter) waitUntilPodCreated(ctx context.Context, deployment string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, deployment, metav1GetOptions())
+		if err != nil {
+			return nil
+		}
+		// Once it has seen the start, the Deployment controller copies its
+		// ReplicaSet's failure to create the pod onto the Deployment. It
+		// always records a condition: with none, no controller runs it.
+		if d.Status.ObservedGeneration >= d.Generation {
+			if d.Status.Replicas > 0 || len(d.Status.Conditions) == 0 {
+				return nil
+			}
+			for _, c := range d.Status.Conditions {
+				if c.Type == appsv1.DeploymentReplicaFailure && c.Status == corev1.ConditionTrue {
+					return fmt.Errorf("unable to start container %q: %s", dockerName(*d), c.Message)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
 // podEnded reports whether the pod's container has exited for good. The
 // kubelet reports the container terminated, which is the container's die,
 // before it reports the pod's phase.

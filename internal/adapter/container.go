@@ -412,7 +412,10 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 	if runsAsPod(*d) {
 		return a.startPod(ctx, d)
 	}
-	return a.scaleDeployment(ctx, name, 1)
+	if err := a.scaleDeployment(ctx, name, 1); err != nil {
+		return err
+	}
+	return a.waitUntilPodCreated(ctx, resolved, podCreateTimeout)
 }
 
 // RestartContainer implements docker restart: it stops the container, then
@@ -426,8 +429,12 @@ func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name str
 	if err != nil {
 		return err
 	}
-	a.restarting.Store(resolved, true)
-	defer a.restarting.Delete(resolved)
+	// Recorded on the container, not in d2k: another d2k, as in a rollout,
+	// sees it, and finishes the restart if this one stops before the start.
+	if err := a.annotate(ctx, resolved, map[string]*string{types.AnnotationRestarting: ptr(time.Now().UTC().Format(time.RFC3339Nano))}); err != nil {
+		return fmt.Errorf("unable to restart container %q: %w", name, err)
+	}
+	defer a.clearRestarting(ctx, resolved)
 	if err := a.StopContainer(ctx, name); err != nil {
 		return err
 	}
@@ -563,7 +570,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 	// A restart stops the container fully before it starts it again. Docker
 	// starts it again at once, so clients that inspect it on the restart's
 	// die, as compose does, see it running, not exited.
-	if _, restarting := a.restarting.Load(resolved); restarting && result.State.Status == container.StateExited {
+	if _, restarting := d.Annotations[types.AnnotationRestarting]; restarting && result.State.Status == container.StateExited {
 		result.State.Status, result.State.Running, result.State.Restarting = container.StateRestarting, true, true
 	}
 	return &result, nil
