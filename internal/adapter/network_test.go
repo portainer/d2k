@@ -175,6 +175,51 @@ func TestRemoveNetworkOfStoppedContainers(t *testing.T) {
 	}
 }
 
+// Network inspect's Containers lists the same running containers that
+// refuse RemoveNetwork (D2K-090/091): compose down reads it to warn
+// "Resource is still in use" instead of calling NetworkRemove at all.
+// A stopped or never-started container, which does not hold an endpoint,
+// is left out, as RemoveNetwork leaves it out of its own check.
+func TestInspectNetworkDetailListsRunningContainers(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+	if _, _, err := a.CreateNetwork(ctx, CreateNetworkOptions{Name: "demo_default"}); err != nil {
+		t.Fatal(err)
+	}
+	web := mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Networks: []string{"demo_default"}})
+	if err := a.StartContainer(ctx, web); err != nil {
+		t.Fatal(err)
+	}
+	mustCreate(t, a, RunOptions{Name: "idle", Image: "nginx", Networks: []string{"demo_default"}})
+
+	detail, err := a.InspectNetworkDetail(ctx, "demo_default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	containers, ok := detail["Containers"].(map[string]any)
+	if !ok {
+		t.Fatalf("Containers = %T, want map[string]any", detail["Containers"])
+	}
+	if len(containers) != 1 {
+		t.Fatalf("Containers = %#v, want exactly the running container", containers)
+	}
+	webID, err := a.resolveDeploymentName(ctx, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := a.client.AppsV1().Deployments(testNamespace).Get(ctx, webID, metav1GetOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := containers[containerID(d.UID)].(map[string]any)
+	if !ok {
+		t.Fatalf("Containers entry = %#v, want the running container keyed by its ID", containers)
+	}
+	if entry["Name"] != "web" {
+		t.Fatalf("Containers[...].Name = %v, want %q", entry["Name"], "web")
+	}
+}
+
 func containsNetwork(list []NetworkSummary, name string) bool {
 	for _, n := range list {
 		if n.Name == name {
