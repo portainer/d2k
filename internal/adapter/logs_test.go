@@ -63,3 +63,55 @@ func TestGetContainerLogsWaitsForContainerCreating(t *testing.T) {
 		t.Fatal("GetContainerLogs did not return once the pod started running")
 	}
 }
+
+// Right after the pod is created, the kubelet has not reported any container
+// status yet: ContainerStatuses is empty, not a Waiting state. d2k must wait
+// this out too, the same as an explicit ContainerCreating/PodInitializing
+// Waiting reason, instead of treating "no status yet" as already started.
+func TestGetContainerLogsWaitsWhenNoContainerStatusYet(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "no"})
+	if err := a.StartContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+
+	pods, err := client.CoreV1().Pods(testNamespace).List(ctx, podsOf("web"))
+	if err != nil || len(pods.Items) != 1 {
+		t.Fatalf("expected one pod for web, got %v, %v", pods, err)
+	}
+	pod := pods.Items[0]
+	pod.Status = corev1.PodStatus{Phase: corev1.PodPending}
+	if _, err := client.CoreV1().Pods(testNamespace).UpdateStatus(ctx, &pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := a.GetContainerLogs(ctx, "web", LogOptions{})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("GetContainerLogs returned (%v) before the kubelet reported any container status", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	pod.Status = corev1.PodStatus{
+		Phase:             corev1.PodRunning,
+		ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}}}},
+	}
+	if _, err := client.CoreV1().Pods(testNamespace).UpdateStatus(ctx, &pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetContainerLogs did not return once the pod started running")
+	}
+}
