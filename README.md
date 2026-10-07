@@ -38,7 +38,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `--gpus all` / `--gpus N` | Pod resource limits via device plugin (opt-in) |
 | `-u`, `-w`, `-t`, `-i`, `-m`, `--cpus`, `--cpu-shares`, `--memory-reservation`, `--add-host`, `--cap-add/--cap-drop`, `--read-only`, `--privileged`, `--stop-timeout` | Container and pod settings (`-u` must be numeric) |
 | `--health-*`, compose `healthcheck:` | Readiness probe; `State.Health` reports starting/healthy/unhealthy. Traffic is not affected, as in Docker. A `HEALTHCHECK` defined only in the image is not seen |
-| `--restart` | `always` and `unless-stopped`: the Deployment restarts the container. `no` (the default): the pod's container runs once (`restartPolicy: Never`) and exits with its exit code. `on-failure`: `restartPolicy: OnFailure`; a maximum retry count returns a warning. A pod is not rescheduled if its node fails |
+| `--restart` | `always` and `unless-stopped`: the Deployment restarts the container. `no` (the default): the pod's container runs once (`restartPolicy: Never`) and exits with its exit code. `on-failure`: `restartPolicy: OnFailure`; a maximum retry count returns a warning. A pod is not rescheduled if its node fails. A restart the kubelet makes, or a new pod replacing the container's pod (deleted, drained, evicted), is reported as Docker reports a restart: `die`, `restarting` while it waits, then `start` |
 | Any other setting | Ignored, and named in a warning on create (`docker run` prints it) |
 
 ---
