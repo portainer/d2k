@@ -2408,15 +2408,25 @@ func (a *KubernetesDockerAdapter) injectQuotaDefaults(ctx context.Context, reqs 
 
 	if needsCPUReq {
 		if _, alreadySet := reqs.Requests[corev1.ResourceCPU]; !alreadySet {
-			reqs.Requests[corev1.ResourceCPU] = resource.MustParse("10m")
-			log.Info().Str("context", "KubernetesAdapter").Any("namespace", a.namespace).Any("value", "10m").Msg("Injected requests.cpu to satisfy namespace ResourceQuota")
+			value := resource.MustParse("10m")
+			// Kubernetes itself would default the request down to a lower
+			// caller-set limit; never inject a request above it.
+			if limit, ok := reqs.Limits[corev1.ResourceCPU]; ok && limit.Cmp(value) < 0 {
+				value = limit
+			}
+			reqs.Requests[corev1.ResourceCPU] = value
+			log.Info().Str("context", "KubernetesAdapter").Any("namespace", a.namespace).Any("value", value.String()).Msg("Injected requests.cpu to satisfy namespace ResourceQuota")
 		}
 	}
 
 	if needsMemReq {
 		if _, alreadySet := reqs.Requests[corev1.ResourceMemory]; !alreadySet {
-			reqs.Requests[corev1.ResourceMemory] = resource.MustParse("32Mi")
-			log.Info().Str("context", "KubernetesAdapter").Any("namespace", a.namespace).Any("value", "32Mi").Msg("Injected requests.memory to satisfy namespace ResourceQuota")
+			value := resource.MustParse("32Mi")
+			if limit, ok := reqs.Limits[corev1.ResourceMemory]; ok && limit.Cmp(value) < 0 {
+				value = limit
+			}
+			reqs.Requests[corev1.ResourceMemory] = value
+			log.Info().Str("context", "KubernetesAdapter").Any("namespace", a.namespace).Any("value", value.String()).Msg("Injected requests.memory to satisfy namespace ResourceQuota")
 		}
 	}
 
