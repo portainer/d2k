@@ -897,7 +897,7 @@ func TestStopRecordsTheExitCode(t *testing.T) {
 // leaving its pod to its stop grace period, and returns once it is gone:
 // its volumes and name are free right after.
 func TestRemoveKillsThePodAtOnce(t *testing.T) {
-	for _, policy := range []string{"always", "no"} {
+	for _, policy := range []string{"always", "unless-stopped"} {
 		t.Run(policy, func(t *testing.T) {
 			a, client := newTestAdapter(t)
 			ctx := context.Background()
@@ -906,12 +906,10 @@ func TestRemoveKillsThePodAtOnce(t *testing.T) {
 			if err := a.StartContainer(ctx, "db"); err != nil {
 				t.Fatal(err)
 			}
-			if policy == "always" {
-				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-abc-xyz", Namespace: testNamespace,
-					Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}}}
-				if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
-					t.Fatal(err)
-				}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-abc-xyz", Namespace: testNamespace,
+				Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}}}
+			if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
 			}
 			podsGVR := corev1.SchemeGroupVersion.WithResource("pods")
 			// The garbage collector deletes the pods of a deleted Deployment
@@ -948,6 +946,60 @@ func TestRemoveKillsThePodAtOnce(t *testing.T) {
 			for _, g := range graces {
 				if g == nil || *g > 1 {
 					t.Errorf("pod deleted with grace period %v, want at most 1 s", g)
+				}
+			}
+		})
+	}
+}
+
+// The kubelet stops a pod with the grace period of the first delete it sees:
+// a later, shorter one does not cut a stop already under way (D2K-082).
+func TestRemoveKillsARunOncePodWithItsFirstDelete(t *testing.T) {
+	for _, policy := range []string{"no", "on-failure"} {
+		t.Run(policy, func(t *testing.T) {
+			a, client := newTestAdapter(t)
+			ctx := context.Background()
+			grace := int64(30)
+			mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: policy, StopTimeout: &grace})
+			if err := a.StartContainer(ctx, "db"); err != nil {
+				t.Fatal(err)
+			}
+			podsGVR := corev1.SchemeGroupVersion.WithResource("pods")
+			firstGrace := map[string]*int64{}
+			// The garbage collector deletes the pods of a deleted Deployment
+			// with their own grace period.
+			client.PrependReactor("delete", "deployments", func(k8stesting.Action) (bool, runtime.Object, error) {
+				list, _ := client.Tracker().List(podsGVR, corev1.SchemeGroupVersion.WithKind("Pod"), testNamespace)
+				for _, p := range list.(*corev1.PodList).Items {
+					if _, seen := firstGrace[p.Name]; !seen {
+						firstGrace[p.Name] = &grace
+					}
+					p.DeletionTimestamp, p.DeletionGracePeriodSeconds = ptr(metav1.Now()), &grace
+					if err := client.Tracker().Update(podsGVR, &p, testNamespace); err != nil {
+						t.Error(err)
+					}
+				}
+				return false, nil, nil
+			})
+			client.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				del := action.(k8stesting.DeleteAction)
+				if _, seen := firstGrace[del.GetName()]; !seen {
+					firstGrace[del.GetName()] = del.GetDeleteOptions().GracePeriodSeconds
+				}
+				return false, nil, nil
+			})
+
+			if err := a.RemoveContainer(ctx, "db"); err != nil {
+				t.Fatal(err)
+			}
+			if len(firstGrace) == 0 {
+				t.Fatal("docker rm deleted no pod")
+			}
+			for name, g := range firstGrace {
+				if g == nil {
+					t.Errorf("pod %s first deleted with its own grace period: the kubelet stops it after that long, want at most 1 s", name)
+				} else if *g > 1 {
+					t.Errorf("pod %s first deleted with grace period %d s: the kubelet stops it after that long, want at most 1 s", name, *g)
 				}
 			}
 		})

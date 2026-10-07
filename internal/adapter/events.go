@@ -83,6 +83,7 @@ func (a *KubernetesDockerAdapter) RecordEvents(ctx context.Context) {
 		terminations: map[string]int32{},
 		podApp:       map[string]string{},
 		running:      map[string]string{},
+		stopping:     map[string]string{},
 		died:         map[string]death{},
 		volumes:      map[string]bool{},
 	}
@@ -106,6 +107,7 @@ type eventState struct {
 	terminations map[string]int32
 	podApp       map[string]string
 	running      map[string]string // app of each pod whose container runs
+	stopping     map[string]string // app of each pod being deleted while its container ran, until it ends
 	died         map[string]death  // last death of each container, by app, until it runs again
 	volumes      map[string]bool
 }
@@ -197,6 +199,9 @@ func (a *KubernetesDockerAdapter) watchEvents(ctx context.Context, state *eventS
 				now := time.Now()
 				msgs = podEvents(state.known, state.terminations, state.podApp, e.Type, p, now)
 				msgs = append(msgs, state.restartEvents(p.Labels["app"], p.Name, e.Type != watch.Deleted && containerRuns(p), len(msgs) > 0, now)...)
+				if e.Type == watch.Deleted {
+					delete(state.stopping, p.Name)
+				}
 			}
 		case e, ok := <-pvcWatch.ResultChan():
 			if !ok {
@@ -359,6 +364,7 @@ func (s *eventState) relist(deps []appsv1.Deployment, pods []corev1.Pod, pvcs []
 		msgs = append(msgs, s.restartEvents(app, name, false, len(lost) > 0, now)...)
 		delete(s.terminations, name)
 		delete(s.podApp, name)
+		delete(s.stopping, name)
 	}
 	msgs = append(msgs, changes...)
 	for _, d := range gone {
@@ -477,7 +483,13 @@ func (s *eventState) restartEvents(app, pod string, runs, died bool, now time.Ti
 	if runs {
 		s.running[pod] = app
 	} else {
+		if s.running[pod] == app && !died {
+			s.stopping[pod] = app
+		}
 		delete(s.running, pod)
+	}
+	if died {
+		delete(s.stopping, pod)
 	}
 	d, ok := s.known[app]
 	if !ok {
@@ -508,7 +520,8 @@ func (s *eventState) restartEvents(app, pod string, runs, died bool, now time.Ti
 // removedEvents reports the death of a container removed while it runs,
 // as docker rm -f kills it, with 137, before it removes it (D2K-072): its
 // Deployment is gone before its pod ends, and the pod's end is then no
-// longer reported.
+// longer reported. rm deletes a run-once container's pods first, so its
+// container may still run in a pod being deleted.
 func (s *eventState) removedEvents(app string, now time.Time) []events.Message {
 	d, ok := s.known[app]
 	delete(s.died, app)
@@ -517,6 +530,12 @@ func (s *eventState) removedEvents(app string, now time.Time) []events.Message {
 		if a == app {
 			runs = true
 			delete(s.running, p)
+		}
+	}
+	for p, a := range s.stopping {
+		if a == app {
+			runs = true
+			delete(s.stopping, p)
 		}
 	}
 	if !ok || !runs {
