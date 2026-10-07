@@ -79,7 +79,7 @@ works, or `docker compose up` warns or fails. None is dropped silently.
 | `cpu_shares` | Supported | A CPU request (1024 shares = 1 CPU). |
 | `mem_limit` | Supported | Memory limit. |
 | `mem_reservation` | Supported | Memory request. |
-| `gpus` | Partial | A GPU limit on the cluster's GPU resource (`nvidia.com/gpu` or `amd.com/gpu`); `all` requests one. Ignored with a warning when no node offers GPUs. |
+| `gpus` | Partial | A GPU limit on the resource named by `D2K_GPU_RESOURCE_NAME` (such as `nvidia.com/gpu`); `all` requests one. Ignored with a warning when `D2K_GPU_RESOURCE_NAME` is not set. |
 | `cpu_count` | Not supported | Windows only. |
 | `cpu_percent` | Not supported | Windows only. |
 | `cpu_rt_period` | Not supported |  |
