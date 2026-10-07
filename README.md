@@ -25,7 +25,7 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `docker start` | Scale the Deployment to 1, or run a new pod |
 | `docker restart` | Stop, then start; as in Docker, returns once the container runs again (or fails to), waiting at most 30 s |
 | `docker run --rm` | As in Docker, the container is removed when its run ends, once an attached `docker run` has its output; it cannot have a restart policy |
-| `docker rm` | Delete the Deployment (and its pod) + Service. As in Docker, a running container needs `-f` |
+| `docker rm` | Delete the Deployment (and its pod) + Service. As in Docker, a running container needs `-f`, which kills it at once (1 s grace, not its stop timeout) and returns once the pod is gone |
 | `-p <host>:<container>` | LoadBalancer Service |
 | `-P` (publish all) | NodePort Service |
 | No port flags | No Service created |
