@@ -608,6 +608,48 @@ func TestEventsFinishARestartTheQuotaRefuses(t *testing.T) {
 	}
 }
 
+// A restart another d2k finishes meanwhile, as the d2k a rollout replaces
+// does while the new one starts, is not finished again: a docker stop that
+// follows it stays stopped.
+func TestEventsLeaveARestartFinishedMeanwhile(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "always"})
+	if err := a.StartContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.annotate(ctx, "web", map[string]*string{"d2k.portainer.io/restarting": ptr("2026-01-01T00:00:00Z")}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The run the other d2k's restart started.
+	running := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "web-abc", Namespace: testNamespace, Labels: d.Spec.Template.Labels}}
+	if err := client.Tracker().Add(running); err != nil {
+		t.Fatal(err)
+	}
+
+	go a.RecordEvents(ctx)
+	time.Sleep(time.Second)
+	// The other d2k clears the mark; then docker stop ends the run.
+	if err := a.annotate(ctx, "web", map[string]*string{"d2k.portainer.io/restarting": nil}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.scaleDeployment(ctx, "web", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("pods"), testNamespace, "web-abc"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Second)
+	if d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{}); err != nil || replicasOf(d) != 0 {
+		t.Fatalf("replicas = %d, %v after docker stop, want 0: the restart was already finished", replicasOf(d), err)
+	}
+}
+
 // A restart d2k finishes starts the container again only once the run its
 // stop ended is gone, as the restart itself does: the two never run side by
 // side on the container's volumes (D2K-083).
