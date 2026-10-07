@@ -220,6 +220,23 @@ func TestCreateContainerWithPublishedPort(t *testing.T) {
 	}
 }
 
+// Docker always fills a published port's HostIp (0.0.0.0 when none was
+// given). An empty HostIp makes `docker port` print "invalid IP": the
+// Docker CLI parses it as a netip.Addr and renders the zero value that way.
+func TestInspectPortsHaveHostIP(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", PortBindings: []string{"18080:80"}})
+
+	inspect, err := a.InspectContainer(context.Background(), "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings := inspect.NetworkSettings.Ports[network.MustParsePort("80/tcp")]
+	if len(bindings) != 1 || bindings[0].HostIP.String() != "0.0.0.0" {
+		t.Errorf("inspect NetworkSettings.Ports = %+v, want HostIp 0.0.0.0", bindings)
+	}
+}
+
 func TestCreateContainerNamedVolumes(t *testing.T) {
 	a, client := newTestAdapter(t)
 	_, warnings, err := a.CreateContainer(context.Background(), RunOptions{

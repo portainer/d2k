@@ -137,6 +137,25 @@ func TestVolumeNamesSharingAPVCName(t *testing.T) {
 	}
 }
 
+// Recreating a volume while its old PVC is still terminating (Kubernetes
+// deletion is not instant, unlike Docker's local driver) must not silently
+// hand back the dying PVC: a container that then mounts it would be
+// scheduled against a claim that is about to vanish for good, and never run.
+func TestCreateVolumeWhileOldOneIsTerminating(t *testing.T) {
+	now := metav1.Now()
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "data", Namespace: testNamespace,
+		Labels:            managedLabels("data"),
+		Annotations:       map[string]string{"d2k.portainer.io/docker-name": "data"},
+		DeletionTimestamp: &now,
+		Finalizers:        []string{"kubernetes.io/pvc-protection"},
+	}}
+	a, _ := newTestAdapter(t, pvc)
+	if _, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data"}); !errdefs.IsConflict(err) {
+		t.Fatalf("create while the old PVC is terminating = %v, want a retryable conflict, not success with the dying PVC", err)
+	}
+}
+
 func TestCreateVolumeRefusesOtherDrivers(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	if _, err := a.CreateVolume(context.Background(), CreateVolumeOptions{Name: "data", Driver: "rexray"}); !errdefs.IsInvalidParameter(err) {

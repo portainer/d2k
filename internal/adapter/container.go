@@ -902,7 +902,7 @@ func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP stri
 	portMap := network.PortMap{}
 	for _, m := range publishedPorts(d) {
 		if p, err := network.ParsePort(fmt.Sprintf("%d/%s", m.ContainerPort, strings.ToLower(m.Protocol))); err == nil {
-			portMap[p] = append(portMap[p], network.PortBinding{HostPort: strconv.Itoa(m.HostPort)})
+			portMap[p] = append(portMap[p], network.PortBinding{HostIP: netip.IPv4Unspecified(), HostPort: strconv.Itoa(m.HostPort)})
 		}
 	}
 	if d.Annotations[types.AnnotationPortMappings] != "" {
