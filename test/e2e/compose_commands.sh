@@ -192,7 +192,7 @@ check "restart -t" compose restart -t 3 web
 # instead of reaching d2k at all. Settle first so these actually exercise
 # the 501 refusal rather than this known gap.
 sleep 2
-known D2K-015 "kill (documented 501)" bash -c '! compose kill web'
+known D2K-015 "kill (documented 501)" compose kill web
 check "pause (documented 501)" bash -c '! compose pause web'
 check "unpause (documented 501)" bash -c '! compose unpause web'
 check "up -d (bring db back) " compose up -d
