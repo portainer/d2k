@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/jsonstream"
@@ -88,6 +89,11 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 		RepoDigests: []string{},
 		Os:          "linux",
 		RootFS:      image.RootFS{Type: "layers"}, // the only type Docker reports
+		// d2k does not know when the image was built. Real Docker always sets this
+		// to a valid timestamp, which some clients (docker compose v2.40.3's
+		// "images" command) parse unconditionally; the zero time is honest (not a
+		// made-up build date) and still parses.
+		Created: time.Time{}.Format(time.RFC3339Nano),
 	})
 }
 

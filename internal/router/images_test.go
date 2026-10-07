@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/api/types/image"
 )
@@ -36,6 +37,9 @@ func TestImages(t *testing.T) {
 	}
 	if got.Config != nil && (len(got.Config.Cmd) > 0 || len(got.Config.Entrypoint) > 0) {
 		t.Errorf("config = %+v, want none: d2k does not know the image's", got.Config)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, got.Created); err != nil {
+		t.Errorf("Created = %q: %v (docker compose v2.40.3 fails parsing it as a timestamp)", got.Created, err)
 	}
 
 	pull := do(t, h, "POST", "/images/create?fromImage=nginx&tag=alpine", "").Body.String()
