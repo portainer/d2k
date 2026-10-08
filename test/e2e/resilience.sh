@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 # Resilience checks: d2k restarting or losing a pod mid-operation must not
 # leave a client hanging, an operation half-done, or a container's state
-# misreported. Defaults target the resilience lane's own cluster (live2);
-# override CONTEXT/STANDALONE/PKI to run against another environment, as
-# run.sh does.
+# misreported. Defaults match run.sh (the kind cluster setup.sh creates);
+# override CLUSTER/STANDALONE/PKI to run against another environment.
 set -uo pipefail
 
-CONTEXT=kind-${CLUSTER:-d2k-live2}
-STANDALONE=${STANDALONE:-tcp://localhost:31312}
+CONTEXT=kind-${CLUSTER:-d2k}
+STANDALONE=${STANDALONE:-tcp://localhost:31112}
 HTTPS_STANDALONE=https://${STANDALONE#tcp://}
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
 
-PKI=${PKI:-/Users/steven/go/d2k/.overnight/2026-10-07/env/pki-live2/client}
+PKI=${PKI:-$(cd "$(dirname "$0")" && pwd)/.pki/client}
 export DOCKER_HOST=$STANDALONE DOCKER_TLS_VERIFY=1 DOCKER_CERT_PATH=$PKI CURL_HOME=$WORKDIR
 printf 'cacert = "%s/ca.pem"\ncert = "%s/cert.pem"\nkey = "%s/key.pem"\n' "$PKI" "$PKI" "$PKI" >"$WORKDIR/.curlrc"
 
