@@ -5,7 +5,9 @@ CLI and Docker Compose, and check the resulting cluster state with kubectl.
 
 ## Prerequisites
 
-`kind`, `kubectl`, `docker` (with the Compose plugin), `curl` and `perl`.
+`kind`, `kubectl`, `docker` (with the Compose plugin), `curl`, `perl`,
+Go 1.26 or later (`setup.sh` runs `go run ./cmd pki init` to create the test
+certificates) and `python3` (`run.sh`'s terminal checks and `compose_spec.py`).
 
 Create the cluster with both d2k NodePorts mapped to the host:
 
