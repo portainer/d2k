@@ -805,6 +805,48 @@ func TestLabelKeysKubernetesRejects(t *testing.T) {
 	}
 }
 
+// A Docker label may use a key d2k labels its own objects with, such as
+// compose's common `app` or d2k's managed-by. The object keeps d2k's value,
+// so d2k still finds it, and the Docker label is kept as a Docker label.
+func TestDockerLabelsKeepD2kLabels(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	labels := map[string]string{
+		"app":                   "other",
+		types.LabelManagedBy:    "someone-else",
+		types.LabelWorkloadName: "other",
+	}
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", Labels: labels})
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	for k, v := range managedLabels("web") {
+		if d.Labels[k] != v {
+			t.Errorf("Deployment label %s = %q, want d2k's own %q", k, d.Labels[k], v)
+		}
+	}
+	if ctrs, _ := a.ListContainers(ctx, true); len(ctrs) != 1 {
+		t.Errorf("docker ps -a lists %d containers, want the one created", len(ctrs))
+	}
+	if ctr, _ := a.InspectContainer(ctx, "web"); ctr == nil || !maps.Equal(ctr.Config.Labels, labels) {
+		t.Errorf("Docker labels = %v, want %v", ctr, labels)
+	}
+
+	if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: "data", Labels: labels}); err != nil {
+		t.Fatal(err)
+	}
+	pvc, _ := client.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "data", metav1.GetOptions{})
+	for k, v := range managedLabels("data") {
+		if pvc.Labels[k] != v {
+			t.Errorf("PVC label %s = %q, want d2k's own %q", k, pvc.Labels[k], v)
+		}
+	}
+	if vols, _ := a.ListVolumes(ctx); len(vols) != 1 {
+		t.Errorf("docker volume ls lists %d volumes, want the one created", len(vols))
+	}
+	if v, _ := a.InspectVolume(ctx, "data"); v == nil || !maps.Equal(v.Labels, labels) {
+		t.Errorf("volume labels = %v, want %v", v, labels)
+	}
+}
+
 // As in Docker, docker stop returns once the container has stopped: compose
 // recreates a service by stopping the old container, then starting the new
 // one on the same volumes.
