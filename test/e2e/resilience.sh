@@ -93,8 +93,8 @@ EOF
   k -n d2k rollout restart deployment/d2k >/dev/null
   wait $up || exit 1
   both_running() {
-    [ "$(docker inspect -f {{.State.Status}} e2e-resilience-web 2>/dev/null)" = running ] &&
-    [ "$(docker inspect -f {{.State.Status}} e2e-resilience-redis 2>/dev/null)" = running ]
+    [ "$(docker inspect -f {{.State.Status}} e2e-resilience-web-1 2>/dev/null)" = running ] &&
+    [ "$(docker inspect -f {{.State.Status}} e2e-resilience-redis-1 2>/dev/null)" = running ]
   }
   for _ in $(seq 1 30); do both_running && break; sleep 2; done
   both_running; converged=$?
