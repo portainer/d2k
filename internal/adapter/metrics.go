@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
@@ -45,7 +46,7 @@ func (a *KubernetesDockerAdapter) ContainerUsage(ctx context.Context, name strin
 	}
 	// docker stats answers from the container's own limit, as reported
 	// below, when host-wide node access isn't granted; see /info's Info.
-	ncpu, hostMemory, err := a.HostResources(ctx)
+	ncpu, hostMemory, err := a.statsHostResources(ctx)
 	if err != nil {
 		log.Warn().Str("context", "KubernetesAdapter").Err(err).Msg("ContainerUsage: unable to read host resources")
 	}
@@ -81,4 +82,31 @@ func (a *KubernetesDockerAdapter) ContainerUsage(ctx context.Context, name strin
 		u.MemoryBytes += c.Usage.Memory().Value()
 	}
 	return u, nil
+}
+
+// statsHostTTL is how long docker stats reuses the host's CPUs and memory.
+const statsHostTTL = 10 * time.Second
+
+type hostResources struct {
+	cpus    int
+	memory  int64
+	expires time.Time
+}
+
+// statsHostResources returns HostResources, reread at most every
+// statsHostTTL: docker stats samples each container every second, and
+// HostResources lists every Node and ResourceQuota. A failed read is not
+// cached.
+func (a *KubernetesDockerAdapter) statsHostResources(ctx context.Context) (int, int64, error) {
+	a.statsHostMu.Lock()
+	defer a.statsHostMu.Unlock()
+	if time.Now().Before(a.statsHost.expires) {
+		return a.statsHost.cpus, a.statsHost.memory, nil
+	}
+	cpus, memory, err := a.HostResources(ctx)
+	if err != nil {
+		return cpus, memory, err
+	}
+	a.statsHost = hostResources{cpus: cpus, memory: memory, expires: time.Now().Add(statsHostTTL)}
+	return cpus, memory, nil
 }

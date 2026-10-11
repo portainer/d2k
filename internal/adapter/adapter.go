@@ -69,6 +69,10 @@ type KubernetesDockerAdapter struct {
 	// ID (Attaching).
 	attaches   map[string]int
 	attachesMu sync.Mutex
+
+	// statsHost caches HostResources for docker stats (statsHostResources).
+	statsHost   hostResources
+	statsHostMu sync.Mutex
 }
 
 // Options configures a new KubernetesDockerAdapter.
