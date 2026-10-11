@@ -23,8 +23,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
 	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/jsonstream"
+	"github.com/opencontainers/go-digest"
 
 	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/internal/errdefs"
@@ -57,24 +59,35 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 // Pull handles POST /images/create (docker pull). Pulling happens on the
 // node when a container starts, so the pull is only acknowledged.
 func (h *Handler) Pull(w http.ResponseWriter, r *http.Request) {
-	ref := r.URL.Query().Get("fromImage")
-	if tag := r.URL.Query().Get("tag"); tag != "" {
-		sep := ":"
-		if strings.HasPrefix(tag, "sha256:") {
-			sep = "@"
-		}
-		ref += sep + tag
-	}
-	if ref == "" {
-		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(errors.New("fromImage is required")))
+	ref, err := pullReference(r.URL.Query().Get("fromImage"), r.URL.Query().Get("tag"))
+	if err != nil {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(err))
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(jsonstream.Message{
-		Status: fmt.Sprintf("%s: not pulled by d2k; the kubelet pulls it when a container starts", ref),
+		Status: fmt.Sprintf("%s: not pulled by d2k; the kubelet pulls it when a container starts", reference.FamiliarString(ref)),
 	})
+}
+
+// pullReference combines fromImage and tag as the Docker daemon does
+// (moby postImagesCreate): tag replaces a tag in fromImage, and a digest
+// in tag replaces any tag or digest.
+func pullReference(fromImage, tag string) (reference.Named, error) {
+	if fromImage == "" {
+		return nil, errors.New("fromImage is required")
+	}
+	// "docker pull -a" may send the name with a trailing ":".
+	ref, err := reference.ParseNormalizedNamed(strings.TrimSuffix(fromImage, ":"))
+	if err != nil || tag == "" {
+		return ref, err
+	}
+	if dgst, err := digest.Parse(tag); err == nil {
+		return reference.WithDigest(reference.TrimNamed(ref), dgst)
+	}
+	return reference.WithTag(ref, tag)
 }
 
 // Inspect handles GET /images/{name}/json. Compose inspects each service's

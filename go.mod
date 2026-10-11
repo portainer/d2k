@@ -3,9 +3,11 @@ module github.com/portainer/d2k
 go 1.26
 
 require (
+	github.com/distribution/reference v0.6.0
 	github.com/docker/go-units v0.5.0
 	github.com/getkin/kin-openapi v0.149.0
 	github.com/moby/moby/api v1.52.0
+	github.com/opencontainers/go-digest v1.0.0
 	github.com/rs/zerolog v1.35.1
 	github.com/sethvargo/go-envconfig v0.9.0
 	k8s.io/api v0.35.3
@@ -40,7 +42,6 @@ require (
 	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f // indirect
 	github.com/oasdiff/yaml v0.1.1 // indirect
 	github.com/oasdiff/yaml3 v0.0.14 // indirect
-	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
