@@ -63,3 +63,42 @@ func TestContainerUsageWithoutNodeAccess(t *testing.T) {
 		t.Errorf("MemoryLimit = %d, want %d", u.MemoryLimit, want)
 	}
 }
+
+// docker stats streams a sample per container every second, and Portainer
+// shows several containers' stats at once. The host's CPUs and memory come
+// from cluster-wide lists that change rarely: each sample must not list
+// every Node and ResourceQuota again.
+func TestContainerUsageDoesNotListTheClusterPerSample(t *testing.T) {
+	var objs []runtime.Object
+	for _, name := range []string{"web", "db", "cache"} {
+		d := deployment(name, "uid-"+name, managed())
+		d.Spec.Template.Spec.Containers = []corev1.Container{{Name: name}}
+		objs = append(objs, d)
+	}
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}, Status: corev1.NodeStatus{Allocatable: corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("4"), corev1.ResourceMemory: resource.MustParse("16Gi"),
+	}}}
+	a, client := newTestAdapter(t, append(objs, node)...)
+	lists := map[string]int{}
+	for _, resource := range []string{"nodes", "resourcequotas"} {
+		client.PrependReactor("list", resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
+			lists[action.GetResource().Resource]++
+			return false, nil, nil
+		})
+	}
+
+	for range 5 {
+		for _, name := range []string{"web", "db", "cache"} {
+			u, err := a.ContainerUsage(context.Background(), name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if u.OnlineCPUs != 4 || u.MemoryLimit != 16<<30 {
+				t.Fatalf("usage = %+v, want the node's 4 CPUs and 16Gi", u)
+			}
+		}
+	}
+	if lists["nodes"] != 1 || lists["resourcequotas"] != 1 {
+		t.Errorf("15 samples listed nodes %d and resource quotas %d times, want once each", lists["nodes"], lists["resourcequotas"])
+	}
+}
