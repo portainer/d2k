@@ -1,6 +1,8 @@
 package adapter
 
 import (
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
@@ -40,9 +42,13 @@ func managedLabels(name string) map[string]string {
 
 // addDockerLabels adds the Docker labels that are also valid Kubernetes
 // labels to labels. The others stay Docker labels only: they are recorded
-// verbatim in an annotation.
+// verbatim in an annotation. A Docker label never replaces a label d2k sets
+// or uses its prefix: d2k finds its objects by those labels.
 func addDockerLabels(labels, docker map[string]string) {
 	for k, v := range docker {
+		if _, own := labels[k]; own || strings.HasPrefix(k, types.LabelPrefix+"/") {
+			continue
+		}
 		if clean, ok := sanitiseLabelValue(v); ok && len(validation.IsQualifiedName(k)) == 0 {
 			labels[k] = clean
 		}
