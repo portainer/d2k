@@ -47,3 +47,30 @@ func TestImages(t *testing.T) {
 		t.Errorf("pull stream = %s, want an acknowledgement without a made-up pull", pull)
 	}
 }
+
+// docker pull combines fromImage and tag as the Docker daemon does
+// (moby daemon/server/router/image/image_routes.go postImagesCreate): tag
+// replaces a tag in fromImage, a digest in tag replaces any tag or digest,
+// and a pull needs a valid fromImage.
+func TestPullReference(t *testing.T) {
+	h, _ := newTestRouter()
+	const dgst = "sha256:0000000000000000000000000000000000000000000000000000000000000001"
+	for _, tc := range []struct{ query, want string }{
+		{"fromImage=nginx&tag=alpine", "nginx:alpine"},
+		{"fromImage=nginx:old&tag=new", "nginx:new"},
+		{"fromImage=nginx:old&tag=" + dgst, "nginx@" + dgst},
+		{"fromImage=nginx&tag=" + dgst, "nginx@" + dgst},
+		{"fromImage=registry.example.com:5000/team/app&tag=1.2", "registry.example.com:5000/team/app:1.2"},
+	} {
+		rec := do(t, h, "POST", "/images/create?"+tc.query, "")
+		var msg struct{ Status string }
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &msg) != nil || !strings.HasPrefix(msg.Status, tc.want+": ") {
+			t.Errorf("pull %s = %d %s, want status for %s", tc.query, rec.Code, rec.Body, tc.want)
+		}
+	}
+	for _, query := range []string{"tag=alpine", "fromImage=Not_Valid", "fromImage=nginx&tag=bad:tag"} {
+		if rec := do(t, h, "POST", "/images/create?"+query, ""); rec.Code != 400 {
+			t.Errorf("pull %s = %d %s, want 400", query, rec.Code, rec.Body)
+		}
+	}
+}
