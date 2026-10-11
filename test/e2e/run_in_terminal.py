@@ -3,7 +3,7 @@
 The Docker CLI only sends a console size, and resizes, when it runs in a
 terminal; this gives it one.
 """
-import fcntl, os, pty, select, struct, sys, termios, time
+import fcntl, os, pty, select, signal, struct, sys, termios, time
 
 pid, fd = pty.fork()
 if pid == 0:
@@ -19,5 +19,8 @@ while time.time() < deadline:
         if not data:
             break
         out += data
+else:
+    # Still running at the deadline: end it, or waitpid blocks the suite.
+    os.kill(pid, signal.SIGKILL)
 os.waitpid(pid, 0)
 sys.stdout.write(out.decode(errors="replace"))
