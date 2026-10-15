@@ -216,7 +216,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: D2K_SWARM_MODE
-              value: "true"   # set to "false" to run in Docker host mode instead
+              value: "false"   # set to "true" to emulate Docker Swarm instead
             - name: D2K_LOG_LEVEL
               value: "info"
             # D2K_KUBECONFIG is intentionally not set — in-cluster auth is used.

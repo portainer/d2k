@@ -39,7 +39,7 @@ render() {
       -e "s/d2k-node-reader/d2k-node-reader-$1/" \
       -e "s#image: portainer/d2k:latest#image: $IMAGE#" \
       -e "s/imagePullPolicy: Always/imagePullPolicy: IfNotPresent/" \
-      -e "s/value: \"true\"   # set to \"false\"/value: \"$2\"   # set to \"false\"/" \
+      -e "s/value: \"false\"   # set to \"true\"/value: \"$2\"   # set to \"true\"/" \
       -e "s/^      targetPort: 2376$/      targetPort: 2376\n      nodePort: $3/" \
       -e "s/^  type: LoadBalancer$/  type: NodePort/" \
       "$ROOT/deploy/kubernetes.yaml"
