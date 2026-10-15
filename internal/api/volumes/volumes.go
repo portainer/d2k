@@ -21,6 +21,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/filters"
 	"github.com/portainer/d2k/pkg/httputils"
 )
@@ -143,7 +144,12 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	name := volumeNameFromPath(r.URL.Path)
 
-	if err := h.adapter.RemoveVolume(r.Context(), name); err != nil {
+	err := h.adapter.RemoveVolume(r.Context(), name)
+	// As in Docker, a forced remove of a volume that doesn't exist succeeds.
+	if force := r.URL.Query().Get("force"); errdefs.IsNotFound(err) && (force == "1" || force == "true") {
+		err = nil
+	}
+	if err != nil {
 		log.Error().Str("context", "VolumesAPI").Any("name", name).Err(err).Msg("RemoveVolume failed")
 		httputils.WriteErrorFrom(w, err)
 		return
