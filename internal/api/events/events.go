@@ -137,7 +137,10 @@ func matches(args filters.Args, m events.Message) bool {
 	}
 	for _, t := range namedObjectFilters {
 		key := string(t)
-		if args.Contains(key) && (m.Type != t || !(args.FuzzyMatch(key, m.Actor.ID) || args.FuzzyMatch(key, m.Actor.Attributes["name"]))) {
+		if !args.Contains(key) {
+			continue
+		}
+		if m.Type != t || (!args.FuzzyMatch(key, m.Actor.ID) && !args.FuzzyMatch(key, m.Actor.Attributes["name"])) {
 			return false
 		}
 	}
