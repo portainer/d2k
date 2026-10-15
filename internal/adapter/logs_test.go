@@ -149,3 +149,25 @@ func TestGetContainerLogsDoesNotWaitForAnUnschedulablePod(t *testing.T) {
 		t.Fatal("GetContainerLogs waited for a pod the scheduler cannot place")
 	}
 }
+
+// docker logs of a stopped container applies --since, --tail and
+// --timestamps to the kept log as to a live one.
+func TestKeptLog(t *testing.T) {
+	log := "2026-10-05T12:00:00.000000001Z first\n2026-10-05T12:00:01.000000001Z second\n2026-10-05T12:00:02.000000001Z third\n"
+	tail := int64(2)
+	since := metav1.NewTime(time.Date(2026, 10, 5, 12, 0, 1, 0, time.UTC))
+	for _, tc := range []struct {
+		name string
+		opts corev1.PodLogOptions
+		want string
+	}{
+		{"all", corev1.PodLogOptions{}, "first\nsecond\nthird\n"},
+		{"tail", corev1.PodLogOptions{TailLines: &tail}, "second\nthird\n"},
+		{"since", corev1.PodLogOptions{SinceTime: &since}, "second\nthird\n"},
+		{"timestamps", corev1.PodLogOptions{TailLines: &tail, Timestamps: true}, "2026-10-05T12:00:01.000000001Z second\n2026-10-05T12:00:02.000000001Z third\n"},
+	} {
+		if got := keptLog(log, &tc.opts); got != tc.want {
+			t.Errorf("%s: kept log = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

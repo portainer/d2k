@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/portainer/d2k/internal/errdefs"
+	"github.com/portainer/d2k/internal/types"
 )
 
 // LogOptions mirrors the docker logs settings Kubernetes can apply.
@@ -56,7 +58,9 @@ func (a *KubernetesDockerAdapter) GetContainerLogs(ctx context.Context, name str
 
 	pod, err := a.currentPodForDeployment(ctx, resolved)
 	if errors.Is(err, errNoPod) {
-		return io.NopCloser(strings.NewReader("")), tty, nil
+		// A stopped container's log went with its pod: serve the part kept
+		// when it stopped, if any. A container that never ran has none.
+		return io.NopCloser(strings.NewReader(keptLog(d.Annotations[types.AnnotationLastLog], logOpts))), tty, nil
 	}
 	if err != nil {
 		return nil, false, err
@@ -125,4 +129,62 @@ func (a *KubernetesDockerAdapter) currentPodForDeployment(ctx context.Context, d
 	}
 
 	return nil, fmt.Errorf("deployment %q: %w", deploymentName, errNoPod)
+}
+
+// The part of a stopped container's log d2k keeps (AnnotationLastLog): the
+// last keptLogLines lines, at most keptLogBytes, so the Deployment's
+// annotations stay well below Kubernetes' 256 KiB limit.
+const (
+	keptLogLines = 1000
+	keptLogBytes = 64 << 10
+)
+
+// logTail reads the last part of the pod's log, with timestamps, to keep
+// when its container stops.
+func (a *KubernetesDockerAdapter) logTail(ctx context.Context, pod string) (string, bool) {
+	lines := int64(keptLogLines)
+	stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(pod, &corev1.PodLogOptions{Timestamps: true, TailLines: &lines}).Stream(ctx)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = stream.Close() }()
+	// Bound the read: a thousand very long lines is still only kept in part.
+	data, err := io.ReadAll(io.LimitReader(stream, 16*keptLogBytes))
+	if err != nil {
+		return "", false
+	}
+	if len(data) > keptLogBytes {
+		data = data[len(data)-keptLogBytes:]
+		// Keep whole lines only.
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			data = data[i+1:]
+		}
+	}
+	return string(data), true
+}
+
+// keptLog applies docker logs' --since, --tail and --timestamps to a kept
+// log, whose lines start with the kubelet's RFC 3339 timestamp.
+func keptLog(log string, opts *corev1.PodLogOptions) string {
+	var out []string
+	for line := range strings.Lines(log) {
+		stamp, text, _ := strings.Cut(line, " ")
+		at, err := time.Parse(time.RFC3339Nano, stamp)
+		if err != nil {
+			// Not a timestamped line: keep it as it is.
+			out = append(out, line)
+			continue
+		}
+		if opts.SinceTime != nil && at.Before(opts.SinceTime.Time) {
+			continue
+		}
+		if opts.Timestamps {
+			text = line
+		}
+		out = append(out, text)
+	}
+	if opts.TailLines != nil && int64(len(out)) > *opts.TailLines {
+		out = out[int64(len(out))-*opts.TailLines:]
+	}
+	return strings.Join(out, "")
 }

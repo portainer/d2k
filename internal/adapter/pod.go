@@ -150,22 +150,33 @@ func (a *KubernetesDockerAdapter) waitForPodGone(ctx context.Context, name strin
 // waitForPodsGone waits until the Deployment has no pods left, and returns
 // the exit code of their container if it saw one.
 func (a *KubernetesDockerAdapter) waitForPodsGone(ctx context.Context, deployment string, timeout time.Duration) (string, bool) {
+	code, _, seen := a.waitForPodsGoneKeepingLog(ctx, deployment, timeout)
+	return code, seen
+}
+
+// waitForPodsGoneKeepingLog is waitForPodsGone that also returns the last
+// part of the container's log, read while its pod lasted (logTail), so it
+// includes what the container printed while it stopped.
+func (a *KubernetesDockerAdapter) waitForPodsGoneKeepingLog(ctx context.Context, deployment string, timeout time.Duration) (string, string, bool) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	code, seen := "", false
+	code, log, seen := "", "", false
 	for {
 		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(deployment))
 		if err != nil || len(pods.Items) == 0 {
-			return code, seen
+			return code, log, seen
 		}
 		for _, p := range pods.Items {
 			if s := p.Status.ContainerStatuses; len(s) > 0 && s[0].State.Terminated != nil {
 				code, seen = strconv.Itoa(int(s[0].State.Terminated.ExitCode)), true
 			}
 		}
+		if tail, ok := a.logTail(ctx, pods.Items[0].Name); ok {
+			log = tail
+		}
 		select {
 		case <-ctx.Done():
-			return code, seen
+			return code, log, seen
 		case <-time.After(500 * time.Millisecond):
 		}
 	}

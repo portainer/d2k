@@ -391,9 +391,17 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 	if getErr == nil && d.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
 		grace = *d.Spec.Template.Spec.TerminationGracePeriodSeconds
 	}
-	if code, ok := a.waitForPodsGone(ctx, resolved, time.Duration(grace+30)*time.Second); ok {
+	code, log, ok := a.waitForPodsGoneKeepingLog(ctx, resolved, time.Duration(grace+30)*time.Second)
+	updates := map[string]*string{}
+	if ok {
+		updates[types.AnnotationExitCode] = &code
+	}
+	if log != "" {
+		updates[types.AnnotationLastLog] = &log
+	}
+	if len(updates) > 0 {
 		// A container removed meanwhile has no state left to record.
-		if err := a.annotate(ctx, resolved, map[string]*string{types.AnnotationExitCode: &code}); err != nil && !errors.IsNotFound(err) {
+		if err := a.annotate(ctx, resolved, updates); err != nil && !errors.IsNotFound(err) {
 			return err
 		}
 	}

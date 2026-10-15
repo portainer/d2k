@@ -55,6 +55,11 @@ const (
 	// ended, once its pod is gone.
 	AnnotationExitCode = LabelPrefix + "/exit-code"
 
+	// AnnotationLastLog records the last part of a Deployment-backed
+	// container's log when docker stop ends it: the kubelet's log goes with
+	// the pod, and docker logs of the stopped container serves this.
+	AnnotationLastLog = LabelPrefix + "/last-log"
+
 	// AnnotationAutoRemove marks a container that is removed when its run
 	// ends (docker run --rm).
 	AnnotationAutoRemove = LabelPrefix + "/auto-remove"
