@@ -106,3 +106,22 @@ func TestVolumeRemove(t *testing.T) {
 		t.Errorf("inspect after remove = %d, want 404: %s", rec.Code, rec.Body)
 	}
 }
+
+// As in Docker (moby volume_routes.go deleteVolumes: force purges on error,
+// so no "not found"), `docker volume rm -f` of a missing volume succeeds,
+// while force still never removes a volume a container uses.
+func TestVolumeRemoveForce(t *testing.T) {
+	h, _ := newTestRouter()
+	if rec := do(t, h, "DELETE", "/volumes/nope?force=1", ""); rec.Code != http.StatusNoContent {
+		t.Errorf("force remove missing = %d, want 204: %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/volumes/create", `{"Name":"db_data"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("volume create = %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", "/containers/create?name=db", `{"Image":"postgres","HostConfig":{"Binds":["db_data:/var/lib/postgresql/data"]}}`); rec.Code != http.StatusCreated {
+		t.Fatalf("container create = %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "DELETE", "/volumes/db_data?force=1", ""); rec.Code != http.StatusConflict {
+		t.Errorf("force remove in use = %d, want 409: %s", rec.Code, rec.Body)
+	}
+}
