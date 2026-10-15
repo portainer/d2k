@@ -30,6 +30,10 @@ type Config struct {
 	KeyFile  string // server key
 	CAFile   string // CA that client certificates must chain to
 
+	// CertPEM, KeyPEM and CAPEM, when set, are used instead of the files:
+	// the material d2k created itself at startup.
+	CertPEM, KeyPEM, CAPEM []byte
+
 	// SocketPath, when set, also serves the Docker API on a unix socket,
 	// protected by file permissions rather than TLS.
 	SocketPath string
@@ -64,7 +68,13 @@ func Run(ctx context.Context, cfg Config, handler http.Handler) error {
 		log.Warn().Str("context", "Server").Any("addr", l.Addr().String()).Msg("D2K_INSECURE is set: serving the Docker API without TLS or authentication")
 		servers, listeners = append(servers, api), append(listeners, l)
 	} else {
-		tlsConfig, err := mutualTLS(cfg.CertFile, cfg.KeyFile, cfg.CAFile)
+		var tlsConfig *tls.Config
+		var err error
+		if cfg.CertPEM != nil {
+			tlsConfig, err = staticMutualTLS(cfg.CertPEM, cfg.KeyPEM, cfg.CAPEM)
+		} else {
+			tlsConfig, err = mutualTLS(cfg.CertFile, cfg.KeyFile, cfg.CAFile)
+		}
 		if err != nil {
 			return fmt.Errorf("mTLS is required (set D2K_INSECURE=true to serve without TLS): %w", err)
 		}
@@ -164,6 +174,26 @@ func mutualTLS(certFile, keyFile, caFile string) (*tls.Config, error) {
 			cfg.ClientCAs = pool
 			return cfg, nil
 		},
+	}, nil
+}
+
+// staticMutualTLS is mutualTLS for material held in memory, which does not
+// change while d2k runs.
+func staticMutualTLS(certPEM, keyPEM, caPEM []byte) (*tls.Config, error) {
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("load server certificate: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("load client CA: no certificates")
+	}
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		NextProtos:   []string{"http/1.1"},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		Certificates: []tls.Certificate{cert},
+		ClientCAs:    pool,
 	}, nil
 }
 

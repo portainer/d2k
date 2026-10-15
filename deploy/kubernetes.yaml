@@ -189,9 +189,11 @@ spec:
       # Service, which collide with d2k's own D2K_* settings.
       enableServiceLinks: false
       volumes:
-        # TLS Secret — required. d2k serves the Docker API over mutual TLS and
-        # does not start without it. Create the certificates and the Secret
-        # before applying this manifest, using every address clients use:
+        # TLS Secret. d2k serves the Docker API over mutual TLS. Without this
+        # Secret, d2k creates its certificates on first start, for the
+        # addresses in D2K_TLS_SANS below, and stores the server's here and a
+        # client certificate in the d2k-client Secret (see README). To use
+        # your own, create the Secret before applying this manifest:
         #   d2k pki init --san d2k.example.com,10.0.0.10 --out d2k-pki
         #   kubectl create secret generic d2k-tls --from-file=d2k-pki/server -n d2k
         # Clients (Docker CLI, Portainer "Docker API" with TLS) use the files in
@@ -201,6 +203,7 @@ spec:
         - name: tls
           secret:
             secretName: d2k-tls
+            optional: true
       containers:
         - name: d2k
           image: portainer/d2k:latest   # replace with your image
@@ -219,6 +222,12 @@ spec:
               value: "false"   # set to "true" to emulate Docker Swarm instead
             - name: D2K_LOG_LEVEL
               value: "info"
+            # The DNS names and IP addresses clients use to reach d2k
+            # (comma-separated), for the certificates d2k creates when the
+            # d2k-tls Secret doesn't exist. The Service's in-cluster names and
+            # localhost are always included.
+            - name: D2K_TLS_SANS
+              value: ""   # e.g. "d2k.example.com,10.0.0.10"
             # D2K_KUBECONFIG is intentionally not set — in-cluster auth is used.
             # D2K_TLS_CERT_FILE, D2K_TLS_KEY_FILE and D2K_TLS_CA_FILE default to
             # tls.crt, tls.key and ca.crt in /etc/d2k/tls, the d2k-tls mount.

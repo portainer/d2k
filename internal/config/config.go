@@ -64,6 +64,13 @@ type Config struct {
 	// Defaults to /etc/d2k/tls/ca.crt (standard Kubernetes Secret mount path).
 	TLSCAFile string `env:"D2K_TLS_CA_FILE,default=/etc/d2k/tls/ca.crt"`
 
+	// TLSSANs are the DNS names and IP addresses, comma-separated, that the
+	// server certificate covers when d2k creates its certificates: on a
+	// start without TLSCertFile (no d2k-tls Secret), d2k creates them and
+	// stores them in the d2k-tls and d2k-client Secrets. The d2k Service's
+	// in-cluster names and localhost are always included.
+	TLSSANs []string `env:"D2K_TLS_SANS"`
+
 	// TLSPort is the port of the mutual TLS Docker API.
 	// Defaults to 2376 (standard Docker TLS port).
 	TLSPort int `env:"D2K_TLS_PORT,default=2376"`

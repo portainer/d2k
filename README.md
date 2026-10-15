@@ -250,19 +250,31 @@ If your StorageClass has `reclaimPolicy: Delete`, the underlying NFS subdirector
 
 d2k runs inside the target cluster namespace using a ServiceAccount bound to a namespace-scoped Role for workload management and a ClusterRole for node and StorageClass read access.
 
-d2k serves the Docker API over mutual TLS and does not start without its certificates. Create them first, listing every DNS name and IP address clients use to reach d2k:
+d2k serves the Docker API over mutual TLS. In `deploy/kubernetes.yaml`, set `D2K_TLS_SANS` to every DNS name and IP address clients use to reach d2k (comma-separated), then:
+
+```bash
+kubectl apply -f deploy/admission-policy.yaml   # once per cluster
+kubectl apply -f deploy/kubernetes.yaml
+kubectl -n d2k rollout status deploy/d2k
+mkdir -p d2k-client
+kubectl -n d2k get secret d2k-client -o jsonpath='{.data.ca\.pem}' | base64 -d > d2k-client/ca.pem
+kubectl -n d2k get secret d2k-client -o jsonpath='{.data.cert\.pem}' | base64 -d > d2k-client/cert.pem
+kubectl -n d2k get secret d2k-client -o jsonpath='{.data.key\.pem}' | base64 -d > d2k-client/key.pem
+```
+
+On its first start without a `d2k-tls` Secret, d2k creates its certificates: a CA, a server certificate for `D2K_TLS_SANS` plus the Service's in-cluster names (`d2k.<namespace>.svc...`) and `localhost`, and a client certificate. It stores the server's in `d2k-tls` and the client's in `d2k-client`, and keeps using them on every later start. It does not keep the CA key, so nothing in the cluster can issue further client certificates. To change the names, delete both Secrets, restart d2k, and give clients the new `d2k-client` files.
+
+To use your own CA instead (to keep the CA key, or to issue several client certificates), create the `d2k-tls` Secret before applying the manifest; d2k then uses it and creates no certificates:
 
 ```bash
 d2k pki init --san d2k.d2k.svc.cluster.local,d2k.example.com --out d2k-pki
 kubectl create namespace d2k
 kubectl -n d2k create secret generic d2k-tls --from-file=d2k-pki/server
-kubectl apply -f deploy/admission-policy.yaml   # once per cluster
-kubectl apply -f deploy/kubernetes.yaml
 ```
 
 `deploy/admission-policy.yaml` holds the cluster-scoped ValidatingAdmissionPolicy and its binding, which every d2k install on the cluster shares (see Networking above). To uninstall one install, `kubectl delete -f deploy/kubernetes.yaml` (with that install's namespace); delete `deploy/admission-policy.yaml` only after the last install is gone.
 
-`d2k-pki/client` holds the client certificate (`ca.pem`, `cert.pem`, `key.pem`) for the Docker CLI and for Portainer's "Docker API" environment with TLS. Keep `d2k-pki/ca.key` private. `d2k pki init` refuses to overwrite any file it would write, so give it a new `--out` directory to start over. cert-manager can issue the `d2k-tls` Secret instead, as long as it holds `tls.crt`, `tls.key` and the client CA as `ca.crt`. d2k reloads the Secret when it changes, without a restart.
+With your own CA, `d2k-pki/client` holds the client certificate (`ca.pem`, `cert.pem`, `key.pem`) for the Docker CLI and for Portainer's "Docker API" environment with TLS. Keep `d2k-pki/ca.key` private. `d2k pki init` refuses to overwrite any file it would write, so give it a new `--out` directory to start over. cert-manager can issue the `d2k-tls` Secret instead, as long as it holds `tls.crt`, `tls.key` and the client CA as `ca.crt`. d2k reloads the Secret when it changes, without a restart.
 
 `deploy/kubernetes.yaml` installs Docker host mode (`D2K_SWARM_MODE="false"`). For Swarm mode, set it to `"true"` before applying. An install made from an earlier manifest that ran Swarm mode must keep `"true"` when it re-applies this one: in host mode d2k doesn't serve the Swarm API, so its services, stacks, secrets and configs would no longer be listed (the Kubernetes objects stay). The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included, and both modes use them.
 
@@ -296,6 +308,7 @@ docker --context d2k service ls
 | `D2K_TLS_CERT_FILE` | `/etc/d2k/tls/tls.crt` | Server certificate |
 | `D2K_TLS_KEY_FILE` | `/etc/d2k/tls/tls.key` | Server key |
 | `D2K_TLS_CA_FILE` | `/etc/d2k/tls/ca.crt` | CA that client certificates must be signed by |
+| `D2K_TLS_SANS` | _(none)_ | DNS names and IP addresses (comma-separated) for the certificates d2k creates when `D2K_TLS_CERT_FILE` doesn't exist (no `d2k-tls` Secret) |
 | `D2K_HEALTH_PORT` | `8081` | Plain HTTP port serving `GET /healthz` only |
 | `D2K_SOCKET` | _(empty)_ | Also serve the Docker API on this unix socket (no TLS; file mode 0660) |
 | `D2K_INSECURE` | `false` | Serve without TLS or authentication on `D2K_PORT`. Anyone who can reach it controls the namespace |

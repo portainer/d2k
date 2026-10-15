@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -106,8 +107,7 @@ func serve() {
 	a.LogNFSStorageClasses(ctx)
 	go a.RecordEvents(ctx)
 
-	handler := router.New(a, cfg.Namespace, cfg.SwarmMode)
-	err = server.Run(ctx, server.Config{
+	serverCfg := server.Config{
 		Insecure:   cfg.Insecure,
 		Port:       cfg.Port,
 		TLSPort:    cfg.TLSPort,
@@ -116,7 +116,24 @@ func serve() {
 		CAFile:     cfg.TLSCAFile,
 		SocketPath: cfg.SocketPath,
 		HealthPort: cfg.HealthPort,
-	}, handler)
+	}
+	if _, err := os.Stat(cfg.TLSCertFile); !cfg.Insecure && errors.Is(err, os.ErrNotExist) {
+		// No d2k-tls Secret mounted: a new install, or an upgrade from a
+		// release without mTLS. Use the Secret if it exists by now, or create
+		// the certificates.
+		material, created, err := a.EnsureTLS(ctx, cfg.TLSSANs)
+		if err != nil {
+			log.Fatal().Str("context", "Startup").Err(err).Msg("No TLS certificates mounted, and unable to create them (set D2K_INSECURE=true to serve without TLS)")
+		}
+		if created {
+			log.Warn().Str("context", "Startup").Strs("names", cfg.TLSSANs).
+				Msgf("Created d2k's certificates in Secrets %[1]s and %[2]s. Docker clients need the client certificate: kubectl -n %[3]s get secret %[2]s -o jsonpath='{.data.cert\\.pem}' | base64 -d > cert.pem (likewise key.pem and ca.pem)", adapter.TLSSecretName, adapter.ClientTLSSecretName, cfg.Namespace)
+		}
+		serverCfg.CertPEM, serverCfg.KeyPEM, serverCfg.CAPEM = material.Cert, material.Key, material.CA
+	}
+
+	handler := router.New(a, cfg.Namespace, cfg.SwarmMode)
+	err = server.Run(ctx, serverCfg, handler)
 	if err != nil {
 		log.Fatal().Str("context", "Startup").Err(err).Msg("Server error")
 	}

@@ -92,6 +92,43 @@ func TestMutualTLS(t *testing.T) {
 	}
 }
 
+// The material d2k creates at startup is served from memory, with the same
+// client checks as material from files.
+func TestStaticMutualTLS(t *testing.T) {
+	dir := newPKI(t)
+	other := newPKI(t)
+	read := func(name string) []byte {
+		data, err := os.ReadFile(filepath.Join(dir, "server", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	cfg, err := staticMutualTLS(read("tls.crt"), read("tls.key"), read("ca.crt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(ok)
+	srv.TLS = cfg
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	if _, err := client(t, dir, "").Get(srv.URL); err == nil {
+		t.Error("request without a client certificate succeeded")
+	}
+	if _, err := client(t, dir, other).Get(srv.URL); err == nil {
+		t.Error("request with a client certificate from another CA succeeded")
+	}
+	resp, err := client(t, dir, dir, "h2", "http/1.1").Get(srv.URL)
+	if err != nil {
+		t.Fatalf("request with a valid client certificate failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.ProtoMajor != 1 {
+		t.Errorf("negotiated %s, want HTTP/1.1", resp.Proto)
+	}
+}
+
 func TestMutualTLSReloadsRotatedMaterial(t *testing.T) {
 	dir := newPKI(t)
 	srv := startMTLS(t, dir)
