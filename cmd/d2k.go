@@ -104,6 +104,12 @@ func serve() {
 	}
 	log.Info().Str("context", "Startup").Str("namespace", cfg.Namespace).Msg("Connected to Kubernetes namespace")
 
+	// Containers and volumes an earlier d2k release created: record what
+	// this release reads. A failure leaves them as they are; d2k still runs.
+	if err := a.MigrateLegacyObjects(ctx, cfg.SwarmMode); err != nil {
+		log.Error().Str("context", "Startup").Err(err).Msg("Unable to migrate the containers and volumes of an earlier d2k release")
+	}
+
 	a.LogNFSStorageClasses(ctx)
 	go a.RecordEvents(ctx)
 

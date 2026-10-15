@@ -278,6 +278,21 @@ With your own CA, `d2k-pki/client` holds the client certificate (`ca.pem`, `cert
 
 `deploy/kubernetes.yaml` installs Docker host mode (`D2K_SWARM_MODE="false"`). For Swarm mode, set it to `"true"` before applying. An install made from an earlier manifest that ran Swarm mode must keep `"true"` when it re-applies this one: in host mode d2k doesn't serve the Swarm API, so its services, stacks, secrets and configs would no longer be listed (the Kubernetes objects stay). The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included, and both modes use them.
 
+### Upgrading from d2k 1.2.x
+
+1.2.x served the Docker API over plain TCP on port 2375 and installed Swarm mode by default. In place:
+
+1. If the install ran Swarm mode (1.2.x's default), set `D2K_SWARM_MODE` to `"true"` in `deploy/kubernetes.yaml`. In Docker host mode d2k doesn't list Swarm services, and logs a warning when it finds them.
+2. Set `D2K_TLS_SANS` to the addresses clients use, as for a new install.
+3. Apply `deploy/admission-policy.yaml` (once per cluster) and `deploy/kubernetes.yaml` with the install's namespace. d2k creates its certificates on first start (see above), unless you created a `d2k-tls` Secret.
+4. Re-add the environment in Portainer: "Docker API" with TLS at port 2376, with the client certificate from the `d2k-client` Secret. Docker CLI users need `DOCKER_TLS_VERIFY=1` and that certificate too.
+
+On its first start, d2k records on the containers and volumes 1.2.x created what it reads now: their Docker names and labels, and the start of each container (a stopped one shows as exited). What 1.2.x did not keep can't be recovered:
+
+- **Volume data.** In Docker host mode, 1.2.x created volumes but did not mount them into containers, so what those containers wrote is in the container's own filesystem, not the volume. It is lost when the container is re-created (the first `docker compose up` after the upgrade does), as it was on any restart under 1.2.x. Copy out anything you need before upgrading.
+- **Names with underscores** show with hyphens (`data_vol` is `data-vol`), and compose's `working_dir` and `config_files` labels are gone (`docker compose ls` shows `N/A`).
+- **Compose's config hash.** Compose containers get `com.docker.compose.config-hash=d2k-migrated`, so `docker compose ls` and `ps` list them; the next `docker compose up` re-creates them from the compose file.
+
 ### Multiple installs on one cluster
 
 Portainer can point several environments at the same cluster, each as its own d2k install in its own namespace. Everything namespace-scoped (the Role, RoleBinding, ServiceAccount, Deployment, Service, Secret) is already isolated by `namespace: d2k` in the manifest, and the ValidatingAdmissionPolicy in `deploy/admission-policy.yaml` is applied once and shared: it derives the expected ServiceAccount from whichever namespace is being patched, and uninstalling one install leaves it in place for the others.

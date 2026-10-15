@@ -1209,7 +1209,9 @@ func recordedLabels(m metav1.ObjectMeta) map[string]string {
 	if _, recorded := m.Annotations[types.AnnotationDockerName]; recorded {
 		return map[string]string{}
 	}
-	return m.Labels
+	// Created before labels were recorded: its Kubernetes labels, without
+	// d2k's own.
+	return legacyDockerLabels(m, legacyDockerName(m))
 }
 
 // dockerNameInUse reports whether a managed container already has the Docker name.
