@@ -53,6 +53,7 @@ func containerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) conta
 		if t := lastTermination(status); t != nil {
 			state.ExitCode = int(t.ExitCode)
 			state.FinishedAt = t.FinishedAt.UTC().Format(time.RFC3339Nano)
+			state.OOMKilled = oomKilled(t)
 		}
 	case status.State.Waiting != nil && !waitingWhileCreating[status.State.Waiting.Reason]:
 		state.Error = status.State.Waiting.Reason + ": " + status.State.Waiting.Message
@@ -119,12 +120,14 @@ func podContainerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) co
 		state.Status, state.ExitCode = container.StateExited, int(t.ExitCode)
 		state.StartedAt = t.StartedAt.UTC().Format(time.RFC3339Nano)
 		state.FinishedAt = t.FinishedAt.UTC().Format(time.RFC3339Nano)
+		state.OOMKilled = oomKilled(t)
 	case status.State.Terminated != nil || status.RestartCount > 0:
 		// on-failure: the kubelet restarts the failed container.
 		state.Status, state.Running, state.Restarting = container.StateRestarting, true, true
 		if t := lastTermination(status); t != nil {
 			state.ExitCode = int(t.ExitCode)
 			state.FinishedAt = t.FinishedAt.UTC().Format(time.RFC3339Nano)
+			state.OOMKilled = oomKilled(t)
 		}
 	case status.State.Waiting != nil && !waitingWhileCreating[status.State.Waiting.Reason]:
 		state.Error = status.State.Waiting.Reason + ": " + status.State.Waiting.Message
@@ -133,6 +136,12 @@ func podContainerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) co
 		state.Health = &container.Health{Status: container.Starting}
 	}
 	return state
+}
+
+// oomKilled reports whether the kernel killed the container for exceeding
+// its memory limit, which the kubelet records as the termination's reason.
+func oomKilled(t *corev1.ContainerStateTerminated) bool {
+	return t.Reason == "OOMKilled"
 }
 
 // exitedForGood reports whether a terminated container of a pod will not be
