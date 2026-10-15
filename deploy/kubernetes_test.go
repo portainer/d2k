@@ -92,3 +92,14 @@ func TestAdmissionPolicyShipsApartFromTheInstall(t *testing.T) {
 		t.Errorf("admission-policy.yaml kinds = %v, want the policy and its binding", got)
 	}
 }
+
+// The manifest installs Docker host mode, the mode d2k is built and
+// supported for (compose, the Docker CLI, Portainer's standalone Docker
+// environment). Swarm mode is opt-in: set D2K_SWARM_MODE to "true".
+func TestManifestInstallsDockerHostMode(t *testing.T) {
+	for _, e := range d2kDeployment(t).Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "D2K_SWARM_MODE" && e.Value != "false" {
+			t.Errorf("D2K_SWARM_MODE = %q, want \"false\": Swarm mode is opt-in", e.Value)
+		}
+	}
+}
