@@ -121,6 +121,11 @@ func podContainerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) co
 		state.StartedAt = t.StartedAt.UTC().Format(time.RFC3339Nano)
 		state.FinishedAt = t.FinishedAt.UTC().Format(time.RFC3339Nano)
 		state.OOMKilled = oomKilled(t)
+		if neverStarted(t) {
+			// As in Docker: why it didn't start, and no start time.
+			state.Error = t.Message
+			state.StartedAt = time.Time{}.Format(time.RFC3339Nano)
+		}
 	case status.State.Terminated != nil || status.RestartCount > 0:
 		// on-failure: the kubelet restarts the failed container.
 		state.Status, state.Running, state.Restarting = container.StateRestarting, true, true
@@ -136,6 +141,13 @@ func podContainerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) co
 		state.Health = &container.Health{Status: container.Starting}
 	}
 	return state
+}
+
+// neverStarted reports whether the runtime refused to start the
+// container's process: the kubelet then records a start time at the Unix
+// epoch, or none.
+func neverStarted(t *corev1.ContainerStateTerminated) bool {
+	return t.StartedAt.IsZero() || t.StartedAt.Unix() == 0
 }
 
 // oomKilled reports whether the kernel killed the container for exceeding
