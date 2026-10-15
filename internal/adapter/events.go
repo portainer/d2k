@@ -595,7 +595,7 @@ func volumeEvents(volumes map[string]bool, kind watch.EventType, pvc *corev1.Per
 	return []events.Message{{
 		Type:     events.VolumeEventType,
 		Action:   action,
-		Actor:    events.Actor{ID: pvc.Name, Attributes: map[string]string{"driver": "d2k"}},
+		Actor:    events.Actor{ID: recordedName(pvc.ObjectMeta), Attributes: map[string]string{"driver": "d2k"}},
 		Scope:    "local",
 		Time:     now.Unix(),
 		TimeNano: now.UnixNano(),
