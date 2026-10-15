@@ -245,11 +245,17 @@ func (h *Handler) run(ctx context.Context, inst *instance, s adapter.ExecStreams
 	code, err := h.adapter.ExecContainer(ctx, inst.opts, s)
 	if err != nil {
 		log.Warn().Str("context", "ExecAPI").Str("exec_id", inst.id).Err(err).Msg("Exec failed")
-		code = 126 // as the daemon reports a command that could not be run
+		code = startErrorExitCode(err)
 	}
 	inst.finish(code)
 	inst.resize.Close()
 	return err
+}
+
+// startErrorExitCode is the exit code of an exec whose command could not
+// be run.
+func startErrorExitCode(error) int {
+	return 126 // as the daemon reports a command that could not be run
 }
 
 // Resize handles POST /exec/{id}/resize.
