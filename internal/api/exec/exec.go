@@ -253,9 +253,20 @@ func (h *Handler) run(ctx context.Context, inst *instance, s adapter.ExecStreams
 }
 
 // startErrorExitCode is the exit code of an exec whose command could not
-// be run.
-func startErrorExitCode(error) int {
-	return 126 // as the daemon reports a command that could not be run
+// be run, read from the runtime's error as the Docker daemon does (moby
+// daemon/errors.go, setExitCodeFromError): 127 for a command that does not
+// exist, 126 for one that can't be invoked or any other failure.
+func startErrorExitCode(err error) int {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "permission denied") || strings.Contains(msg, "is a directory") {
+		return 126
+	}
+	for _, notFound := range []string{"executable file not found", "no such file or directory", "not a directory", "system cannot find the file specified"} {
+		if strings.Contains(msg, notFound) {
+			return 127
+		}
+	}
+	return 126
 }
 
 // Resize handles POST /exec/{id}/resize.
