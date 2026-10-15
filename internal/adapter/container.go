@@ -706,6 +706,9 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 					Annotations: opts.Annotations,
 				},
 				Spec: corev1.PodSpec{
+					// Docker sets no <SERVICE>_PORT variables; they collide
+					// with apps' own (MEMOS_PORT for a container named memos).
+					EnableServiceLinks:            new(bool),
 					Hostname:                      opts.Hostname,
 					DNSConfig:                     dnsConfig(opts),
 					SecurityContext:               podSecurityContext(opts),
