@@ -4,6 +4,7 @@ package deploy
 
 import (
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -56,5 +57,38 @@ func TestPreStopDelaysSIGTERM(t *testing.T) {
 	seconds, err := strconv.Atoi(cmd[len(cmd)-1])
 	if err != nil || seconds < 5 {
 		t.Fatalf("preStop sleep = %q, want at least 5 seconds", cmd[len(cmd)-1])
+	}
+}
+
+// kinds returns the kind of every document in the named manifest.
+func kinds(t *testing.T, file string) []string {
+	t.Helper()
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatalf("read %s: %v", file, err)
+	}
+	var out []string
+	for _, doc := range strings.Split(string(data), "\n---") {
+		var meta struct{ Kind string }
+		if err := yaml.Unmarshal([]byte(doc), &meta); err == nil && meta.Kind != "" {
+			out = append(out, meta.Kind)
+		}
+	}
+	return out
+}
+
+// The ValidatingAdmissionPolicy and its binding are cluster-scoped and
+// serve every d2k install on the cluster, so they ship in their own file,
+// applied once per cluster. In the per-install manifest, deleting one
+// install (kubectl delete -f) deleted them for every other install.
+func TestAdmissionPolicyShipsApartFromTheInstall(t *testing.T) {
+	for _, k := range kinds(t, "kubernetes.yaml") {
+		if k == "ValidatingAdmissionPolicy" || k == "ValidatingAdmissionPolicyBinding" {
+			t.Errorf("kubernetes.yaml holds a %s: uninstalling one install deletes it for all", k)
+		}
+	}
+	got := kinds(t, "admission-policy.yaml")
+	if !slices.Equal(got, []string{"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}) {
+		t.Errorf("admission-policy.yaml kinds = %v, want the policy and its binding", got)
 	}
 }
