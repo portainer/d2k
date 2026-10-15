@@ -388,7 +388,9 @@ d2k stores no images. `docker images` lists none, `docker pull` is acknowledged 
 
 ### Container operations
 
-These answer `501 Not Implemented`: `docker kill`, `docker pause` and `docker unpause`, `docker top`, `docker update`, `docker export`, `docker diff`, `docker container prune`, and `docker cp` (which first stats the path in the container; copying into a container through the API, as compose does for secrets and configs, works). Use `docker stop`, `docker rm` and re-create the container instead.
+These answer `501 Not Implemented`: `docker kill`, `docker pause` and `docker unpause`, `docker top`, `docker update`, `docker export`, `docker diff`, `docker container prune`, and `docker cp` out of a container (`docker cp ctr:/path .`). Use `docker stop`, `docker rm` and re-create the container instead.
+
+`docker cp` into a container works for files, before the container starts (`docker create`, then `docker cp`, then `docker start`), as compose does for secrets and configs: d2k mounts each file at its path from a Secret. A started container refuses it. d2k never sees the image's files, so it can't tell whether a destination is an existing directory. Name the file's full path (`docker cp app.conf ctr:/etc/app/app.conf`): a destination ending in `/` fails with "no such directory", and `docker cp app.conf ctr:/etc/app` mounts the file at `/etc/app` itself; if that is a directory in the image, the container fails to start, and `docker inspect` shows why in `State.Error`.
 
 ### Advanced networking
 
