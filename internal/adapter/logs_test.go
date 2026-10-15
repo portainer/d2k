@@ -2,11 +2,14 @@ package adapter
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/portainer/d2k/internal/types"
 )
 
 // Unlike Docker, where a container is either not started or running, a
@@ -170,4 +173,52 @@ func TestKeptLog(t *testing.T) {
 			t.Errorf("%s: kept log = %q, want %q", tc.name, got, tc.want)
 		}
 	}
+}
+
+// docker logs -f follows until the container stops, as in Docker. The
+// kubelet's log stream can end before that while the container still runs
+// (the API server or the kubelet restarting); following carries on then,
+// and ends once the container has stopped. (Docker also ends a follow when
+// the container exits and its restart policy restarts it.)
+func TestFollowLogsUntilTheContainerStops(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "always"})
+	if err := a.StartContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "web-abc", Namespace: testNamespace,
+		Labels: map[string]string{"app": "web", types.LabelManagedBy: types.LabelManagedByValue}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}}}}}}
+	if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fake clientset's log stream ends at once, as a dropped one does.
+	logs, _, err := a.GetContainerLogs(ctx, "web", LogOptions{Follow: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, logs)
+		close(ended)
+	}()
+	select {
+	case <-ended:
+		t.Fatal("following ended while the container still runs")
+	case <-time.After(1500 * time.Millisecond):
+	}
+
+	pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, FinishedAt: metav1.Now()}}
+	if _, err := client.CoreV1().Pods(testNamespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("following did not end once the container stopped")
+	}
+	_ = logs.Close()
 }
