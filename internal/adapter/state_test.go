@@ -269,3 +269,21 @@ func TestContainerStateReportsOOMKilled(t *testing.T) {
 		}
 	}
 }
+
+// A container whose process never started (the runtime refused it: a file
+// mounted over a directory, a missing command) reports why in State.Error,
+// as Docker does, and Docker's zero start time, not the kubelet's 1970.
+func TestContainerStateOfAFailedStart(t *testing.T) {
+	runOnce := map[string]string{types.AnnotationRestartPolicy: "no", types.AnnotationStartedAt: now.Add(-time.Minute).Format(time.RFC3339Nano)}
+	msg := `failed to create containerd task: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: error mounting "/var/lib/kubelet/pods/x/volume-subpaths/files/web/0" to rootfs at "/etc/nginx": not a directory: unknown`
+	pod := podWith(corev1.ContainerStatus{State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+		ExitCode: 128, Reason: "StartError", Message: msg, StartedAt: metav1.NewTime(time.Unix(0, 0)), FinishedAt: metav1.NewTime(now),
+	}}})
+	got := containerState(withReplicas(0, runOnce), []corev1.Pod{pod}, now)
+	if got.Status != container.StateExited || !strings.Contains(got.Error, "not a directory") {
+		t.Errorf("state = %+v, want exited with the runtime's error", got)
+	}
+	if got.StartedAt != "0001-01-01T00:00:00Z" {
+		t.Errorf("StartedAt = %q, want Docker's zero time for a process that never started", got.StartedAt)
+	}
+}
