@@ -17,7 +17,17 @@ import (
 )
 
 // eventFilters are the `filters` keys d2k supports on GET /events.
-var eventFilters = map[string]bool{"type": true, "event": true, "container": true, "image": true, "label": true, "volume": true}
+var eventFilters = map[string]bool{
+	"type": true, "event": true, "container": true, "image": true, "label": true, "volume": true,
+	"scope": true, "daemon": true, "network": true, "service": true, "plugin": true, "node": true, "secret": true, "config": true,
+}
+
+// namedObjectFilters are the filters that, as in the daemon, keep only
+// events of their object type whose ID (or a prefix of it) or name matches.
+var namedObjectFilters = []events.Type{
+	events.DaemonEventType, events.NetworkEventType, events.ServiceEventType, events.PluginEventType,
+	events.NodeEventType, events.SecretEventType, events.ConfigEventType,
+}
 
 // Handler serves the events endpoint.
 type Handler struct {
@@ -121,6 +131,15 @@ func matches(args filters.Args, m events.Message) bool {
 	}
 	if args.Contains("volume") && (m.Type != events.VolumeEventType || !args.ExactMatch("volume", m.Actor.ID)) {
 		return false
+	}
+	if args.Contains("scope") && !args.ExactMatch("scope", m.Scope) {
+		return false
+	}
+	for _, t := range namedObjectFilters {
+		key := string(t)
+		if args.Contains(key) && (m.Type != t || !(args.FuzzyMatch(key, m.Actor.ID) || args.FuzzyMatch(key, m.Actor.Attributes["name"]))) {
+			return false
+		}
 	}
 	return true
 }

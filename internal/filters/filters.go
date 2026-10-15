@@ -149,6 +149,20 @@ func (args Args) ExactMatch(key, source string) bool {
 	return fieldValues[source]
 }
 
+// FuzzyMatch returns true if the source matches exactly one of the values,
+// or starts with one of them (an ID prefix).
+func (args Args) FuzzyMatch(key, source string) bool {
+	if args.ExactMatch(key, source) {
+		return true
+	}
+	for prefix := range args.fields[key] {
+		if strings.HasPrefix(source, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // Contains returns true if the key exists in the mapping
 func (args Args) Contains(field string) bool {
 	_, ok := args.fields[field]
