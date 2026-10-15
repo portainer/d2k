@@ -697,3 +697,19 @@ func TestEventsFinishARestartOnceItsStoppedPodIsGone(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// Volume events name the Docker volume, as docker volume ls and inspect
+// do, not the PVC d2k derived from it: docker events --filter
+// volume=shop_db_data must match the volume's own events.
+func TestVolumeEventsNameTheDockerVolume(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: "shop-db-data", Annotations: map[string]string{types.AnnotationDockerName: "shop_db_data"},
+	}}
+	volumes := map[string]bool{}
+	for _, kind := range []watch.EventType{watch.Added, watch.Deleted} {
+		msgs := volumeEvents(volumes, kind, pvc, time.Now())
+		if len(msgs) != 1 || msgs[0].Actor.ID != "shop_db_data" {
+			t.Errorf("%s: volume events = %+v, want one for shop_db_data", kind, msgs)
+		}
+	}
+}
