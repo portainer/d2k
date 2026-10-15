@@ -179,7 +179,7 @@ Kubernetes namespace networking is flat. All Pods in the namespace can reach eac
 
 As in Docker, `docker network rm` refuses (403, "has active endpoints") a network that a running or starting container is on; created and stopped containers do not hold it. `docker network inspect` lists those running containers under `Containers`, with no endpoint ID or MAC address.
 
-A Docker network has no Kubernetes object of its own, so d2k records each one (name, driver, labels, and warnings for the options it ignores) as a `d2k.portainer.io/network-*` annotation on its namespace. A network reports the driver it was created with, `bridge` by default, and Docker's scope for it: `local`, or `swarm` for `overlay`. Networks therefore survive d2k restarts and upgrades. RBAC cannot limit which fields d2k patches on the namespace, so `deploy/kubernetes.yaml` installs a ValidatingAdmissionPolicy that lets d2k's ServiceAccount change only those annotations: it can never change the namespace's labels (such as the `pod-security.kubernetes.io/*` labels Portainer's policies manage), other annotations or spec. **This requires Kubernetes 1.30 or later.**
+A Docker network has no Kubernetes object of its own, so d2k records each one (name, driver, labels, and warnings for the options it ignores) as a `d2k.portainer.io/network-*` annotation on its namespace. A network reports the driver it was created with, `bridge` by default, and Docker's scope for it: `local`, or `swarm` for `overlay`. Networks therefore survive d2k restarts and upgrades. RBAC cannot limit which fields d2k patches on the namespace, so `deploy/admission-policy.yaml` installs a ValidatingAdmissionPolicy that lets d2k's ServiceAccount change only those annotations: it can never change the namespace's labels (such as the `pod-security.kubernetes.io/*` labels Portainer's policies manage), other annotations or spec. **This requires Kubernetes 1.30 or later.**
 
 ---
 
@@ -256,8 +256,11 @@ d2k serves the Docker API over mutual TLS and does not start without its certifi
 d2k pki init --san d2k.d2k.svc.cluster.local,d2k.example.com --out d2k-pki
 kubectl create namespace d2k
 kubectl -n d2k create secret generic d2k-tls --from-file=d2k-pki/server
+kubectl apply -f deploy/admission-policy.yaml   # once per cluster
 kubectl apply -f deploy/kubernetes.yaml
 ```
+
+`deploy/admission-policy.yaml` holds the cluster-scoped ValidatingAdmissionPolicy and its binding, which every d2k install on the cluster shares (see Networking above). To uninstall one install, `kubectl delete -f deploy/kubernetes.yaml` (with that install's namespace); delete `deploy/admission-policy.yaml` only after the last install is gone.
 
 `d2k-pki/client` holds the client certificate (`ca.pem`, `cert.pem`, `key.pem`) for the Docker CLI and for Portainer's "Docker API" environment with TLS. Keep `d2k-pki/ca.key` private. `d2k pki init` refuses to overwrite any file it would write, so give it a new `--out` directory to start over. cert-manager can issue the `d2k-tls` Secret instead, as long as it holds `tls.crt`, `tls.key` and the client CA as `ca.crt`. d2k reloads the Secret when it changes, without a restart.
 
@@ -265,7 +268,7 @@ kubectl apply -f deploy/kubernetes.yaml
 
 ### Multiple installs on one cluster
 
-Portainer can point several environments at the same cluster, each as its own d2k install in its own namespace. Everything namespace-scoped (the Role, RoleBinding, ServiceAccount, Deployment, Service, Secret) is already isolated by `namespace: d2k` in the manifest, and the ValidatingAdmissionPolicy is written once and shared safely: it derives the expected ServiceAccount from whichever namespace is being patched, so re-applying it for every install is a no-op after the first.
+Portainer can point several environments at the same cluster, each as its own d2k install in its own namespace. Everything namespace-scoped (the Role, RoleBinding, ServiceAccount, Deployment, Service, Secret) is already isolated by `namespace: d2k` in the manifest, and the ValidatingAdmissionPolicy in `deploy/admission-policy.yaml` is applied once and shared: it derives the expected ServiceAccount from whichever namespace is being patched, and uninstalling one install leaves it in place for the others.
 
 The ClusterRole and ClusterRoleBinding named `d2k-node-reader` are the exception: they are cluster-scoped, so their names must be made unique per install (for example by appending the namespace, as `test/e2e/setup.sh` and the overnight environment's `install.sh` both do). If two installs keep the default name, the second `kubectl apply` silently overwrites the first's ClusterRoleBinding subject, and the first install's ServiceAccount loses its cluster-wide node and StorageClass access, with no error at apply time: `docker info` reports 0 CPUs and 0 memory, `docker stats` prints nothing, NFS volumes cannot be matched, and in Swarm mode `docker node ls`, the node/manager counts and the leader check stop working. Rename both objects (and `roleRef.name`) together, the same way you rename `namespace: d2k`.
 

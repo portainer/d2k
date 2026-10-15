@@ -48,7 +48,7 @@ published in `docs/compose-support.md`, and what compose must do with it (work,
 with a check of the resulting Deployment; warn; or fail). Change the table when
 d2k's behaviour changes, then regenerate the document.
 
-`setup.sh` deploys two instances from `deploy/kubernetes.yaml`:
+`setup.sh` applies `deploy/admission-policy.yaml` once and deploys two instances from `deploy/kubernetes.yaml`:
 
 | Mode       | Namespace   | Endpoint                |
 |------------|-------------|-------------------------|

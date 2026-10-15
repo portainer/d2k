@@ -55,5 +55,8 @@ deploy() {
   kubectl --context "$CONTEXT" -n "$1" rollout status deployment/d2k --timeout=120s
 }
 
+# Cluster-wide, shared by both instances.
+kubectl --context "$CONTEXT" apply -f "$ROOT/deploy/admission-policy.yaml"
+
 deploy d2k false 31112
 deploy d2k-swarm true 31111
