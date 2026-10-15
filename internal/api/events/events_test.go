@@ -96,3 +96,40 @@ func TestStreamRefusesSinceAfterUntil(t *testing.T) {
 		t.Errorf("GET /events?since=200&until=100 = %d %q, want 400", rec.Code, rec.Body.String())
 	}
 }
+
+// GET /events accepts every filter the Docker daemon does (moby
+// daemon/events/filter.go): a filter on an object type keeps only that
+// type's events whose ID or name it matches, and scope matches the
+// event's scope. d2k answered 400 "invalid filter" for most of them.
+func TestStreamAcceptsTheDaemonsFilters(t *testing.T) {
+	h := NewHandler(adapter.NewWithClient(fake.NewClientset(), "ns"))
+	for _, f := range []string{"scope", "daemon", "network", "service", "plugin", "node", "secret", "config"} {
+		rec := httptest.NewRecorder()
+		h.Stream(rec, httptest.NewRequest("GET", fmt.Sprintf(`/events?until=1&filters={"%s":{"x":true}}`, f), nil))
+		if rec.Code != 200 {
+			t.Errorf("filter %s = %d %q, want 200", f, rec.Code, rec.Body.String())
+		}
+	}
+
+	ctr := events.Message{Type: events.ContainerEventType, Scope: "local", Actor: events.Actor{ID: "abc123", Attributes: map[string]string{"name": "web"}}}
+	net := events.Message{Type: events.NetworkEventType, Scope: "local", Actor: events.Actor{ID: "n0123456789", Attributes: map[string]string{"name": "front"}}}
+	for _, tt := range []struct {
+		name     string
+		args     filters.Args
+		ctr, net bool
+	}{
+		{"network by name", filters.NewArgs(filters.Arg("network", "front")), false, true},
+		{"network by ID prefix", filters.NewArgs(filters.Arg("network", "n0123")), false, true},
+		{"other network", filters.NewArgs(filters.Arg("network", "back")), false, false},
+		{"scope local", filters.NewArgs(filters.Arg("scope", "local")), true, true},
+		{"scope swarm", filters.NewArgs(filters.Arg("scope", "swarm")), false, false},
+		{"service", filters.NewArgs(filters.Arg("service", "web")), false, false},
+	} {
+		if got := matches(tt.args, ctr); got != tt.ctr {
+			t.Errorf("%s: container event matches = %v, want %v", tt.name, got, tt.ctr)
+		}
+		if got := matches(tt.args, net); got != tt.net {
+			t.Errorf("%s: network event matches = %v, want %v", tt.name, got, tt.net)
+		}
+	}
+}
