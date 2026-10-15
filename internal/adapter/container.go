@@ -489,19 +489,23 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
 		return errdefs.Conflict(fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead"))
 	}
+	// From here the removal runs to the end even if the client goes (Ctrl-C):
+	// stopping between steps would leave the container's Services behind.
+	// Only the wait for its pods to die ends with the client.
+	steps := context.WithoutCancel(ctx)
 	if getErr == nil && runsAsPod(*d) {
-		a.killRunOncePods(ctx, resolved)
+		a.killRunOncePods(steps, resolved)
 	}
 
-	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
+	if err := a.client.AppsV1().Deployments(a.namespace).Delete(steps, resolved, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
 	}
-	a.killPods(ctx, resolved)
 
 	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
-	a.deleteOwnService(ctx, serviceName(resolved), resolved)
-	a.deleteOwnService(ctx, publishedServiceName(resolved), resolved)
+	a.deleteOwnService(steps, serviceName(resolved), resolved)
+	a.deleteOwnService(steps, publishedServiceName(resolved), resolved)
 
+	a.killPods(ctx, resolved)
 	return nil
 }
 
