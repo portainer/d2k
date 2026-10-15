@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"strings"
@@ -947,6 +948,46 @@ func TestStopWaitsForThePod(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("stop did not return once the pod was gone")
+	}
+}
+
+// Docker keeps a stopped container's log: docker logs, and Portainer's log
+// view, show what it printed before it stopped. Stopping a Deployment-backed
+// container deletes its pod and with it the kubelet's log, so d2k keeps the
+// last part of the log the pod had when it stopped.
+func TestLogsOfAStoppedContainer(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "db", Image: "postgres", RestartPolicy: "always"})
+	if err := a.StartContainer(ctx, "db"); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "db-abc", Namespace: testNamespace,
+		Labels: map[string]string{"app": "db", types.LabelManagedBy: types.LabelManagedByValue}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}}}}}}
+	if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- a.StopContainer(ctx, "db") }()
+	time.Sleep(1500 * time.Millisecond)
+	if err := client.CoreV1().Pods(testNamespace).Delete(ctx, "db-abc", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+
+	logs, _, err := a.GetContainerLogs(ctx, "db", LogOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = logs.Close() }()
+	// The fake clientset answers every pod's log with "fake logs".
+	if got, _ := io.ReadAll(logs); !strings.Contains(string(got), "fake logs") {
+		t.Errorf("logs of the stopped container = %q, want what its pod printed", got)
 	}
 }
 
