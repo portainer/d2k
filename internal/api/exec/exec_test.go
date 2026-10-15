@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -78,6 +79,26 @@ func TestStartRefusesAContainerThatIsNotRunning(t *testing.T) {
 		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/exec/e/start", strings.NewReader(tc.body)))
 		if rec.Code != tc.want {
 			t.Errorf("start on %s with %s = %d %q, want %d", tc.containerID, tc.body, rec.Code, rec.Body.String(), tc.want)
+		}
+	}
+}
+
+// As the Docker daemon does (moby daemon/errors.go setExitCodeFromError,
+// which its exec start uses), an exec whose command does not exist exits
+// 127 and one whose command can't be invoked exits 126. The CRI reports
+// both as the runtime's error text.
+func TestStartErrorExitCode(t *testing.T) {
+	for _, tc := range []struct {
+		err  string
+		want int
+	}{
+		{`OCI runtime exec failed: exec failed: unable to start container process: exec: "nosuch": executable file not found in $PATH: unknown`, 127},
+		{`OCI runtime exec failed: exec failed: unable to start container process: exec: "/no/such": stat /no/such: no such file or directory: unknown`, 127},
+		{`OCI runtime exec failed: exec failed: unable to start container process: exec: "/etc/hosts": permission denied: unknown`, 126},
+		{`OCI runtime exec failed: exec failed: unable to start container process: exec: "/etc": is a directory: unknown`, 126},
+	} {
+		if got := startErrorExitCode(errors.New(tc.err)); got != tc.want {
+			t.Errorf("exit code for %q = %d, want %d", tc.err, got, tc.want)
 		}
 	}
 }
