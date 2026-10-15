@@ -663,6 +663,39 @@ func TestCreateContainerNativeSettings(t *testing.T) {
 	}
 }
 
+// Docker publishes one container port on several host ports (-p 8080:80
+// -p 8081:80). The container's own Service needs the container port once:
+// Kubernetes rejects a Service with the same port twice.
+func TestOneContainerPortOnTwoHostPorts(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "web", Image: "nginx", PortBindings: []string{"8080:80", "8081:80"}})
+
+	svc, err := client.CoreV1().Services(testNamespace).Get(ctx, serviceName("web"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != 80 {
+		t.Errorf("ClusterIP Service ports = %+v, want 80 once", svc.Spec.Ports)
+	}
+	published, err := client.CoreV1().Services(testNamespace).Get(ctx, publishedServiceName("web"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hostPorts []int32
+	for _, p := range published.Spec.Ports {
+		hostPorts = append(hostPorts, p.Port)
+	}
+	slices.Sort(hostPorts)
+	if !slices.Equal(hostPorts, []int32{8080, 8081}) {
+		t.Errorf("published Service ports = %v, want 8080 and 8081", hostPorts)
+	}
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if ports := d.Spec.Template.Spec.Containers[0].Ports; len(ports) != 1 {
+		t.Errorf("container ports = %+v, want 80 once", ports)
+	}
+}
+
 func TestUDPPortsKeepTheirProtocol(t *testing.T) {
 	a, client := newTestAdapter(t)
 	ctx := context.Background()
