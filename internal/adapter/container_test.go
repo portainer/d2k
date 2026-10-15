@@ -22,6 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes/fake"
 	appsv1client "k8s.io/client-go/kubernetes/typed/apps/v1"
@@ -802,6 +803,38 @@ func TestLabelKeysKubernetesRejects(t *testing.T) {
 	pvc, _ := client.CoreV1().PersistentVolumeClaims(testNamespace).Get(ctx, "data", metav1.GetOptions{})
 	if errs := metav1validation.ValidateLabels(pvc.Labels, field.NewPath("metadata", "labels")); len(errs) > 0 {
 		t.Errorf("PVC labels the API server rejects: %v", errs)
+	}
+}
+
+// Docker names may contain dots, which Kubernetes Service names may not
+// (DNS-1035). A container named with dots gets valid Kubernetes names, and
+// keeps its Docker name; one whose name only differs by the dot still gets
+// its own objects.
+func TestContainerNameWithDots(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "my.app", Image: "nginx", PortBindings: []string{"18090:80"}})
+	mustCreate(t, a, RunOptions{Name: "my-app", Image: "nginx", PortBindings: []string{"18091:80"}})
+
+	ds, _ := client.AppsV1().Deployments(testNamespace).List(ctx, metav1.ListOptions{})
+	svcs, _ := client.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{})
+	if len(ds.Items) != 2 {
+		t.Fatalf("Deployments = %d, want one per container", len(ds.Items))
+	}
+	for _, d := range ds.Items {
+		if errs := validation.IsDNS1123Label(d.Name); len(errs) > 0 {
+			t.Errorf("Deployment name %q: %v", d.Name, errs)
+		}
+	}
+	for _, s := range svcs.Items {
+		if errs := validation.IsDNS1035Label(s.Name); len(errs) > 0 {
+			t.Errorf("Service name %q: %v", s.Name, errs)
+		}
+	}
+	for _, name := range []string{"my.app", "my-app"} {
+		if ctr, err := a.InspectContainer(ctx, name); err != nil || ctr.Name != "/"+name {
+			t.Errorf("inspect %s = %v, %v", name, ctr, err)
+		}
 	}
 }
 
