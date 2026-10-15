@@ -277,3 +277,28 @@ func TestStartRightAfterTheRunEndsRunsAgain(t *testing.T) {
 		}
 	}
 }
+
+// Kubernetes injects <SERVICE>_HOST/_PORT variables for every Service in
+// the namespace unless a pod opts out. Docker sets none, and they collide
+// with apps' own settings: a container named memos gets MEMOS_PORT, which
+// memos reads as its listen port.
+func TestPodsGetNoServiceLinks(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	mustCreate(t, a, RunOptions{Name: "memos", Image: "neosmemo/memos", RestartPolicy: "always"})
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "memos", metav1.GetOptions{})
+	if l := d.Spec.Template.Spec.EnableServiceLinks; l == nil || *l {
+		t.Errorf("Deployment pod template EnableServiceLinks = %v, want false", l)
+	}
+
+	id, _, err := a.CreateContainer(ctx, RunOptions{Name: "job", Image: "busybox", RestartPolicy: "no"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if l := podOf(t, a, "job").Spec.EnableServiceLinks; l == nil || *l {
+		t.Errorf("run-once pod EnableServiceLinks = %v, want false", l)
+	}
+}
