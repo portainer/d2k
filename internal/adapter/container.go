@@ -134,8 +134,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, errdefs.Conflict(fmt.Errorf("container name %q is already in use", dockerName))
 	}
 
-	// Sanitise the name for Kubernetes: lowercase, underscores to hyphens, max 63 chars.
-	opts.Name = strings.ToLower(strings.ReplaceAll(opts.Name, "_", "-"))
+	// Sanitise the name for Kubernetes: lowercase, underscores and dots to
+	// hyphens (Service names allow neither), max 63 chars.
+	opts.Name = strings.ToLower(strings.NewReplacer("_", "-", ".", "-").Replace(opts.Name))
 	if len(opts.Name) > 63 {
 		opts.Name = opts.Name[:63]
 	}
