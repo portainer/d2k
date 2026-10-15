@@ -38,13 +38,32 @@ var dnsName = regexp.MustCompile(`^(\*\.)?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`)
 // sans are the DNS names and IP addresses clients use to reach d2k. Init
 // refuses to overwrite any of these files.
 func Init(dir string, sans []string) error {
-	if len(sans) == 0 {
-		return errors.New("at least one subject alternative name is required")
-	}
 	for _, name := range outputs {
 		if _, err := os.Lstat(filepath.Join(dir, name)); err == nil {
 			return fmt.Errorf("%s already exists; refusing to overwrite it", filepath.Join(dir, name))
 		}
+	}
+	files, err := Generate(sans)
+	if err != nil {
+		return err
+	}
+	for _, name := range outputs {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		if err := writeNew(path, files[name]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Generate creates a new CA and certificates, as Init writes them, keyed
+// by the file names Init uses (ca.crt, server/tls.crt, client/cert.pem...).
+func Generate(sans []string) (map[string][]byte, error) {
+	if len(sans) == 0 {
+		return nil, errors.New("at least one subject alternative name is required")
 	}
 
 	caKey, caCert, err := newCertificate(&x509.Certificate{
@@ -55,7 +74,7 @@ func Init(dir string, sans []string) error {
 		NotAfter:              time.Now().Add(caValidity),
 	}, nil, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	server := &x509.Certificate{
@@ -72,12 +91,12 @@ func Init(dir string, sans []string) error {
 		case dnsName.MatchString(san):
 			server.DNSNames = append(server.DNSNames, san)
 		default:
-			return fmt.Errorf("%q is not a DNS name or IP address", san)
+			return nil, fmt.Errorf("%q is not a DNS name or IP address", san)
 		}
 	}
 	serverKey, serverCert, err := newCertificate(server, caCert, caKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	clientKey, clientCert, err := newCertificate(&x509.Certificate{
@@ -87,7 +106,7 @@ func Init(dir string, sans []string) error {
 		NotAfter:    time.Now().Add(leafValidity),
 	}, caCert, caKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	files := map[string][]byte{
@@ -100,16 +119,7 @@ func Init(dir string, sans []string) error {
 		"client/cert.pem": encodeCert(clientCert),
 		"client/key.pem":  encodeKey(clientKey),
 	}
-	for _, name := range outputs {
-		path := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return err
-		}
-		if err := writeNew(path, files[name]); err != nil {
-			return err
-		}
-	}
-	return nil
+	return files, nil
 }
 
 // outputs are the files Init writes, relative to its directory.
