@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -66,8 +67,125 @@ func (a *KubernetesDockerAdapter) GetContainerLogs(ctx context.Context, name str
 		return nil, false, err
 	}
 	pod = a.waitForContainerStarted(ctx, pod, 30*time.Second)
-	stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(pod.Name, logOpts).Stream(ctx)
-	return stream, tty, err
+	if !opts.Follow {
+		stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(pod.Name, logOpts).Stream(ctx)
+		return stream, tty, err
+	}
+	// Follow with timestamps, to resume after the last line sent if the
+	// stream ends while the container still runs; they are removed again
+	// unless the client asked for them.
+	withStamps := *logOpts
+	withStamps.Timestamps = true
+	stream, err := a.client.CoreV1().Pods(a.namespace).GetLogs(pod.Name, &withStamps).Stream(ctx)
+	if err != nil {
+		return nil, tty, err
+	}
+	return a.followLogs(ctx, pod, stream, opts.Timestamps), tty, nil
+}
+
+// followLogs follows the log of the container in pod from stream until the
+// container stops, as docker logs -f does: if the stream ends while the
+// same container still runs (the API server or kubelet restarting), it
+// opens a new one from the last line sent. A container that exits, even
+// one the kubelet restarts, ends the follow, as in Docker. Lines carry the
+// kubelet's timestamps, removed unless keepStamps.
+func (a *KubernetesDockerAdapter) followLogs(ctx context.Context, pod *corev1.Pod, stream io.ReadCloser, keepStamps bool) io.ReadCloser {
+	ctx, cancel := context.WithCancel(ctx)
+	pr, pw := io.Pipe()
+	restarts := containerRestarts(pod)
+	go func() {
+		defer cancel()
+		var last time.Time
+		for {
+			err := copyLogLines(stream, pw, &last, keepStamps)
+			_ = stream.Close()
+			if err != nil || !a.stillRunning(ctx, pod.Name, restarts) {
+				_ = pw.CloseWithError(err)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				_ = pw.Close()
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+			resume := &corev1.PodLogOptions{Follow: true, Timestamps: true}
+			if !last.IsZero() {
+				since := metav1.NewTime(last)
+				resume.SinceTime = &since
+			}
+			next, err := a.client.CoreV1().Pods(a.namespace).GetLogs(pod.Name, resume).Stream(ctx)
+			if err != nil {
+				stream = io.NopCloser(strings.NewReader(""))
+				continue
+			}
+			stream = next
+		}
+	}()
+	return &followReader{PipeReader: pr, cancel: cancel}
+}
+
+type followReader struct {
+	*io.PipeReader
+	cancel context.CancelFunc
+}
+
+func (r *followReader) Close() error {
+	r.cancel()
+	return r.PipeReader.Close()
+}
+
+// copyLogLines copies timestamped log lines from src to dst, skipping lines
+// at or before *last (sent from an earlier stream; the API's since is in
+// whole seconds) and recording the last time sent. An error writing to dst
+// (the client went) is returned; the end of src is not an error.
+func copyLogLines(src io.Reader, dst io.Writer, last *time.Time, keepStamps bool) error {
+	r := bufio.NewReader(src)
+	for {
+		line, readErr := r.ReadString('\n')
+		if line != "" {
+			out := line
+			if stamp, text, ok := strings.Cut(line, " "); ok {
+				if at, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
+					if !at.After(*last) && !last.IsZero() {
+						out = ""
+					} else {
+						*last = at
+						if !keepStamps {
+							out = text
+						}
+					}
+				}
+			}
+			if out != "" {
+				if _, err := io.WriteString(dst, out); err != nil {
+					return err
+				}
+			}
+		}
+		if readErr != nil {
+			return nil
+		}
+	}
+}
+
+// containerRestarts is the restart count of pod's container.
+func containerRestarts(pod *corev1.Pod) int32 {
+	if s := pod.Status.ContainerStatuses; len(s) > 0 {
+		return s[0].RestartCount
+	}
+	return 0
+}
+
+// stillRunning reports whether the container of the named pod is still the
+// same run: running, and not restarted since restarts.
+func (a *KubernetesDockerAdapter) stillRunning(ctx context.Context, pod string, restarts int32) bool {
+	p, err := a.client.CoreV1().Pods(a.namespace).Get(ctx, pod, metav1GetOptions())
+	if err != nil || p.DeletionTimestamp != nil {
+		return false
+	}
+	s := p.Status.ContainerStatuses
+	return len(s) > 0 && s[0].State.Running != nil && s[0].RestartCount == restarts
 }
 
 // waitForContainerStarted waits for pod's container to leave the transitional
