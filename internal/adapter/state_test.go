@@ -243,3 +243,29 @@ func TestHealthConfigRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// As in Docker, a container the kernel killed for exceeding its memory
+// limit inspects with State.OOMKilled; the kubelet records it as the
+// termination's reason.
+func TestContainerStateReportsOOMKilled(t *testing.T) {
+	startedAt := map[string]string{types.AnnotationStartedAt: now.Add(-time.Hour).Format(time.RFC3339Nano)}
+	runOnce := map[string]string{types.AnnotationRestartPolicy: "no", types.AnnotationStartedAt: startedAt[types.AnnotationStartedAt]}
+	oom := &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled", FinishedAt: metav1.NewTime(now)}
+	clean := &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed", FinishedAt: metav1.NewTime(now)}
+
+	for _, tc := range []struct {
+		name string
+		d    appsv1.Deployment
+		pod  corev1.Pod
+		want bool
+	}{
+		{"restart always, OOM-killed and back-off", withReplicas(1, startedAt), podWith(corev1.ContainerStatus{RestartCount: 1,
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}, LastTerminationState: corev1.ContainerState{Terminated: oom}}), true},
+		{"run once, OOM-killed", withReplicas(0, runOnce), podWith(corev1.ContainerStatus{State: corev1.ContainerState{Terminated: oom}}), true},
+		{"run once, exited cleanly", withReplicas(0, runOnce), podWith(corev1.ContainerStatus{State: corev1.ContainerState{Terminated: clean}}), false},
+	} {
+		if got := containerState(tc.d, []corev1.Pod{tc.pod}, now); got.OOMKilled != tc.want {
+			t.Errorf("%s: OOMKilled = %v, want %v (state %+v)", tc.name, got.OOMKilled, tc.want, got)
+		}
+	}
+}
