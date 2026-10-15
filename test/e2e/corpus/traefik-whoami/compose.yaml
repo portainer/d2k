@@ -1,0 +1,32 @@
+# source: https://doc.traefik.io/traefik/getting-started/quick-start-with-docker/ (adapted: no
+# Docker provider, since d2k has no Docker socket to watch; routes come from the file provider).
+services:
+  traefik:
+    image: traefik:v3.1
+    command:
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --entrypoints.web.address=:80
+      - --api.insecure=true
+    configs:
+      - source: traefik_dynamic
+        target: /etc/traefik/dynamic/whoami.yml
+    ports:
+      - "18185:80"
+      - "18186:8080"
+  whoami:
+    image: traefik/whoami:v1.10
+    labels:
+      corpus.mark: "v1"
+configs:
+  traefik_dynamic:
+    content: |
+      http:
+        routers:
+          whoami:
+            rule: "PathPrefix(`/`)"
+            service: whoami
+        services:
+          whoami:
+            loadBalancer:
+              servers:
+                - url: "http://whoami:80"

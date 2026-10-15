@@ -12,124 +12,141 @@
 package networks
 
 import (
-	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
-	"go.uber.org/zap"
+	"github.com/moby/moby/api/types/network"
+	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/errdefs"
+	"github.com/portainer/d2k/internal/filters"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
 // Handler holds dependencies for network API endpoints.
 type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
-	logger  *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *Handler {
-	return &Handler{adapter: a, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
+	return &Handler{adapter: a}
 }
 
 // List handles GET /networks.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	args, err := httputils.ParseFilters(r, networkFilters)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	for _, t := range args.Get("type") {
+		if t != "builtin" && t != "custom" {
+			httputils.WriteErrorFrom(w, errdefs.InvalidParameter(fmt.Errorf("invalid filter: 'type'='%s'", t)))
+			return
+		}
+	}
+
 	networks, err := h.adapter.ListNetworks(r.Context())
 	if err != nil {
-		h.logger.Errorw("ListNetworks failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Error().Str("context", "NetworksAPI").Err(err).Msg("ListNetworks failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
-	// Apply label filters if present. Docker stack rm sends
-	// filters={"label":["com.docker.stack.namespace=<stack>"]}
-	// Without filtering we return all networks and the CLI deletes them all.
-	if rawFilters := r.URL.Query().Get("filters"); rawFilters != "" {
-		networks = filterNetworksByLabel(networks, rawFilters)
+	if values := args.Get("dangling"); len(values) > 0 {
+		dangling, err := parseDangling(values)
+		if err != nil {
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		ctrs, err := h.adapter.ListContainers(r.Context(), true)
+		if err != nil {
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		inUse := map[string]bool{}
+		for _, c := range ctrs {
+			for name := range c.Networks {
+				inUse[name] = true
+			}
+		}
+		networks = slices.DeleteFunc(networks, func(n adapter.NetworkSummary) bool {
+			return (predefined[n.Name] || inUse[n.Name]) == dangling
+		})
 	}
+	networks = slices.DeleteFunc(networks, func(n adapter.NetworkSummary) bool { return !matches(args, n) })
 
 	httputils.WriteJSON(w, http.StatusOK, networks)
 }
 
-func filterNetworksByLabel(networks []adapter.NetworkSummary, rawFilters string) []adapter.NetworkSummary {
-	// Docker CLI sends label filters as either:
-	//   {"label":["key=value"]}       (array form)
-	//   {"label":{"key=value":true}}  (map form, e.g. docker stack rm)
-	var parsed map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(rawFilters), &parsed); err != nil {
-		return networks
+// networkFilters are the `filters` keys of GET /networks, as in the daemon.
+var networkFilters = map[string]bool{"dangling": true, "driver": true, "id": true, "label": true, "name": true, "scope": true, "type": true}
+
+// predefined are the networks Docker creates itself.
+var predefined = map[string]bool{"bridge": true, "host": true, "none": true, "default": true}
+
+// matches applies the network list filters as the daemon does, but dangling.
+func matches(args filters.Args, n adapter.NetworkSummary) bool {
+	if !args.ExactMatch("driver", n.Driver) || !args.ExactMatch("scope", n.Scope) || !args.MatchKVList("label", n.Labels) {
+		return false
 	}
-	raw, ok := parsed["label"]
-	if !ok {
-		return networks
+	if args.Contains("name") && !args.Match("name", n.Name) {
+		return false
 	}
-	var labelList []string
-	if json.Unmarshal(raw, &labelList) != nil {
-		var labelMap map[string]bool
-		if json.Unmarshal(raw, &labelMap) == nil {
-			for k := range labelMap {
-				labelList = append(labelList, k)
-			}
-		}
+	if args.Contains("id") && !args.Match("id", n.ID) {
+		return false
 	}
-	if len(labelList) == 0 {
-		return networks
+	if types := args.Get("type"); len(types) > 0 && (types[0] == "builtin") != predefined[n.Name] {
+		return false
 	}
-	// Parse required labels into key=value pairs.
-	required := map[string]string{}
-	for _, l := range labelList {
-		if idx := strings.Index(l, "="); idx >= 0 {
-			required[l[:idx]] = l[idx+1:]
-		} else {
-			required[l] = ""
-		}
-	}
-	var result []adapter.NetworkSummary
-	for _, n := range networks {
-		match := true
-		for k, v := range required {
-			if nv, ok := n.Labels[k]; !ok || (v != "" && nv != v) {
-				match = false
-				break
-			}
-		}
-		if match {
-			result = append(result, n)
-		}
-	}
-	return result
+	return true
 }
 
-// createBody mirrors the Docker network create request body.
-type createBody struct {
-	Name   string            `json:"Name"`
-	Driver string            `json:"Driver"`
-	Labels map[string]string `json:"Labels"`
+func parseDangling(values []string) (bool, error) {
+	if len(values) > 1 {
+		return false, errdefs.InvalidParameter(errors.New(`got more than one value for filter key "dangling"`))
+	}
+	switch values[0] {
+	case "0", "false":
+		return false, nil
+	case "1", "true":
+		return true, nil
+	}
+	return false, errdefs.InvalidParameter(errors.New(`invalid value for filter 'dangling', must be "true" (or "1"), or "false" (or "0")`))
 }
 
 // Create handles POST /networks/create.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	var body createBody
+	var body network.CreateRequest
 	if err := httputils.ParseJSON(r, &body); err != nil {
 		httputils.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	network, warnings, err := h.adapter.CreateNetwork(r.Context(), adapter.CreateNetworkOptions{
-		Name:   body.Name,
-		Driver: body.Driver,
-		Labels: body.Labels,
+		Name:           body.Name,
+		Driver:         body.Driver,
+		Labels:         body.Labels,
+		Internal:       body.Internal,
+		EnableIPv6:     body.EnableIPv6 != nil && *body.EnableIPv6,
+		DisableIPv4:    body.EnableIPv4 != nil && !*body.EnableIPv4,
+		IPAMConfigured: body.IPAM != nil && len(body.IPAM.Config) > 0,
+		Options:        body.Options,
 	})
 	if err != nil {
-		h.logger.Errorw("CreateNetwork failed", "name", body.Name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Error().Str("context", "NetworksAPI").Any("name", body.Name).Err(err).Msg("CreateNetwork failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
 	if len(warnings) > 0 {
 		for _, w := range warnings {
-			h.logger.Warnw("network warning", "warning", w)
+			log.Warn().Str("context", "NetworksAPI").Any("warning", w).Msg("Network warning")
 		}
 	}
 
@@ -139,14 +156,34 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Connect handles POST /networks/{id}/connect and /disconnect. The namespace
+// network is flat, so every container already reaches every other; only the
+// container's reported network attachments change.
+func (h *Handler) Connect(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Container string `json:"Container"`
+	}
+	if err := httputils.ParseJSON(r, &body); err != nil {
+		httputils.WriteError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
+		return
+	}
+	connect := strings.HasSuffix(r.URL.Path, "/connect")
+	if err := h.adapter.ConnectNetwork(r.Context(), r.PathValue("id"), body.Container, connect); err != nil {
+		log.Error().Str("context", "NetworksAPI").Any("network", r.PathValue("id")).Any("container", body.Container).Err(err).Msg("ConnectNetwork failed")
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // Inspect handles GET /networks/{id}.
 func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 	nameOrID := networkIDFromPath(r.URL.Path)
 
 	network, err := h.adapter.InspectNetworkDetail(r.Context(), nameOrID)
 	if err != nil {
-		h.logger.Errorw("InspectNetwork failed", "id", nameOrID, "error", err)
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		log.Error().Str("context", "NetworksAPI").Any("id", nameOrID).Err(err).Msg("InspectNetwork failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -158,8 +195,8 @@ func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	nameOrID := networkIDFromPath(r.URL.Path)
 
 	if err := h.adapter.RemoveNetwork(r.Context(), nameOrID); err != nil {
-		h.logger.Errorw("RemoveNetwork failed", "id", nameOrID, "error", err)
-		httputils.WriteError(w, http.StatusForbidden, err.Error())
+		log.Error().Str("context", "NetworksAPI").Any("id", nameOrID).Err(err).Msg("RemoveNetwork failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 

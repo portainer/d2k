@@ -1,0 +1,58 @@
+# Cluster-wide admission policy for every d2k install on the cluster.
+# Apply it once per cluster, before or after the installs
+# (kubectl apply -f deploy/admission-policy.yaml), and keep it while any
+# d2k install remains: deleting an install (deploy/kubernetes.yaml) leaves
+# it in place. Requires Kubernetes 1.30 or later.
+#
+# RBAC cannot limit which fields d2k patches on its namespace: this policy
+# lets d2k's ServiceAccount change only its d2k.portainer.io/network-*
+# annotations there, so it can never change the namespace's labels (such as
+# pod-security.kubernetes.io/*, managed by Portainer's policies), other
+# annotations or spec. It applies to the ServiceAccount "d2k" of the
+# namespace being changed, so one policy covers every d2k installation.
+# Requires Kubernetes 1.30 or later.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: d2k-namespace-network-annotations
+  labels:
+    app: d2k
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["namespaces"]
+  matchConditions:
+    - name: d2k-of-this-namespace
+      expression: request.userInfo.username == "system:serviceaccount:" + object.metadata.name + ":d2k"
+  variables:
+    - name: prefix
+      expression: "'d2k.portainer.io/network-'"
+    - name: before
+      expression: "oldObject.metadata.?annotations.orValue({})"
+    - name: after
+      expression: "object.metadata.?annotations.orValue({})"
+  validations:
+    - expression: >-
+        variables.before.all(k, k.startsWith(variables.prefix) || (k in variables.after && variables.after[k] == variables.before[k])) &&
+        variables.after.all(k, k.startsWith(variables.prefix) || k in variables.before)
+      message: d2k may change only the d2k.portainer.io/network-* annotations of its namespace
+    - expression: >-
+        object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({}) &&
+        object.metadata.?finalizers.orValue([]) == oldObject.metadata.?finalizers.orValue([]) &&
+        object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([]) &&
+        object.?spec == oldObject.?spec
+      message: d2k may not change its namespace's labels, finalizers, owners or spec
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: d2k-namespace-network-annotations
+  labels:
+    app: d2k
+spec:
+  policyName: d2k-namespace-network-annotations
+  validationActions: [Deny]

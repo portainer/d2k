@@ -1,7 +1,10 @@
 package adapter
 
 import (
+	"strings"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -18,6 +21,14 @@ func metav1ListOptions() metav1.ListOptions {
 	}
 }
 
+// podsOf selects the pods d2k created for the named Deployment: other
+// workloads in the namespace may carry the same app label.
+func podsOf(name string) metav1.ListOptions {
+	opts := metav1ListOptions()
+	opts.LabelSelector += ",app=" + name
+	return opts
+}
+
 // managedLabels returns the baseline labels applied to every Kubernetes resource
 // that d2k creates.
 func managedLabels(name string) map[string]string {
@@ -29,28 +40,41 @@ func managedLabels(name string) map[string]string {
 	}
 }
 
+// addDockerLabels adds the Docker labels that are also valid Kubernetes
+// labels to labels. The others stay Docker labels only: they are recorded
+// verbatim in an annotation. A Docker label never replaces a label d2k sets
+// or uses its prefix: d2k finds its objects by those labels.
+func addDockerLabels(labels, docker map[string]string) {
+	for k, v := range docker {
+		if _, own := labels[k]; own || strings.HasPrefix(k, types.LabelPrefix+"/") {
+			continue
+		}
+		if clean, ok := sanitiseLabelValue(v); ok && len(validation.IsQualifiedName(k)) == 0 {
+			labels[k] = clean
+		}
+	}
+}
+
 // Kubernetes label values must be 63 chars max, match [A-Za-z0-9._-]*,
 // and start/end with an alphanumeric character.
 func sanitiseLabelValue(v string) (string, bool) {
-    if len(v) > 63 {
-        return "", false
-    }
-    if v == "" {
-        return v, true
-    }
-    for _, r := range v {
-        if !('a' <= r && r <= 'z') && !('A' <= r && r <= 'Z') && !('0' <= r && r <= '9') && r != '-' && r != '_' && r != '.' {
-            return "", false
-        }
-    }
-    // Must start and end with alphanumeric.
-    first := rune(v[0])
-    last := rune(v[len(v)-1])
-    if !('a' <= first && first <= 'z') && !('A' <= first && first <= 'Z') && !('0' <= first && first <= '9') {
-        return "", false
-    }
-    if !('a' <= last && last <= 'z') && !('A' <= last && last <= 'Z') && !('0' <= last && last <= '9') {
-        return "", false
-    }
-    return v, true
+	if len(v) > 63 {
+		return "", false
+	}
+	if v == "" {
+		return v, true
+	}
+	isAlnum := func(r rune) bool {
+		return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9'
+	}
+	for _, r := range v {
+		if !isAlnum(r) && r != '-' && r != '_' && r != '.' {
+			return "", false
+		}
+	}
+	// Must start and end with alphanumeric.
+	if !isAlnum(rune(v[0])) || !isAlnum(rune(v[len(v)-1])) {
+		return "", false
+	}
+	return v, true
 }

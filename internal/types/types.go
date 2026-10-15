@@ -1,12 +1,11 @@
 package types
 
+// Version is the d2k server version, reported in Docker API version
+// responses. Release builds set it with
+// -ldflags "-X github.com/portainer/d2k/internal/types.Version=<version>".
+var Version = "dev"
+
 const (
-	// Version is the d2k server version, reported in Docker API version responses.
-	Version = "0.1.0"
-
-	// DockerAPIVersion is the Docker API version we claim to implement.
-	DockerAPIVersion = "1.41"
-
 	// LabelPrefix is the prefix for all labels d2k places on Kubernetes resources.
 	LabelPrefix = "d2k.portainer.io"
 
@@ -30,6 +29,65 @@ const (
 
 	// LabelImageRef stores the original image reference as supplied by the Docker client.
 	AnnotationImageRef = LabelPrefix + "/image-ref"
+
+	// AnnotationDockerName stores the Docker container name. It differs from the
+	// Deployment name after a rename, since Kubernetes object names are immutable.
+	AnnotationDockerName = LabelPrefix + "/docker-name"
+
+	// AnnotationDockerLabels stores the Docker labels verbatim as JSON. Kubernetes
+	// label values are limited to 63 characters from a restricted charset, so
+	// labels such as com.docker.compose.config-hash cannot round-trip as labels.
+	AnnotationDockerLabels = LabelPrefix + "/docker-labels"
+
+	// AnnotationDriverOpts stores a volume's Docker driver options as JSON.
+	AnnotationDriverOpts = LabelPrefix + "/driver-opts"
+
+	// AnnotationVolumeNames maps the PVCs a container mounts to their Docker
+	// volume names, as JSON.
+	AnnotationVolumeNames = LabelPrefix + "/volume-names"
+
+	// AnnotationRestartPolicy records the container's Docker restart policy.
+	// Containers with policy "no" or "on-failure" run as pods; others, and
+	// containers created before it was recorded, as Deployment replicas.
+	AnnotationRestartPolicy = LabelPrefix + "/restart-policy"
+
+	// AnnotationExitCode records the exit code of a container docker stop
+	// ended, once its pod is gone.
+	AnnotationExitCode = LabelPrefix + "/exit-code"
+
+	// AnnotationLastLog records the last part of a Deployment-backed
+	// container's log when docker stop ends it: the kubelet's log goes with
+	// the pod, and docker logs of the stopped container serves this.
+	AnnotationLastLog = LabelPrefix + "/last-log"
+
+	// AnnotationAutoRemove marks a container that is removed when its run
+	// ends (docker run --rm).
+	AnnotationAutoRemove = LabelPrefix + "/auto-remove"
+
+	// AnnotationNetworkPrefix prefixes the namespace annotations that record
+	// the Docker networks created in it, one per network, as JSON. A Docker
+	// network has no Kubernetes object of its own.
+	AnnotationNetworkPrefix = LabelPrefix + "/network-"
+
+	// AnnotationStartedAt and AnnotationStoppedAt record when the container was
+	// last started and stopped (RFC 3339). A container never started is in
+	// Docker's "created" state; a stopped one is "exited".
+	AnnotationStartedAt = LabelPrefix + "/started-at"
+	AnnotationStoppedAt = LabelPrefix + "/stopped-at"
+
+	// AnnotationRestarting marks a container that docker restart is
+	// restarting, from before its stop until it has started again (RFC 3339
+	// time the restart began). A restart d2k stopping cut short is finished
+	// when it starts.
+	AnnotationRestarting = LabelPrefix + "/restarting"
+
+	// AnnotationNetworks stores the names of the Docker networks a container is
+	// attached to, as JSON. Compose compares them on every `up`.
+	AnnotationNetworks = LabelPrefix + "/networks"
+
+	// LabelComposeProject marks the pods of a compose project, selected by the
+	// project's DNS Service so service names resolve within the project only.
+	LabelComposeProject = LabelPrefix + "/compose-project"
 
 	// ServiceTypeLB is the value for LabelServiceType when a LoadBalancer Service was created.
 	ServiceTypeLB = "loadbalancer"

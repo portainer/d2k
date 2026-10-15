@@ -38,9 +38,10 @@ import (
 	"net/http"
 	"strings"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
@@ -48,15 +49,13 @@ import (
 type Handler struct {
 	adapter   *adapter.KubernetesDockerAdapter
 	namespace string
-	logger    *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string, logger *zap.SugaredLogger) *Handler {
+func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string) *Handler {
 	return &Handler{
 		adapter:   a,
 		namespace: namespace,
-		logger:    logger,
 	}
 }
 
@@ -67,7 +66,7 @@ func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string, logger *za
 func (h *Handler) InspectSwarm(w http.ResponseWriter, r *http.Request) {
 	identity, err := h.adapter.SwarmIdentity(r.Context())
 	if err != nil {
-		h.logger.Warnw("swarm identity unavailable", "error", err)
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("Swarm identity unavailable")
 		httputils.WriteError(w, http.StatusInternalServerError, "unable to retrieve swarm identity")
 		return
 	}
@@ -92,8 +91,8 @@ func (h *Handler) InitSwarm(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListNodes(w http.ResponseWriter, r *http.Request) {
 	nodes, err := h.adapter.SwarmListNodes(r.Context())
 	if err != nil {
-		h.logger.Warnw("list nodes failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List nodes failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	httputils.WriteJSON(w, http.StatusOK, nodes)
@@ -114,14 +113,14 @@ func (h *Handler) DispatchNode(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.inspectNode(w, r, path)
 	default:
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	}
 }
 
 func (h *Handler) inspectNode(w http.ResponseWriter, r *http.Request, id string) {
 	node, err := h.adapter.SwarmInspectNode(r.Context(), id)
 	if err != nil {
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	httputils.WriteJSON(w, http.StatusOK, node)
@@ -142,11 +141,11 @@ func (h *Handler) updateNode(w http.ResponseWriter, r *http.Request, id string) 
 func (h *Handler) CreateService(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.adapter.SwarmCreateService(r.Context(), r.Body)
 	if err != nil {
-		h.logger.Warnw("create service failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("Create service failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
-	h.logger.Infow("create service response", "resp", resp)
+	log.Info().Str("context", "SwarmAPI").Any("resp", resp).Msg("Create service response")
 	httputils.WriteJSON(w, http.StatusCreated, resp)
 }
 
@@ -156,8 +155,8 @@ func (h *Handler) CreateService(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListServices(w http.ResponseWriter, r *http.Request) {
 	services, err := h.adapter.SwarmListServices(r.Context())
 	if err != nil {
-		h.logger.Warnw("list services failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List services failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -255,14 +254,14 @@ func (h *Handler) DispatchService(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet:
 		h.inspectService(w, r, path)
 	default:
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	}
 }
 
 func (h *Handler) inspectService(w http.ResponseWriter, r *http.Request, id string) {
 	svc, err := h.adapter.SwarmInspectService(r.Context(), id)
 	if err != nil {
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	httputils.WriteJSON(w, http.StatusOK, svc)
@@ -270,7 +269,7 @@ func (h *Handler) inspectService(w http.ResponseWriter, r *http.Request, id stri
 
 func (h *Handler) updateService(w http.ResponseWriter, r *http.Request, id string) {
 	if err := h.adapter.SwarmUpdateService(r.Context(), id, r.Body); err != nil {
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	// Docker API spec requires a JSON body with Warnings array on 200.
@@ -287,7 +286,7 @@ func (h *Handler) rollbackService(w http.ResponseWriter, r *http.Request, id str
 
 func (h *Handler) deleteService(w http.ResponseWriter, r *http.Request, id string) {
 	if err := h.adapter.SwarmDeleteService(r.Context(), id); err != nil {
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -304,7 +303,7 @@ func (h *Handler) serviceLogs(w http.ResponseWriter, r *http.Request, id string)
 
 	mw := &muxWriter{w: w}
 	if err := h.adapter.SwarmServiceLogs(r.Context(), mw, id, r.URL.Query()); err != nil {
-		h.logger.Warnw("service logs failed", "service", id, "error", err)
+		log.Warn().Str("context", "SwarmAPI").Any("service", id).Err(err).Msg("Service logs failed")
 	}
 }
 
@@ -348,11 +347,11 @@ func (h *Handler) ListTasks(w http.ResponseWriter, r *http.Request) {
 	serviceFilter, stackFilter := parseTaskFilters(rawFilters)
 	tasks, err := h.adapter.SwarmListTasks(r.Context(), serviceFilter, stackFilter)
 	if err != nil {
-		h.logger.Warnw("list tasks failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List tasks failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
-	h.logger.Infow("list tasks", "service_filter", serviceFilter, "stack_filter", stackFilter, "count", len(tasks))
+	log.Info().Str("context", "SwarmAPI").Any("service_filter", serviceFilter).Any("stack_filter", stackFilter).Any("count", len(tasks)).Msg("List tasks")
 	httputils.WriteJSON(w, http.StatusOK, tasks)
 }
 
@@ -384,7 +383,7 @@ func (h *Handler) InspectTask(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/tasks/")
 	task, err := h.adapter.SwarmInspectTask(r.Context(), id)
 	if err != nil {
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	httputils.WriteJSON(w, http.StatusOK, task)
@@ -396,19 +395,31 @@ func (h *Handler) InspectTask(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) CreateSecret(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.adapter.SwarmCreateSecret(r.Context(), r.Body)
 	if err != nil {
-		h.logger.Warnw("create secret failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("Create secret failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	httputils.WriteJSON(w, http.StatusCreated, resp)
 }
 
+// secretFilters and configFilters are the `filters` keys Docker accepts on
+// GET /secrets and GET /configs.
+var (
+	secretFilters = map[string]bool{"id": true, "label": true, "name": true, "names": true}
+	configFilters = map[string]bool{"id": true, "label": true, "name": true}
+)
+
 // ListSecrets handles GET /secrets.
 func (h *Handler) ListSecrets(w http.ResponseWriter, r *http.Request) {
-	secrets, err := h.adapter.SwarmListSecrets(r.Context())
+	args, err := httputils.ParseFilters(r, secretFilters)
 	if err != nil {
-		h.logger.Warnw("list secrets failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	secrets, err := h.adapter.SwarmListSecrets(r.Context(), args)
+	if err != nil {
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List secrets failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	httputils.WriteJSON(w, http.StatusOK, secrets)
@@ -432,18 +443,18 @@ func (h *Handler) DispatchSecret(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		secret, err := h.adapter.SwarmInspectSecret(r.Context(), id)
 		if err != nil {
-			httputils.WriteError(w, http.StatusNotFound, err.Error())
+			httputils.WriteErrorFrom(w, err)
 			return
 		}
 		httputils.WriteJSON(w, http.StatusOK, secret)
 	case http.MethodDelete:
 		if err := h.adapter.SwarmDeleteSecret(r.Context(), id); err != nil {
-			httputils.WriteError(w, http.StatusNotFound, err.Error())
+			httputils.WriteErrorFrom(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	}
 }
 
@@ -453,8 +464,8 @@ func (h *Handler) DispatchSecret(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) CreateConfig(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.adapter.SwarmCreateConfig(r.Context(), r.Body)
 	if err != nil {
-		h.logger.Warnw("create config failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("Create config failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	httputils.WriteJSON(w, http.StatusCreated, resp)
@@ -462,10 +473,15 @@ func (h *Handler) CreateConfig(w http.ResponseWriter, r *http.Request) {
 
 // ListConfigs handles GET /configs.
 func (h *Handler) ListConfigs(w http.ResponseWriter, r *http.Request) {
-	configs, err := h.adapter.SwarmListConfigs(r.Context())
+	args, err := httputils.ParseFilters(r, configFilters)
 	if err != nil {
-		h.logger.Warnw("list configs failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	configs, err := h.adapter.SwarmListConfigs(r.Context(), args)
+	if err != nil {
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List configs failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	httputils.WriteJSON(w, http.StatusOK, configs)
@@ -487,18 +503,18 @@ func (h *Handler) DispatchConfig(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		cfg, err := h.adapter.SwarmInspectConfig(r.Context(), id)
 		if err != nil {
-			httputils.WriteError(w, http.StatusNotFound, err.Error())
+			httputils.WriteErrorFrom(w, err)
 			return
 		}
 		httputils.WriteJSON(w, http.StatusOK, cfg)
 	case http.MethodDelete:
 		if err := h.adapter.SwarmDeleteConfig(r.Context(), id); err != nil {
-			httputils.WriteError(w, http.StatusNotFound, err.Error())
+			httputils.WriteErrorFrom(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		http.NotFound(w, r)
+		apispec.NotRouted(w, r)
 	}
 }
 
@@ -509,8 +525,8 @@ func (h *Handler) DispatchConfig(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListStacks(w http.ResponseWriter, r *http.Request) {
 	stacks, err := h.adapter.SwarmListStacks(r.Context())
 	if err != nil {
-		h.logger.Warnw("list stacks failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Warn().Str("context", "SwarmAPI").Err(err).Msg("List stacks failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	httputils.WriteJSON(w, http.StatusOK, stacks)
@@ -520,8 +536,8 @@ func (h *Handler) ListStacks(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeleteStack(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/stacks/")
 	if err := h.adapter.SwarmDeleteStack(r.Context(), name); err != nil {
-		h.logger.Warnw("delete stack failed", "stack", name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Warn().Str("context", "SwarmAPI").Any("stack", name).Err(err).Msg("Delete stack failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -4,9 +4,10 @@ package router
 
 import (
 	"net/http"
+	"regexp"
 	"strings"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
 	"github.com/portainer/d2k/internal/api/containers"
@@ -17,21 +18,23 @@ import (
 	"github.com/portainer/d2k/internal/api/swarm"
 	"github.com/portainer/d2k/internal/api/system"
 	"github.com/portainer/d2k/internal/api/volumes"
+	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/internal/middleware"
+	"github.com/portainer/d2k/pkg/httputils"
 )
 
 // New builds the router with all Docker API endpoints registered.
 // If swarmMode is true, the Docker Swarm API surface is also registered.
-func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, logger *zap.SugaredLogger) http.Handler {
+func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool) http.Handler {
 	mux := http.NewServeMux()
 
-	sys := system.NewHandler(a, namespace, swarmMode, logger)
-	c := containers.NewHandler(a, logger)
-	v := volumes.NewHandler(a, logger)
-	n := networks.NewHandler(a, logger)
-	img := images.NewHandler(a, logger)
-	ev := events.NewHandler(a, logger)
-	e := exec.NewHandler(a, logger)
+	sys := system.NewHandler(a, namespace, swarmMode)
+	c := containers.NewHandler(a)
+	v := volumes.NewHandler(a)
+	n := networks.NewHandler(a)
+	img := images.NewHandler()
+	ev := events.NewHandler(a)
+	e := exec.NewHandler(a)
 
 	// System
 	mux.HandleFunc("GET /_ping", sys.Ping)
@@ -49,9 +52,11 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 		}
 		c.DispatchAction(w, r)
 	})
-	mux.HandleFunc("POST /exec/", e.Start)
-	mux.HandleFunc("GET /exec/", e.Inspect)
+	mux.HandleFunc("POST /exec/{id}/start", e.Start)
+	mux.HandleFunc("POST /exec/{id}/resize", e.Resize)
+	mux.HandleFunc("GET /exec/{id}/json", e.Inspect)
 	mux.HandleFunc("DELETE /containers/", c.Remove)
+	mux.HandleFunc("PUT /containers/{id}/archive", c.PutArchive)
 	mux.HandleFunc("GET /containers/", c.DispatchGet) // /containers/{id}/json|logs
 
 	// Images
@@ -69,6 +74,8 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 	// Networks
 	mux.HandleFunc("GET /networks", n.List)
 	mux.HandleFunc("POST /networks/create", n.Create)
+	mux.HandleFunc("POST /networks/{id}/connect", n.Connect)
+	mux.HandleFunc("POST /networks/{id}/disconnect", n.Connect)
 	mux.HandleFunc("GET /networks/", n.Inspect)
 	mux.HandleFunc("DELETE /networks/", n.Remove)
 
@@ -77,8 +84,8 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 
 	// Swarm mode - only registered when D2K_SWARM_MODE=true.
 	if swarmMode {
-		logger.Infow("swarm mode enabled - registering Swarm API endpoints")
-		sw := swarm.NewHandler(a, namespace, logger)
+		log.Info().Str("context", "Router").Msg("Swarm mode enabled - registering Swarm API endpoints")
+		sw := swarm.NewHandler(a, namespace)
 
 		mux.HandleFunc("GET /swarm", sw.InspectSwarm)
 		mux.HandleFunc("POST /swarm/init", sw.InitSwarm)
@@ -114,28 +121,40 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, l
 
 	// Catch-all for unmatched routes - logs the method and path for debugging.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		logger.Warnw("unmatched route", "method", r.Method, "path", r.URL.Path)
-		http.NotFound(w, r)
+		log.Warn().Str("context", "Router").Any("method", r.Method).Any("path", r.URL.Path).Msg("Unmatched route")
+		apispec.NotRouted(w, r)
 	})
 
-	// Versioned path prefix stripping - Docker CLI sends /v1.41/containers/json etc.
+	// Versioned path prefix stripping - Docker CLI sends /v1.52/containers/json etc.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/v") {
-			// Find the end of the version segment, e.g. /v1.41/...
-			rest := r.URL.Path[1:] // strip leading /
-			if idx := strings.Index(rest, "/"); idx != -1 {
-				r2 := r.Clone(r.Context())
-				// Clone the URL to avoid mutating the original request's URL,
-				// which would corrupt logging and any subsequent middleware reads.
-				urlCopy := *r.URL
-				urlCopy.Path = rest[idx:] // /containers/json etc.
-				r2.URL = &urlCopy
-				mux.ServeHTTP(w, r2)
+		if path := stripAPIVersion(r.URL.Path); path != r.URL.Path {
+			if err := apispec.CheckVersion(r.URL.Path[2 : len(r.URL.Path)-len(path)]); err != nil {
+				httputils.WriteErrorFrom(w, err)
 				return
 			}
+			r2 := r.Clone(r.Context())
+			// Clone the URL to avoid mutating the original request's URL,
+			// which would corrupt logging and any subsequent middleware reads.
+			urlCopy := *r.URL
+			urlCopy.Path = path
+			r2.URL = &urlCopy
+			mux.ServeHTTP(w, r2)
+			return
 		}
 		mux.ServeHTTP(w, r)
 	})
 
-	return middleware.Logging(logger)(middleware.RequestID(handler))
+	return middleware.Logging(middleware.RequestID(handler))
+}
+
+// apiVersionPrefix matches the API version prefix Docker clients send, e.g. "/v1.52".
+var apiVersionPrefix = regexp.MustCompile(`^/v[0-9]+\.[0-9]+/`)
+
+// stripAPIVersion removes a leading /v<major>.<minor> segment. Unversioned
+// paths such as /volumes/create are returned unchanged.
+func stripAPIVersion(path string) string {
+	if loc := apiVersionPrefix.FindStringIndex(path); loc != nil {
+		return path[loc[1]-1:]
+	}
+	return path
 }
