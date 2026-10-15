@@ -252,9 +252,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	// short-name DNS work (e.g. "redis", "postgres") without needing FQDNs.
 	// Build ClusterIP ports from container port mappings.
 	var clusterPorts []corev1.ServicePort
-	for i, m := range mappings {
+	for _, m := range uniqueContainerPorts(mappings) {
 		clusterPorts = append(clusterPorts, corev1.ServicePort{
-			Name:       fmt.Sprintf("port-%d", i),
+			Name:       fmt.Sprintf("port-%d", len(clusterPorts)),
 			Protocol:   corev1.Protocol(m.Protocol),
 			Port:       int32(m.ContainerPort),
 			TargetPort: intstr.FromInt(m.ContainerPort),
@@ -650,7 +650,7 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 	labels[types.LabelServiceType] = serviceTypeLabel
 
 	var containerPorts []corev1.ContainerPort
-	for _, m := range mappings {
+	for _, m := range uniqueContainerPorts(mappings) {
 		containerPorts = append(containerPorts, corev1.ContainerPort{
 			ContainerPort: int32(m.ContainerPort),
 			Protocol:      corev1.Protocol(m.Protocol),
@@ -778,6 +778,22 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 			PublishNotReadyAddresses: true,
 		},
 	}, nil
+}
+
+// uniqueContainerPorts returns mappings with one entry per container port
+// and protocol: Docker publishes a container port on several host ports,
+// but a Service or pod lists each port once.
+func uniqueContainerPorts(mappings []portmapper.PortMapping) []portmapper.PortMapping {
+	var out []portmapper.PortMapping
+	seen := map[string]bool{}
+	for _, m := range mappings {
+		key := fmt.Sprintf("%d/%s", m.ContainerPort, m.Protocol)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // serviceName returns the Kubernetes Service name for a given deployment name.
