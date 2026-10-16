@@ -101,21 +101,28 @@ func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deploym
 	if g := d.Spec.Template.Spec.TerminationGracePeriodSeconds; g != nil {
 		grace = *g
 	}
-	exitCode := ""
+	exitCode, log := "", ""
 	for _, p := range list.Items {
 		if podEnded(p) {
 			continue
 		}
+		// The log goes with the pod: keep its end, as for a Deployment's.
+		if tail, ok := a.logTail(ctx, p.Name); ok {
+			log = tail
+		}
 		if err := pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("unable to stop the pod of %q: %w", d.Name, err)
 		}
-		if code, ok := a.waitForPodGone(ctx, p.Name, time.Duration(grace+30)*time.Second); ok {
+		if code, ok := a.waitForPodGone(ctx, p.Name, time.Duration(grace+30)*time.Second, &log); ok {
 			exitCode = code
 		}
 	}
 	updates := map[string]*string{types.AnnotationStoppedAt: ptr(time.Now().UTC().Format(time.RFC3339Nano))}
 	if exitCode != "" {
 		updates[types.AnnotationExitCode] = &exitCode
+	}
+	if log != "" {
+		updates[types.AnnotationLastLog] = &log
 	}
 	err = a.annotate(ctx, d.Name, updates)
 	if apierrors.IsNotFound(err) && d.Annotations[types.AnnotationAutoRemove] == "true" {
@@ -126,8 +133,9 @@ func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deploym
 }
 
 // waitForPodGone waits until the pod is deleted, and returns its container's
-// exit code if it saw one.
-func (a *KubernetesDockerAdapter) waitForPodGone(ctx context.Context, name string, timeout time.Duration) (string, bool) {
+// exit code if it saw one. It updates *log with the end of the pod's log
+// while the pod lasts.
+func (a *KubernetesDockerAdapter) waitForPodGone(ctx context.Context, name string, timeout time.Duration, log *string) (string, bool) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	code, seen := "", false
@@ -138,6 +146,9 @@ func (a *KubernetesDockerAdapter) waitForPodGone(ctx context.Context, name strin
 		}
 		if s := p.Status.ContainerStatuses; len(s) > 0 && s[0].State.Terminated != nil {
 			code, seen = strconv.Itoa(int(s[0].State.Terminated.ExitCode)), true
+		}
+		if tail, ok := a.logTail(ctx, name); ok {
+			*log = tail
 		}
 		select {
 		case <-ctx.Done():
