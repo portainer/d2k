@@ -991,6 +991,35 @@ func TestLogsOfAStoppedContainer(t *testing.T) {
 	}
 }
 
+// A container docker run starts without a restart policy (Docker's
+// default) runs as a pod, which docker stop deletes, and its log with it:
+// d2k keeps the end of that log too.
+func TestLogsOfAStoppedRunOnceContainer(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+	id, _, err := a.CreateContainer(ctx, RunOptions{Name: "web", Image: "nginx", RestartPolicy: "no"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartContainer(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	setStatus(t, a, podOf(t, a, "web"), corev1.PodRunning, corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}})
+	if err := a.StopContainer(ctx, "web"); err != nil {
+		t.Fatal(err)
+	}
+
+	logs, _, err := a.GetContainerLogs(ctx, "web", LogOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = logs.Close() }()
+	// The fake clientset answers every pod's log with "fake logs".
+	if got, _ := io.ReadAll(logs); !strings.Contains(string(got), "fake logs") {
+		t.Errorf("logs of the stopped container = %q, want what its pod printed", got)
+	}
+}
+
 // As in Docker, a container docker stop ended reports its process's exit
 // code: 137 when it was killed at the end of the stop timeout, not 0.
 // docker ps, compose ps and Portainer show it as "Exited (137)".
