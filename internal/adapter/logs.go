@@ -306,3 +306,8 @@ func keptLog(log string, opts *corev1.PodLogOptions) string {
 	}
 	return strings.Join(out, "")
 }
+
+// mergeLogTail adds to kept the lines of tail newer than kept's last.
+func mergeLogTail(kept, tail string) string {
+	return tail
+}

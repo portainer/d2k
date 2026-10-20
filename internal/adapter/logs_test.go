@@ -2,7 +2,9 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,4 +223,36 @@ func TestFollowLogsUntilTheContainerStops(t *testing.T) {
 		t.Fatal("following did not end once the container stopped")
 	}
 	_ = logs.Close()
+}
+
+// While a stopping container's pod lasts, d2k reads the end of its log
+// again and again. A later read can hold only the last few lines (seen on
+// kind: nginx's shutdown lines alone), so it adds to what was kept rather
+// than replacing it.
+func TestMergeLogTail(t *testing.T) {
+	line := func(sec int, text string) string {
+		return time.Date(2026, 10, 5, 12, 0, sec, 1, time.UTC).Format(time.RFC3339Nano) + " " + text + "\n"
+	}
+	kept := line(0, "start") + line(1, "ready") + line(2, "request")
+	for _, tc := range []struct {
+		name, kept, tail, want string
+	}{
+		{"nothing kept yet", "", kept, kept},
+		{"later read with only the newest lines", kept, line(3, "stopping"), kept + line(3, "stopping")},
+		{"later read overlapping", kept, line(2, "request") + line(3, "stopping"), kept + line(3, "stopping")},
+		{"later read with nothing new", kept, line(1, "ready") + line(2, "request"), kept},
+		{"empty read", kept, "", kept},
+	} {
+		if got := mergeLogTail(tc.kept, tc.tail); got != tc.want {
+			t.Errorf("%s: merged = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	var many strings.Builder
+	for i := range keptLogLines + 10 {
+		many.WriteString(line(i%60, fmt.Sprintf("line %d", i)))
+	}
+	if got := strings.Count(mergeLogTail("", many.String()), "\n"); got > keptLogLines {
+		t.Errorf("merged %d lines, want at most %d", got, keptLogLines)
+	}
 }
