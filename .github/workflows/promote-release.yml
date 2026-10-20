@@ -22,8 +22,10 @@ jobs:
         id: check
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          tag="${{ github.event.release.tag_name }}"
+          tag="$TAG"
 
           # Only act on version-shaped tags.
           if [[ ! "$tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]; then
@@ -36,7 +38,7 @@ jobs:
           # :latest can't move backwards. `gh release view` has no isLatest
           # field — the /releases/latest endpoint is the actual source of
           # truth for what GitHub considers latest.
-          latest_tag=$(gh api "repos/${{ github.repository }}/releases/latest" --jq '.tag_name')
+          latest_tag=$(gh api "repos/$REPOSITORY/releases/latest" --jq '.tag_name')
           if [ "$latest_tag" != "$tag" ]; then
             echo "::notice::$tag was promoted but is not GitHub's current latest release ($latest_tag is) — skipping :latest update."
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -50,8 +52,10 @@ jobs:
     steps:
       - name: "[preparation] resolve version"
         id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          tag="${{ github.event.release.tag_name }}"
+          tag="$TAG"
           echo "value=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: "[preparation] set up docker buildx"

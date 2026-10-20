@@ -13,9 +13,10 @@ import (
 	"net/http"
 	"runtime"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/apispec"
 	"github.com/portainer/d2k/internal/types"
 	"github.com/portainer/d2k/pkg/httputils"
 )
@@ -25,32 +26,41 @@ type Handler struct {
 	adapter   *adapter.KubernetesDockerAdapter
 	namespace string
 	swarmMode bool
-	logger    *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool, logger *zap.SugaredLogger) *Handler {
-	return &Handler{adapter: a, namespace: namespace, swarmMode: swarmMode, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool) *Handler {
+	return &Handler{adapter: a, namespace: namespace, swarmMode: swarmMode}
 }
 
 // Ping handles GET /_ping.
 func (h *Handler) Ping(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("API-Version", types.DockerAPIVersion)
+	w.Header().Set("API-Version", apispec.Version)
 	w.Header().Set("Docker-Experimental", "false")
+	w.Header().Set("OSType", "linux")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("OK"))
 }
 
 // Version handles GET /version.
 func (h *Handler) Version(w http.ResponseWriter, r *http.Request) {
-	httputils.WriteJSON(w, http.StatusOK, map[string]any{
-		"Version":       types.Version,
-		"ApiVersion":    types.DockerAPIVersion,
-		"MinAPIVersion": "1.24",
+	details := map[string]string{
+		"ApiVersion":    apispec.Version,
+		"MinAPIVersion": apispec.MinVersion,
 		"Os":            runtime.GOOS,
 		"Arch":          runtime.GOARCH,
+		"GoVersion":     runtime.Version(),
 		"KernelVersion": "d2k",
-	})
+	}
+	body := map[string]any{
+		"Version": types.Version,
+		// Recent Docker CLIs read the server details from its components.
+		"Components": []map[string]any{{"Name": "Engine", "Version": types.Version, "Details": details}},
+	}
+	for k, v := range details {
+		body[k] = v
+	}
+	httputils.WriteJSON(w, http.StatusOK, body)
 }
 
 // swarmInfo returns the Swarm section of the /info response.
@@ -68,7 +78,7 @@ func (h *Handler) swarmInfo(ctx context.Context) map[string]any {
 	// Fetch live node list to get accurate counts.
 	nodes, err := h.adapter.SwarmListNodes(ctx)
 	if err != nil {
-		h.logger.Warnw("swarmInfo: unable to list nodes", "error", err)
+		log.Warn().Str("context", "SystemAPI").Err(err).Msg("SwarmInfo: unable to list nodes")
 	}
 	totalNodes := len(nodes)
 	managerCount := 0
@@ -91,7 +101,7 @@ func (h *Handler) swarmInfo(ctx context.Context) map[string]any {
 	clusterID := "d2k-cluster"
 	identity, err := h.adapter.SwarmIdentity(ctx)
 	if err != nil {
-		h.logger.Warnw("swarmInfo: unable to get swarm identity", "error", err)
+		log.Warn().Str("context", "SystemAPI").Err(err).Msg("SwarmInfo: unable to get swarm identity")
 	} else {
 		if id, ok := identity["NodeID"].(string); ok && id != "" {
 			nodeID = id
@@ -126,46 +136,73 @@ func (h *Handler) swarmInfo(ctx context.Context) map[string]any {
 
 // Info handles GET /info.
 func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	// Docker clients call /info constantly; report what can be read rather
+	// than fail it.
+	id, err := h.adapter.HostID(ctx)
+	if err != nil {
+		log.Warn().Str("context", "SystemAPI").Err(err).Msg("Info: unable to read the host ID")
+		id = h.namespace
+	}
+	ncpu, memory, err := h.adapter.HostResources(ctx)
+	if err != nil {
+		log.Warn().Str("context", "SystemAPI").Err(err).Msg("Info: unable to read host resources")
+	}
+	ctrs, err := h.adapter.ListContainers(ctx, true)
+	if err != nil {
+		log.Warn().Str("context", "SystemAPI").Err(err).Msg("Info: unable to count containers")
+	}
+	running := 0
+	for _, c := range ctrs {
+		if c.State == "running" {
+			running++
+		}
+	}
+
 	httputils.WriteJSON(w, http.StatusOK, map[string]any{
-    "ID":                "d2k",
-    "Name":              "Portainer d2k translator",
-    "ServerVersion":     types.Version,
-    "OperatingSystem":   "Kubernetes/" + h.namespace,
-    "OSType":            "linux",
-    "Architecture":      runtime.GOARCH,
-    "DockerRootDir":     "/var/lib/d2k",
-    "HttpProxy":         "",
-    "HttpsProxy":        "",
-    "NoProxy":           "",
-    "ExperimentalBuild": false,
-    "LoggingDriver":     "json-file",
-    "CgroupDriver":      "cgroupfs",
-    "CgroupVersion":     "2",
-    "MemoryLimit":       true,
-    "SwapLimit":         true,
-    "CPUCfsPeriod":      true,
-    "CPUCfsQuota":       true,
-    "CPUShares":         true,
-    "CPUSet":            true,
-    "IPv4Forwarding":    true,
-    "BridgeNfIptables":  true,
-    "BridgeNfIp6tables": true,
-    "OomKillDisable":    true,
-    "NGoroutines":       10,
-    "NCPU":              1,
-    "MemTotal":          int64(2 * 1024 * 1024 * 1024),
-    "SecurityOptions":   []string{},
-    "Swarm": h.swarmInfo(r.Context()),
-    "Labels": []string{
-        "d2k.portainer.io/translator=true",
-        "d2k.portainer.io/namespace=" + h.namespace,
-    },
-    "Plugins": map[string]any{
-        "Volume":        []string{},
-        "Network":       []string{"bridge", "host", "null"},
-        "Log":           []string{"json-file"},
-        "Authorization": nil,
-        "Builder":       nil,
-    },
-})
+		"ID":                id,
+		"Containers":        len(ctrs),
+		"ContainersRunning": running,
+		"ContainersPaused":  0,
+		"ContainersStopped": len(ctrs) - running,
+		"Name":              "Portainer d2k translator",
+		"ServerVersion":     types.Version,
+		"OperatingSystem":   "Kubernetes/" + h.namespace,
+		"OSType":            "linux",
+		"Architecture":      runtime.GOARCH,
+		"DockerRootDir":     "/var/lib/d2k",
+		"HttpProxy":         "",
+		"HttpsProxy":        "",
+		"NoProxy":           "",
+		"ExperimentalBuild": false,
+		"LoggingDriver":     "json-file",
+		"CgroupDriver":      "cgroupfs",
+		"CgroupVersion":     "2",
+		"MemoryLimit":       true,
+		"SwapLimit":         true,
+		"CPUCfsPeriod":      true,
+		"CPUCfsQuota":       true,
+		"CPUShares":         true,
+		"CPUSet":            true,
+		"IPv4Forwarding":    true,
+		"BridgeNfIptables":  true,
+		"BridgeNfIp6tables": true,
+		"OomKillDisable":    true,
+		"NGoroutines":       10,
+		"NCPU":              ncpu,
+		"MemTotal":          memory,
+		"SecurityOptions":   []string{},
+		"Swarm":             h.swarmInfo(ctx),
+		"Labels": []string{
+			"d2k.portainer.io/translator=true",
+			"d2k.portainer.io/namespace=" + h.namespace,
+		},
+		"Plugins": map[string]any{
+			"Volume":        []string{},
+			"Network":       []string{"bridge", "host", "null"},
+			"Log":           []string{"json-file"},
+			"Authorization": nil,
+			"Builder":       nil,
+		},
+	})
 }

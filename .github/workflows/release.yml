@@ -49,21 +49,29 @@ jobs:
     steps:
       - name: "[preparation] normalize version"
         id: normalize
+        # Inputs reach the script through env, never ${{ }} interpolation,
+        # so they cannot inject shell.
+        env:
+          VERSION: ${{ github.event.inputs.version }}
         run: |
-          version="${{ github.event.inputs.version }}"
-          echo "value=${version#v}" >> "$GITHUB_OUTPUT"
+          if [[ ! "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid version: $VERSION"
+            exit 1
+          fi
+          echo "value=${VERSION#v}" >> "$GITHUB_OUTPUT"
 
       - name: "[execution] create a pre-release"
         run: |
           gh release create \
-            "${{ github.event.inputs.version }}" \
+            "$VERSION" \
             --repo portainer/d2k \
-            --title "${{ github.event.inputs.version }}" \
+            --title "$VERSION" \
             --target develop \
             --prerelease \
             --generate-notes
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.event.inputs.version }}
 
   publish-images:
     name: publish-images

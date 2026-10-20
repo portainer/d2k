@@ -9,9 +9,12 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
+	"time"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -24,8 +27,8 @@ import (
 // KubernetesDockerAdapter bridges Docker API calls to a single Kubernetes namespace.
 type KubernetesDockerAdapter struct {
 	// client is the Kubernetes API client.
-	client kubernetes.Interface
-	metricsClient    *metricsclient.Clientset
+	client        kubernetes.Interface
+	metricsClient *metricsclient.Clientset
 
 	// namespace is the target Kubernetes namespace for all operations.
 	namespace string
@@ -48,21 +51,39 @@ type KubernetesDockerAdapter struct {
 	// (e.g. "nvidia.com/gpu" or "amd.com/gpu"). Empty means GPU support is disabled.
 	gpuResourceName string
 
-	logger *zap.SugaredLogger
-	prevCPU   map[string]int64
-	prevCPUMu sync.RWMutex
-	networks   map[string]*NetworkSummary
-	networksMu sync.RWMutex
 	// nfsStorageClasses caches nfs.csi.k8s.io StorageClass names discovered at
 	// startup, keyed by NFS server address. Used by SwarmCreateService to create
 	// NFS-backed PVCs inline when docker stack deploy doesn't call volume create.
 	nfsStorageClasses map[string]string // server -> storageClassName
+	nfsMu             sync.Mutex        // guards nfsStorageClasses
+
+	// clusterDNS and clusterDomain are the cluster DNS server and domain, read
+	// from d2k's own resolv.conf. Pods of compose projects use them to resolve
+	// service names within their project first. Empty outside a cluster.
+	clusterDNS    string
+	clusterDomain string
+
+	// events records the namespace's Docker events (RecordEvents).
+	events eventHub
+
+	// attaches counts each container's attaches in progress, by container
+	// ID (Attaching).
+	attaches   map[string]int
+	attachesMu sync.Mutex
+
+	// startWait bounds how long docker start waits for the container to run,
+	// or for its image pull to fail for good (waitForStart). Zero skips the
+	// wait: NewWithClient's adapter, whose fake clientset runs no pods.
+	startWait time.Duration
+
+	// statsHost caches HostResources for docker stats (statsHostResources).
+	statsHost   hostResources
+	statsHostMu sync.Mutex
 }
 
 // Options configures a new KubernetesDockerAdapter.
 type Options struct {
 	Config *config.Config
-	Logger *zap.SugaredLogger
 }
 
 // NewKubernetesDockerAdapter creates and returns a new KubernetesDockerAdapter.
@@ -74,6 +95,10 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		return nil, fmt.Errorf("unable to build Kubernetes REST config: %w", err)
 	}
 
+	// client-go's defaults (5 QPS, burst 10) suit a small controller, not a
+	// server answering many Docker clients at once.
+	restCfg.QPS, restCfg.Burst = 50, 100
+
 	client, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create Kubernetes client: %w", err)
@@ -84,30 +109,62 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		return nil, fmt.Errorf("unable to reach namespace %q in cluster: %w", opts.Config.Namespace, err)
 	}
 
-// Probe metrics API — optional, failures are non-fatal.
 	mc := initMetricsClient(restCfg)
-	if mc != nil {
-		if probeMetricsAPI(context.Background(), mc, opts.Config.Namespace) {
-			opts.Logger.Infow("metrics API available — stats will show real data")
-		} else {
-			opts.Logger.Infow("metrics API not available — stats will return zeroes")
-			mc = nil
-		}
+
+	clusterDNS, clusterDomain := readClusterDNS("/etc/resolv.conf")
+	if clusterDNS == "" || clusterDomain == "" {
+		log.Warn().Str("context", "KubernetesAdapter").Msg("Cluster DNS not found in /etc/resolv.conf — compose service names will not be scoped to their project")
 	}
 
+	a := NewWithClient(client, opts.Config.Namespace)
+	a.metricsClient = mc
+	a.restConfig = restCfg
+	a.apiServerHost = apiServerHost(restCfg.Host)
+	a.lowPortThreshold = opts.Config.LowPortThreshold
+	a.gpuResourceName = opts.Config.GPUResourceName
+	a.clusterDNS = clusterDNS
+	a.clusterDomain = clusterDomain
+	a.startWait = startWaitTimeout
+	return a, nil
+}
+
+// NewWithClient returns an adapter that uses client for the given namespace,
+// without contacting the cluster. Features that need more than the client
+// (exec, metrics, GPU) stay disabled.
+func NewWithClient(client kubernetes.Interface, namespace string) *KubernetesDockerAdapter {
 	return &KubernetesDockerAdapter{
-		client:           client,
-		metricsClient:    mc,
-		restConfig:       restCfg,
-		namespace:        opts.Config.Namespace,
-		apiServerHost:    apiServerHost(restCfg.Host),
-		lowPortThreshold: opts.Config.LowPortThreshold,
-		gpuResourceName:  opts.Config.GPUResourceName,
-		logger:           opts.Logger,
-		prevCPU:           map[string]int64{},
-		networks:          map[string]*NetworkSummary{},
+		client:            client,
+		namespace:         namespace,
 		nfsStorageClasses: map[string]string{},
-	}, nil
+	}
+}
+
+// readClusterDNS returns the nameserver and cluster domain from a pod's
+// resolv.conf, whose search list contains "svc.<cluster domain>".
+func readClusterDNS(path string) (nameserver, domain string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "nameserver":
+			if nameserver == "" {
+				nameserver = fields[1]
+			}
+		case "search":
+			for _, s := range fields[1:] {
+				if d, ok := strings.CutPrefix(s, "svc."); ok && domain == "" {
+					domain = d
+				}
+			}
+		}
+	}
+	return nameserver, domain
 }
 
 // apiServerHost extracts the bare hostname or IP from a Kubernetes API server

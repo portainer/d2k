@@ -1,0 +1,298 @@
+package adapter
+
+import (
+	"fmt"
+	"slices"
+	"strconv"
+	"time"
+
+	"github.com/moby/moby/api/types/container"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+
+	"github.com/portainer/d2k/internal/types"
+)
+
+// waitingWhileCreating are the reasons a starting container waits that are
+// part of normal startup rather than an error to report.
+var waitingWhileCreating = map[string]bool{"ContainerCreating": true, "PodInitializing": true}
+
+// containerState derives the Docker state of the container a Deployment
+// backs from the Deployment and its pods.
+func containerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) container.State {
+	if runsAsPod(d) {
+		return podContainerState(d, pods, now)
+	}
+	state := container.State{Status: container.StateCreated, StartedAt: d.Annotations[types.AnnotationStartedAt]}
+	if d.Spec.Replicas == nil || *d.Spec.Replicas == 0 {
+		if state.StartedAt != "" {
+			state.Status = container.StateExited
+			state.FinishedAt = d.Annotations[types.AnnotationStoppedAt]
+			state.ExitCode, _ = strconv.Atoi(d.Annotations[types.AnnotationExitCode])
+		}
+		return state
+	}
+
+	status := newestContainerStatus(pods)
+	if status == nil || creating(status) {
+		// A pod Kubernetes replaces (deleted by hand, drained, evicted) is
+		// the container's run until the new pod's container starts.
+		if ran := newestRunStatus(pods); ran != nil {
+			status = ran
+		}
+	}
+	switch {
+	case status == nil:
+	case status.State.Running != nil:
+		state.Status, state.Running = container.StateRunning, true
+		state.StartedAt = status.State.Running.StartedAt.UTC().Format(time.RFC3339Nano)
+		state.Health = containerHealth(d, status, now)
+	case status.RestartCount > 0 || status.State.Terminated != nil:
+		// The Deployment restarts the container, as Docker's restart policy would.
+		state.Status, state.Running, state.Restarting = container.StateRestarting, true, true
+		if t := lastTermination(status); t != nil {
+			state.ExitCode = int(t.ExitCode)
+			state.FinishedAt = t.FinishedAt.UTC().Format(time.RFC3339Nano)
+			state.OOMKilled = oomKilled(t)
+		}
+	case status.State.Waiting != nil && !waitingWhileCreating[status.State.Waiting.Reason]:
+		state.Error = status.State.Waiting.Reason + ": " + status.State.Waiting.Message
+	}
+	// As in Docker, a started container with a healthcheck is "starting"
+	// until the check has a result, whatever the pod is doing meanwhile.
+	if state.Health == nil && healthProbeOf(d) != nil {
+		state.Health = &container.Health{Status: container.Starting}
+	}
+	return state
+}
+
+// containerRestartCount reports the Docker-visible restart count for the
+// container the Deployment backs: the restarts of the pod containerState
+// itself reads. A pod Kubernetes replaces (deleted by hand, drained,
+// evicted, or a new run-once pod) starts its own container status at zero,
+// so a replacement understates it against Docker, whose restart count is
+// for the container's whole life; Kubernetes keeps no restart history once
+// a pod is gone, so there is nothing more to add it to.
+func containerRestartCount(d appsv1.Deployment, pods []corev1.Pod) int {
+	status := newestContainerStatus(pods)
+	if status == nil || creating(status) {
+		if ran := newestRunStatus(pods); ran != nil {
+			status = ran
+		}
+	}
+	if status == nil {
+		return 0
+	}
+	return int(status.RestartCount)
+}
+
+// podContainerState derives the state of a container that runs as a pod.
+func podContainerState(d appsv1.Deployment, pods []corev1.Pod, now time.Time) container.State {
+	state := container.State{Status: container.StateCreated, StartedAt: d.Annotations[types.AnnotationStartedAt]}
+	if state.StartedAt == "" {
+		return state
+	}
+	status := newestContainerStatus(pods)
+	switch {
+	case status == nil:
+		// Without a pod, the container was stopped; with one, it is starting.
+		if !slices.ContainsFunc(pods, func(p corev1.Pod) bool { return p.DeletionTimestamp == nil }) {
+			state.Status = container.StateExited
+			if stopped := d.Annotations[types.AnnotationStoppedAt]; stopped != "" {
+				// d2k's own stop/rm path recorded a real exit code.
+				state.FinishedAt = stopped
+				state.ExitCode, _ = strconv.Atoi(d.Annotations[types.AnnotationExitCode])
+			} else {
+				// The pod disappeared some other way (force-deleted, an
+				// evicted or lost node): nothing recorded a real exit code,
+				// so reporting 0 would look like a clean exit. 137 is
+				// Docker's own convention for a killed container.
+				state.FinishedAt = now.UTC().Format(time.RFC3339Nano)
+				state.ExitCode = 137
+			}
+		}
+	case status.State.Running != nil:
+		state.Status, state.Running = container.StateRunning, true
+		state.StartedAt = status.State.Running.StartedAt.UTC().Format(time.RFC3339Nano)
+		state.Health = containerHealth(d, status, now)
+	case exitedForGood(d, status.State.Terminated):
+		t := status.State.Terminated
+		state.Status, state.ExitCode = container.StateExited, int(t.ExitCode)
+		state.StartedAt = t.StartedAt.UTC().Format(time.RFC3339Nano)
+		state.FinishedAt = t.FinishedAt.UTC().Format(time.RFC3339Nano)
+		state.OOMKilled = oomKilled(t)
+		if neverStarted(t) {
+			// As in Docker: why it didn't start, and no start time.
+			state.Error = t.Message
+			state.StartedAt = time.Time{}.Format(time.RFC3339Nano)
+		}
+	case status.State.Terminated != nil || status.RestartCount > 0:
+		// on-failure: the kubelet restarts the failed container.
+		state.Status, state.Running, state.Restarting = container.StateRestarting, true, true
+		if t := lastTermination(status); t != nil {
+			state.ExitCode = int(t.ExitCode)
+			state.FinishedAt = t.FinishedAt.UTC().Format(time.RFC3339Nano)
+			state.OOMKilled = oomKilled(t)
+		}
+	case status.State.Waiting != nil && !waitingWhileCreating[status.State.Waiting.Reason]:
+		state.Error = status.State.Waiting.Reason + ": " + status.State.Waiting.Message
+	}
+	if state.Status != container.StateExited && state.Health == nil && healthProbeOf(d) != nil {
+		state.Health = &container.Health{Status: container.Starting}
+	}
+	return state
+}
+
+// neverStarted reports whether the runtime refused to start the
+// container's process: the kubelet then records a start time at the Unix
+// epoch, or none.
+func neverStarted(t *corev1.ContainerStateTerminated) bool {
+	return t.StartedAt.IsZero() || t.StartedAt.Unix() == 0
+}
+
+// oomKilled reports whether the kernel killed the container for exceeding
+// its memory limit, which the kubelet records as the termination's reason.
+func oomKilled(t *corev1.ContainerStateTerminated) bool {
+	return t.Reason == "OOMKilled"
+}
+
+// exitedForGood reports whether a terminated container of a pod will not be
+// restarted: always with restart policy "no", on success with "on-failure".
+func exitedForGood(d appsv1.Deployment, t *corev1.ContainerStateTerminated) bool {
+	return t != nil && (t.ExitCode == 0 || restartPolicyOf(d) != container.RestartPolicyOnFailure)
+}
+
+// IsStarting reports whether a container was started and its pod is not
+// running yet, nor failing. Docker's start returns once the container runs,
+// so clients treat such a container as running.
+func IsStarting(s *container.State) bool {
+	return s != nil && s.Status == container.StateCreated && s.StartedAt != "" && s.Error == ""
+}
+
+// healthProbeOf returns the readiness probe carrying the container's
+// healthcheck, if it has one.
+func healthProbeOf(d appsv1.Deployment) *corev1.Probe {
+	if containers := d.Spec.Template.Spec.Containers; len(containers) > 0 {
+		return containers[0].ReadinessProbe
+	}
+	return nil
+}
+
+// healthConfig reports the healthcheck a readiness probe was translated from.
+func healthConfig(p *corev1.Probe) *container.HealthConfig {
+	if p == nil || p.Exec == nil {
+		return nil
+	}
+	test := append([]string{"CMD"}, p.Exec.Command...)
+	if c := p.Exec.Command; len(c) == 3 && c[0] == "/bin/sh" && c[1] == "-c" {
+		test = []string{"CMD-SHELL", c[2]}
+	}
+	return &container.HealthConfig{
+		Test:        test,
+		Interval:    time.Duration(p.PeriodSeconds) * time.Second,
+		Timeout:     time.Duration(p.TimeoutSeconds) * time.Second,
+		Retries:     int(p.FailureThreshold),
+		StartPeriod: time.Duration(p.InitialDelaySeconds) * time.Second,
+	}
+}
+
+// containerHealth derives Docker's health from the readiness probe that
+// carries the container's healthcheck. Kubernetes reports only readiness,
+// so a container not yet ready is "starting" while the probe could still
+// succeed (start period plus retries), then "unhealthy".
+func containerHealth(d appsv1.Deployment, status *corev1.ContainerStatus, now time.Time) *container.Health {
+	p := healthProbeOf(d)
+	if p == nil {
+		return nil
+	}
+	if status.Ready {
+		return &container.Health{Status: container.Healthy}
+	}
+	window := time.Duration(p.InitialDelaySeconds+p.PeriodSeconds*p.FailureThreshold) * time.Second
+	if now.Sub(status.State.Running.StartedAt.Time) < window {
+		return &container.Health{Status: container.Starting}
+	}
+	return &container.Health{Status: container.Unhealthy, FailingStreak: int(p.FailureThreshold)}
+}
+
+// newestContainerStatus returns the status of the container in the most
+// recently created pod.
+func newestContainerStatus(pods []corev1.Pod) *corev1.ContainerStatus {
+	var newest *corev1.Pod
+	for i := range pods {
+		p := &pods[i]
+		// A pod being deleted belongs to a run that is over.
+		if p.DeletionTimestamp == nil && len(p.Status.ContainerStatuses) > 0 && (newest == nil || p.CreationTimestamp.After(newest.CreationTimestamp.Time)) {
+			newest = p
+		}
+	}
+	if newest == nil {
+		return nil
+	}
+	return &newest.Status.ContainerStatuses[0]
+}
+
+// creating reports whether the container has not run yet in its pod.
+func creating(s *corev1.ContainerStatus) bool {
+	return s.RestartCount == 0 && s.State.Waiting != nil && waitingWhileCreating[s.State.Waiting.Reason]
+}
+
+// newestRunStatus returns the status of the container in the most recently
+// created pod, being deleted or not, whose container has run. A pod that
+// ended and is kept (evicted) belongs to an earlier run.
+func newestRunStatus(pods []corev1.Pod) *corev1.ContainerStatus {
+	var newest *corev1.Pod
+	for i := range pods {
+		p := &pods[i]
+		if p.DeletionTimestamp == nil && (p.Status.Phase == corev1.PodFailed || p.Status.Phase == corev1.PodSucceeded) {
+			continue
+		}
+		if s := p.Status.ContainerStatuses; len(s) > 0 && (s[0].State.Running != nil || s[0].State.Terminated != nil || s[0].RestartCount > 0) &&
+			(newest == nil || p.CreationTimestamp.After(newest.CreationTimestamp.Time)) {
+			newest = p
+		}
+	}
+	if newest == nil {
+		return nil
+	}
+	return &newest.Status.ContainerStatuses[0]
+}
+
+func lastTermination(s *corev1.ContainerStatus) *corev1.ContainerStateTerminated {
+	if s.State.Terminated != nil {
+		return s.State.Terminated
+	}
+	return s.LastTerminationState.Terminated
+}
+
+// containerStatus formats a state the way docker ps does: "Up 5 minutes",
+// "Exited (0) 2 minutes ago", "Restarting (1) 30 seconds ago", "Created".
+func containerStatus(s container.State, now time.Time) string {
+	since := func(ts string) string {
+		t, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			return ""
+		}
+		return " " + humanizeDuration(now.Sub(t)) + " ago"
+	}
+	switch s.Status {
+	case container.StateRunning:
+		up := "Up"
+		if t, err := time.Parse(time.RFC3339Nano, s.StartedAt); err == nil {
+			up += " " + humanizeDuration(now.Sub(t))
+		}
+		if s.Health == nil {
+			return up
+		}
+		if s.Health.Status == container.Starting {
+			return up + " (health: starting)"
+		}
+		return up + " (" + string(s.Health.Status) + ")"
+	case container.StateRestarting:
+		return fmt.Sprintf("Restarting (%d)%s", s.ExitCode, since(s.FinishedAt))
+	case container.StateExited:
+		return fmt.Sprintf("Exited (%d)%s", s.ExitCode, since(s.FinishedAt))
+	default:
+		return "Created"
+	}
+}

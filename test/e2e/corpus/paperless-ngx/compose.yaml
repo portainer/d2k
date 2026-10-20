@@ -1,0 +1,49 @@
+# source: https://docs.paperless-ngx.com/setup/#docker_compose, trimmed to webserver+db+broker
+# (stands in for a Django/Flask app with Postgres and Redis: paperless-ngx is a real Django app).
+services:
+  webserver:
+    image: ghcr.io/paperless-ngx/paperless-ngx:2.13.5
+    labels:
+      corpus.mark: "v1"
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    environment:
+      PAPERLESS_REDIS: redis://broker:6379
+      PAPERLESS_DBHOST: db
+      PAPERLESS_DBUSER: paperless
+      PAPERLESS_DBPASS: paperless
+      PAPERLESS_SECRET_KEY: not-a-real-secret-key-for-testing
+      PAPERLESS_ADMIN_USER: admin
+      PAPERLESS_ADMIN_PASSWORD: adminpass
+    ports:
+      - "18187:8000"
+    volumes:
+      - data:/usr/src/paperless/data
+      - media:/usr/src/paperless/media
+  db:
+    image: postgres:16.4
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: paperless
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperless"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - db_data:/var/lib/postgresql/data
+  broker:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+volumes:
+  data:
+  media:
+  db_data:

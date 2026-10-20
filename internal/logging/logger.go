@@ -1,33 +1,45 @@
+// Package logging configures zerolog the way Portainer does
+// (portainer server-ce/api/logs).
 package logging
 
 import (
 	"fmt"
+	stdlog "log"
+	"os"
 
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
-// NewLogger creates a new zap SugaredLogger with the given level and format.
-func NewLogger(level, format string) (*zap.SugaredLogger, error) {
-	var zapLevel zapcore.Level
-	if err := zapLevel.UnmarshalText([]byte(level)); err != nil {
-		return nil, fmt.Errorf("invalid log level %q: %w", level, err)
+// Configure sets the global logger's level and format. Format "json" writes
+// one JSON object per line; anything else writes Portainer's console format:
+// TIMESTAMP LEVEL LOC > MESSAGE | context=... field=value.
+func Configure(level, format string) error {
+	lvl, err := zerolog.ParseLevel(level)
+	if err != nil || lvl == zerolog.NoLevel {
+		return fmt.Errorf("invalid log level %q", level)
 	}
+	zerolog.SetGlobalLevel(lvl)
 
-	var cfg zap.Config
-	if format == "json" {
-		cfg = zap.NewProductionConfig()
-	} else {
-		cfg = zap.NewDevelopmentConfig()
-		cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	logger := zerolog.New(os.Stderr)
+	if format != "json" {
+		logger = zerolog.New(zerolog.ConsoleWriter{
+			Out:           os.Stderr,
+			TimeFormat:    "2006/01/02 03:04PM",
+			FormatMessage: formatMessage,
+		})
 	}
+	log.Logger = logger.With().Timestamp().Caller().Logger()
 
-	cfg.Level = zap.NewAtomicLevelAt(zapLevel)
+	// Route the standard library's log package through zerolog too.
+	stdlog.SetFlags(0)
+	stdlog.SetOutput(log.Logger)
+	return nil
+}
 
-	logger, err := cfg.Build()
-	if err != nil {
-		return nil, fmt.Errorf("unable to build logger: %w", err)
+func formatMessage(i any) string {
+	if i == nil {
+		return ""
 	}
-
-	return logger.Sugar(), nil
+	return fmt.Sprintf("%s |", i)
 }

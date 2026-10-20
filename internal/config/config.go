@@ -12,7 +12,7 @@ type Config struct {
 	// Provided via D2K_NAMESPACE env var, defaults to "default".
 	Namespace string `env:"D2K_NAMESPACE,default=default"`
 
-	// Port is the port on which the Docker-compatible API server listens.
+	// Port is the plain TCP port of the Docker API, used only with Insecure.
 	// Provided via D2K_PORT env var, defaults to 2375.
 	Port int `env:"D2K_PORT,default=2375"`
 
@@ -45,9 +45,13 @@ type Config struct {
 	// Provided via D2K_SWARM_MODE env var, defaults to false.
 	SwarmMode bool `env:"D2K_SWARM_MODE,default=false"`
 
-	// TLSCertFile is the path to the TLS certificate file.
-	// When both TLSCertFile and TLSKeyFile point to existing files, d2k listens
-	// on TLSPort with TLS instead of Port without TLS.
+	// Insecure serves the Docker API over plain TCP on Port, without TLS or
+	// client authentication. By default d2k requires mutual TLS on TLSPort and
+	// refuses to start without its certificates.
+	// Provided via D2K_INSECURE env var, defaults to false.
+	Insecure bool `env:"D2K_INSECURE,default=false"`
+
+	// TLSCertFile is the path to the server certificate.
 	// Defaults to /etc/d2k/tls/tls.crt (standard Kubernetes Secret mount path).
 	TLSCertFile string `env:"D2K_TLS_CERT_FILE,default=/etc/d2k/tls/tls.crt"`
 
@@ -55,7 +59,27 @@ type Config struct {
 	// Defaults to /etc/d2k/tls/tls.key (standard Kubernetes Secret mount path).
 	TLSKeyFile string `env:"D2K_TLS_KEY_FILE,default=/etc/d2k/tls/tls.key"`
 
-	// TLSPort is the port used when TLS is active.
+	// TLSCAFile is the path to the CA certificate that client certificates
+	// must be signed by.
+	// Defaults to /etc/d2k/tls/ca.crt (standard Kubernetes Secret mount path).
+	TLSCAFile string `env:"D2K_TLS_CA_FILE,default=/etc/d2k/tls/ca.crt"`
+
+	// TLSSANs are the DNS names and IP addresses, comma-separated, that the
+	// server certificate covers when d2k creates its certificates: on a
+	// start without TLSCertFile (no d2k-tls Secret), d2k creates them and
+	// stores them in the d2k-tls and d2k-client Secrets. The d2k Service's
+	// in-cluster names and localhost are always included.
+	TLSSANs []string `env:"D2K_TLS_SANS"`
+
+	// TLSPort is the port of the mutual TLS Docker API.
 	// Defaults to 2376 (standard Docker TLS port).
 	TLSPort int `env:"D2K_TLS_PORT,default=2376"`
+
+	// SocketPath, when set, also serves the Docker API on this unix socket.
+	// Provided via D2K_SOCKET env var, empty by default.
+	SocketPath string `env:"D2K_SOCKET"`
+
+	// HealthPort serves GET /healthz over plain HTTP for kubelet probes.
+	// Provided via D2K_HEALTH_PORT env var, defaults to 8081.
+	HealthPort int `env:"D2K_HEALTH_PORT,default=8081"`
 }

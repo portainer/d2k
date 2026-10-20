@@ -1,0 +1,36 @@
+# source: https://docs.n8n.io/hosting/installation/server-setups/docker-compose/ (trimmed, single instance)
+services:
+  n8n:
+    image: n8nio/n8n:1.60.1
+    labels:
+      corpus.mark: "v1"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: db
+      DB_POSTGRESDB_USER: n8n
+      DB_POSTGRESDB_PASSWORD: n8n
+      DB_POSTGRESDB_DATABASE: n8n
+      N8N_SECURE_COOKIE: "false"
+    ports:
+      - "18188:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+  db:
+    image: postgres:16.4
+    environment:
+      POSTGRES_DB: n8n
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: n8n
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U n8n"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - db_data:/var/lib/postgresql/data
+volumes:
+  n8n_data:
+  db_data:

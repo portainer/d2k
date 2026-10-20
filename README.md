@@ -1,6 +1,6 @@
 # d2k — Docker-to-Kubernetes Translator
 
-d2k lets Docker tooling manage a single Kubernetes namespace. It exposes the Docker Engine API on port 2375/2376 and translates every Docker call into Kubernetes operations scoped to one namespace. Portainer, the Docker CLI, or any Docker SDK client connects to d2k and gets a Kubernetes-backed execution environment without needing to know about Kubernetes.
+d2k lets Docker tooling manage a single Kubernetes namespace. It exposes the Docker Engine API over mutual TLS on port 2376 and translates every Docker call into Kubernetes operations scoped to one namespace. Portainer, the Docker CLI, or any Docker SDK client connects to d2k and gets a Kubernetes-backed execution environment without needing to know about Kubernetes.
 
 Enable `D2K_SWARM_MODE=true` and the same endpoint emulates a Docker Swarm cluster instead, translating Swarm API calls (services, stacks, tasks, secrets, configs) into Kubernetes Deployments and resources.
 
@@ -20,10 +20,12 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 
 | Docker concept | Kubernetes translation |
 |---|---|
-| `docker run` | Deployment (replicas=1) |
-| `docker stop` | Scale Deployment to 0 |
-| `docker start` | Scale Deployment to 1 |
-| `docker rm` | Delete Deployment + Service |
+| `docker run` | Deployment, the container's record. `--restart always` and `unless-stopped`: its replica runs the container. `--restart no` (the default) and `on-failure`: a pod created from it runs the container |
+| `docker stop` | Scale the Deployment to 0, or delete the pod; record its exit code and return once the pod is gone |
+| `docker start` | Scale the Deployment to 1, or run a new pod; fails with Kubernetes' reason when it refuses to create the pod (a full pod quota), and leaves the container stopped, as Docker's start fails when the container cannot run. A pod waiting to be scheduled is not a failure |
+| `docker restart` | Stop, then start; as in Docker, returns once the container runs again (or fails to), waiting at most 30 s; a client that goes away (Ctrl-C) does not stop it halfway; if d2k itself stops halfway (upgrade, rollout, node drain), an `always` or `unless-stopped` container is started again when d2k starts, and a run-once container stays stopped, as Docker leaves them after a daemon restart |
+| `docker run --rm` | As in Docker, the container is removed when its run ends, once an attached `docker run` has its output, or when its start fails; it cannot have a restart policy |
+| `docker rm` | Delete the Deployment (and its pod) + Service. As in Docker, a running container needs `-f`, which stops it and returns once the pod is gone. A container with restart policy `no` or `on-failure` is killed at once (1 s grace); one with `always` or `unless-stopped` that ignores SIGTERM runs out its stop timeout first |
 | `-p <host>:<container>` | LoadBalancer Service |
 | `-P` (publish all) | NodePort Service |
 | No port flags | No Service created |
@@ -31,10 +33,14 @@ d2k runs in one of two modes, controlled by the `D2K_SWARM_MODE` environment var
 | `docker network create` | Synthetic (namespace network is flat) |
 | `docker pull` | Acknowledged — Kubernetes pulls at schedule time |
 | `docker logs` | Kubernetes pod log stream |
-| `docker exec` | Kubernetes pod exec via SPDY |
+| `docker exec` | Kubernetes pod exec via SPDY. As in Docker, refused (409) while the container is not running or is restarting |
 | `docker stats` | Kubernetes metrics API (falls back to zeroes if unavailable) |
 | `docker events` | Kubernetes resource watch + event history |
 | `--gpus all` / `--gpus N` | Pod resource limits via device plugin (opt-in) |
+| `-u`, `-w`, `-t`, `-i`, `-m`, `--cpus`, `--cpu-shares`, `--memory-reservation`, `--add-host`, `--cap-add/--cap-drop`, `--read-only`, `--privileged`, `--stop-timeout` | Container and pod settings (`-u` must be numeric) |
+| `--health-*`, compose `healthcheck:` | Readiness probe; `State.Health` reports starting/healthy/unhealthy. Traffic is not affected, as in Docker. A `HEALTHCHECK` defined only in the image is not seen |
+| `--restart` | `always` and `unless-stopped`: the Deployment restarts the container. `no` (the default): the pod's container runs once (`restartPolicy: Never`) and exits with its exit code. `on-failure`: `restartPolicy: OnFailure`; a maximum retry count returns a warning. A pod is not rescheduled if its node fails. A restart the kubelet makes, or a new pod replacing the container's pod (deleted, drained, evicted), is reported as Docker reports a restart: `die`, `restarting` while it waits, then `start`. `docker inspect`'s `RestartCount` is the current pod's container restart count; a pod Kubernetes replaces (deleted by hand, drained, evicted) restarts that count from zero, unlike Docker's, which counts for the container's whole life |
+| Any other setting | Ignored, and named in a warning on create (`docker run` prints it) |
 
 ---
 
@@ -67,7 +73,9 @@ Node count, manager count, and the Swarm leader are derived from the live Kubern
 
 ## Docker Compose and docker stack deploy
 
-d2k supports `docker stack deploy` using a standard Compose file. The following documents what is supported, what is partially supported, and what is not.
+**`docker compose`**: every attribute of the Compose Specification, and what d2k does with it, is listed in [docs/compose-support.md](docs/compose-support.md). Each row compose sends to d2k is checked against a cluster by `test/e2e/compose_spec.py`.
+
+**`docker stack deploy`** (Swarm mode) supports a standard Compose file. The following documents what is supported, what is partially supported, and what is not.
 
 ### Supported
 
@@ -95,7 +103,7 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 **NFS volumes** — volumes with `driver_opts.type: nfs` are supported when the cluster has `nfs.csi.k8s.io` installed with a StorageClass whose `parameters.server` matches the `addr=` value in the compose `driver_opts.o`. d2k locates the matching StorageClass automatically and creates a `ReadWriteMany` PVC using it. If no matching StorageClass is found, the deploy is blocked with an error indicating exactly what is required. Other NFS provisioners (e.g. `nfs-subdir-external-provisioner`) are not supported for automatic matching because their server address is not stored in the StorageClass spec.
 
-**Global mode services** — `deploy.mode: global` is deployed as replicated with a warning. True DaemonSet translation is not implemented.
+**Global mode services** — `deploy.mode: global` is deployed as replicated with one replica, with a warning in d2k's log only. True DaemonSet translation is not implemented.
 
 **Health checks** — `healthcheck:` in a service spec is not translated to a Kubernetes readiness or liveness probe.
 
@@ -119,7 +127,7 @@ d2k supports `docker stack deploy` using a standard Compose file. The following 
 
 ## GPU support
 
-d2k can translate Docker's `--gpus` flag into Kubernetes device plugin resource requests. Support is opt-in via the `D2K_GPU_RESOURCE_NAME` environment variable — when unset, GPU flags are silently ignored for backward compatibility.
+d2k can translate Docker's `--gpus` flag into Kubernetes device plugin resource requests. Support is opt-in via the `D2K_GPU_RESOURCE_NAME` environment variable — when unset, GPU flags are ignored with a warning on create (`GPU request ignored`).
 
 Set `D2K_GPU_RESOURCE_NAME` to the resource name advertised by the device plugin installed on your cluster:
 
@@ -146,13 +154,14 @@ docker --context d2k run -d --gpus all --name ml-job pytorch/pytorch:latest
 - Docker sends `--gpus all` as `Count=-1`. d2k treats this as `1` since Kubernetes device plugins require an explicit count. Use `--gpus N` to request more.
 - Only one resource name is supported per d2k instance. Clusters with mixed GPU vendors need separate d2k deployments.
 - Fractional GPUs, MIG slicing, and vendor-specific capability selectors are not parsed — d2k only emits integer counts against a single resource name.
+- `docker inspect` reports the GPU limit as `HostConfig.DeviceRequests` in the form `--gpus N` sends (`Count=N`, capability `gpu`), whatever form created it, so Portainer's Recreate and Duplicate keep the GPUs.
 - The device plugin for your GPU vendor must be installed and healthy on the cluster. d2k does not install or manage it.
 
 ---
 
-## Logs
+## Swarm mode limitations
 
-Global mode services (`--mode global`) are deployed as replicated with a warning. Service rollback (`docker service rollback`) is not implemented. Node drain cordon-annotates the node but does not evict existing pods. Port conflict detection across services is not enforced.
+Global mode services (`--mode global`) are deployed as replicated with one replica; the warning is only in d2k's log. `docker service rollback` succeeds and does nothing. `docker node update` (drain, pause, active, labels) is refused with 403: manage nodes with kubectl. Port conflict detection across services is not enforced.
 
 ---
 
@@ -168,11 +177,15 @@ For Swarm services, `--endpoint-mode dnsrr` or any port with `mode: host` bypass
 
 Kubernetes namespace networking is flat. All Pods in the namespace can reach each other by IP regardless of which Docker network they are assigned to. `docker network create` is accepted and returns a synthetic network, but no actual network isolation is enforced. Networks created by `docker stack deploy` are removed correctly when `docker stack rm` is run.
 
+As in Docker, `docker network rm` refuses (403, "has active endpoints") a network that a running or starting container is on; created and stopped containers do not hold it. `docker network inspect` lists those running containers under `Containers`, with no endpoint ID or MAC address.
+
+A Docker network has no Kubernetes object of its own, so d2k records each one (name, driver, labels, and warnings for the options it ignores) as a `d2k.portainer.io/network-*` annotation on its namespace. A network reports the driver it was created with, `bridge` by default, and Docker's scope for it: `local`, or `swarm` for `overlay`. Networks therefore survive d2k restarts and upgrades. RBAC cannot limit which fields d2k patches on the namespace, so `deploy/admission-policy.yaml` installs a ValidatingAdmissionPolicy that lets d2k's ServiceAccount change only those annotations: it can never change the namespace's labels (such as the `pod-security.kubernetes.io/*` labels Portainer's policies manage), other annotations or spec. **This requires Kubernetes 1.30 or later.**
+
 ---
 
 ## Volumes
 
-`docker volume create` creates a PersistentVolumeClaim using the cluster's default StorageClass with `ReadWriteOnce` access mode. Size defaults to `1Gi` and can be overridden with `--opt size=5Gi`. Volume names containing underscores are sanitised to hyphens to comply with Kubernetes naming rules.
+`docker volume create` creates a PersistentVolumeClaim using the cluster's default StorageClass with `ReadWriteOnce` access mode. Size defaults to `1Gi` and can be overridden with `--opt size=5Gi`. The PVC name is the volume name with underscores replaced by hyphens, as Kubernetes requires; Docker clients keep seeing the original name, labels and options, which d2k records on the PVC. Two volume names that map to the same PVC name (`app_data` and `app-data`) cannot both exist. Creating a volume that already exists returns it, as in Docker; a volume created without a name gets a random one. A volume removed a moment ago may still be terminating in Kubernetes: creating it again waits up to 30 s for it to go, then fails with 409.
 
 ### NFS volumes
 
@@ -210,7 +223,7 @@ mountOptions:
 At startup, d2k probes the cluster for `nfs.csi.k8s.io` StorageClasses and logs the NFS servers it will support:
 
 ```
-INFO  NFS volume support available  storageClass=nfs-csi  server=192.168.1.4
+2026/10/07 09:00AM INF volume.go:388 > NFS volume support available | context=KubernetesAdapter server=192.168.1.4 storage_class=nfs-csi
 ```
 
 When a stack service references an NFS volume, d2k creates a `ReadWriteMany` PVC using the matched StorageClass. The NFS CSI provisioner then creates a subdirectory on the share named after the PVC UID (e.g. `pvc-92f50b38-...`) and mounts it into the pod.
@@ -218,14 +231,14 @@ When a stack service references an NFS volume, d2k creates a `ReadWriteMany` PVC
 If no matching StorageClass is found, the deploy is blocked with an error:
 
 ```
-NFS volume "db-data": no StorageClass with provisioner "nfs.csi.k8s.io" and server="192.168.1.4" found in cluster
+NFS volume "db-data": no StorageClass with provisioner "nfs.csi.k8s.io" and server="192.168.1.4" found in cluster — install nfs.csi.k8s.io and create a StorageClass with parameters.server=192.168.1.4
 ```
 
 Note: only `nfs.csi.k8s.io` is supported for automatic matching. Other NFS provisioners such as `nfs-subdir-external-provisioner` are not supported because their server address is not stored in the StorageClass spec.
 
 ### Volume lifecycle
 
-Volumes (PVCs) are not deleted when a stack is removed with `docker stack rm`. This matches Docker Swarm behaviour; named volumes are intentionally preserved across stack teardown to prevent accidental data loss. Data persists and reattaches automatically if the stack is redeployed. To remove a volume explicitly, use `docker volume rm <name>`.
+Volumes (PVCs) are not deleted when a stack is removed with `docker stack rm`. This matches Docker Swarm behaviour; named volumes are intentionally preserved across stack teardown to prevent accidental data loss. Data persists and reattaches automatically if the stack is redeployed. To remove a volume explicitly, use `docker volume rm <name>`. As in Docker, `docker volume rm` refuses a volume that a container, running or stopped, still uses (409, "volume is in use"): remove the container first.
 
 The NFS subdirectory created by the CSI provisioner is named after the PVC UID (e.g. `pvc-92f50b38-...`), not the pod. This means pod rescheduling, rolling updates, and replica scaling all reattach to the same data automatically without any intervention.
 
@@ -237,18 +250,63 @@ If your StorageClass has `reclaimPolicy: Delete`, the underlying NFS subdirector
 
 d2k runs inside the target cluster namespace using a ServiceAccount bound to a namespace-scoped Role for workload management and a ClusterRole for node and StorageClass read access.
 
+d2k serves the Docker API over mutual TLS. In `deploy/kubernetes.yaml`, set `D2K_TLS_SANS` to every DNS name and IP address clients use to reach d2k (comma-separated), then:
+
 ```bash
+kubectl apply -f deploy/admission-policy.yaml   # once per cluster
 kubectl apply -f deploy/kubernetes.yaml
+kubectl -n d2k rollout status deploy/d2k
+mkdir -p d2k-client
+kubectl -n d2k get secret d2k-client -o jsonpath='{.data.ca\.pem}' | base64 -d > d2k-client/ca.pem
+kubectl -n d2k get secret d2k-client -o jsonpath='{.data.cert\.pem}' | base64 -d > d2k-client/cert.pem
+kubectl -n d2k get secret d2k-client -o jsonpath='{.data.key\.pem}' | base64 -d > d2k-client/key.pem
 ```
 
-For Swarm mode, set `D2K_SWARM_MODE=true` in the deployment manifest before applying. The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included.
+On its first start without a `d2k-tls` Secret, d2k creates its certificates: a CA, a server certificate for `D2K_TLS_SANS` plus the Service's in-cluster names (`d2k.<namespace>.svc...`) and `localhost`, and a client certificate. It stores the server's in `d2k-tls` and the client's in `d2k-client`, and keeps using them on every later start. It does not keep the CA key, so nothing in the cluster can issue further client certificates. To change the names, delete both Secrets, restart d2k, and give clients the new `d2k-client` files.
+
+To use your own CA instead (to keep the CA key, or to issue several client certificates), create the `d2k-tls` Secret before applying the manifest; d2k then uses it and creates no certificates:
+
+```bash
+d2k pki init --san d2k.d2k.svc.cluster.local,d2k.example.com --out d2k-pki
+kubectl create namespace d2k
+kubectl -n d2k create secret generic d2k-tls --from-file=d2k-pki/server
+```
+
+`deploy/admission-policy.yaml` holds the cluster-scoped ValidatingAdmissionPolicy and its binding, which every d2k install on the cluster shares (see Networking above). To uninstall one install, `kubectl delete -f deploy/kubernetes.yaml` (with that install's namespace); delete `deploy/admission-policy.yaml` only after the last install is gone.
+
+With your own CA, `d2k-pki/client` holds the client certificate (`ca.pem`, `cert.pem`, `key.pem`) for the Docker CLI and for Portainer's "Docker API" environment with TLS. Keep `d2k-pki/ca.key` private. `d2k pki init` refuses to overwrite any file it would write, so give it a new `--out` directory to start over. cert-manager can issue the `d2k-tls` Secret instead, as long as it holds `tls.crt`, `tls.key` and the client CA as `ca.crt`. d2k reloads the Secret when it changes, without a restart.
+
+`deploy/kubernetes.yaml` installs Docker host mode (`D2K_SWARM_MODE="false"`). For Swarm mode, set it to `"true"` before applying. An install made from an earlier manifest that ran Swarm mode must keep `"true"` when it re-applies this one: in host mode d2k doesn't serve the Swarm API, so its services, stacks, secrets and configs would no longer be listed (the Kubernetes objects stay). The single manifest covers both modes; the ClusterRole and ClusterRoleBinding for node and StorageClass access are always included, and both modes use them.
+
+### Upgrading from d2k 1.2.x
+
+1.2.x served the Docker API over plain TCP on port 2375 and installed Swarm mode by default. In place:
+
+1. If the install ran Swarm mode (1.2.x's default), set `D2K_SWARM_MODE` to `"true"` in `deploy/kubernetes.yaml`. In Docker host mode d2k doesn't list Swarm services, and logs a warning when it finds them.
+2. Set `D2K_TLS_SANS` to the addresses clients use, as for a new install.
+3. Apply `deploy/admission-policy.yaml` (once per cluster) and `deploy/kubernetes.yaml` with the install's namespace. d2k creates its certificates on first start (see above), unless you created a `d2k-tls` Secret.
+4. Re-add the environment in Portainer: "Docker API" with TLS at port 2376, with the client certificate from the `d2k-client` Secret. Docker CLI users need `DOCKER_TLS_VERIFY=1` and that certificate too.
+
+On its first start, d2k records on the containers and volumes 1.2.x created what it reads now: their Docker names and labels, and the start of each container (a stopped one shows as exited). What 1.2.x did not keep can't be recovered:
+
+- **Volume data.** In Docker host mode, 1.2.x created volumes but did not mount them into containers, so what those containers wrote is in the container's own filesystem, not the volume. It is lost when the container is re-created (the first `docker compose up` after the upgrade does), as it was on any restart under 1.2.x. Copy out anything you need before upgrading.
+- **Names with underscores** show with hyphens (`data_vol` is `data-vol`), and compose's `working_dir` and `config_files` labels are gone (`docker compose ls` shows `N/A`).
+- **Compose's config hash.** Compose containers get `com.docker.compose.config-hash=d2k-migrated`, so `docker compose ls` and `ps` list them; the next `docker compose up` re-creates them from the compose file.
+
+### Multiple installs on one cluster
+
+Portainer can point several environments at the same cluster, each as its own d2k install in its own namespace. Everything namespace-scoped (the Role, RoleBinding, ServiceAccount, Deployment, Service, Secret) is already isolated by `namespace: d2k` in the manifest, and the ValidatingAdmissionPolicy in `deploy/admission-policy.yaml` is applied once and shared: it derives the expected ServiceAccount from whichever namespace is being patched, and uninstalling one install leaves it in place for the others.
+
+The ClusterRole and ClusterRoleBinding named `d2k-node-reader` are the exception: they are cluster-scoped, so their names must be made unique per install (for example by appending the namespace, as `test/e2e/setup.sh` does). If two installs keep the default name, the second `kubectl apply` silently overwrites the first's ClusterRoleBinding subject, and the first install's ServiceAccount loses its cluster-wide node and StorageClass access, with no error at apply time: `docker info` reports 0 CPUs and 0 memory, `docker stats` prints nothing, NFS volumes cannot be matched, and in Swarm mode `docker node ls`, the node/manager counts and the leader check stop working. Rename both objects (and `roleRef.name`) together, the same way you rename `namespace: d2k`.
+
+Restarting d2k (`kubectl rollout restart`, a pod delete, a reschedule) takes about 5 seconds longer than it used to: a `preStop` hook delays SIGTERM so kube-proxy has time to stop routing to the terminating pod before d2k stops accepting connections. Without it, a client can hit the pod in that window and see its connection reset.
 
 Connect Portainer or the Docker CLI to the d2k Service:
 
 ```bash
 # Docker CLI
 docker context create d2k \
-  --docker "host=tcp://d2k.d2k.svc.cluster.local:2375"
+  --docker "host=tcp://d2k.d2k.svc.cluster.local:2376,ca=d2k-pki/client/ca.pem,cert=d2k-pki/client/cert.pem,key=d2k-pki/client/key.pem"
 
 docker --context d2k ps
 docker --context d2k service ls
@@ -261,11 +319,20 @@ docker --context d2k service ls
 | Variable | Default | Description |
 |---|---|---|
 | `D2K_NAMESPACE` | `default` | Target Kubernetes namespace |
-| `D2K_PORT` | `2375` | Docker API listen port |
+| `D2K_TLS_PORT` | `2376` | Docker API port (mutual TLS) |
+| `D2K_TLS_CERT_FILE` | `/etc/d2k/tls/tls.crt` | Server certificate |
+| `D2K_TLS_KEY_FILE` | `/etc/d2k/tls/tls.key` | Server key |
+| `D2K_TLS_CA_FILE` | `/etc/d2k/tls/ca.crt` | CA that client certificates must be signed by |
+| `D2K_TLS_SANS` | _(none)_ | DNS names and IP addresses (comma-separated) for the certificates d2k creates when `D2K_TLS_CERT_FILE` doesn't exist (no `d2k-tls` Secret) |
+| `D2K_HEALTH_PORT` | `8081` | Plain HTTP port serving `GET /healthz` only |
+| `D2K_SOCKET` | _(empty)_ | Also serve the Docker API on this unix socket (no TLS; file mode 0660) |
+| `D2K_INSECURE` | `false` | Serve without TLS or authentication on `D2K_PORT`. Anyone who can reach it controls the namespace |
+| `D2K_PORT` | `2375` | Plain Docker API port, used only with `D2K_INSECURE` |
 | `D2K_SWARM_MODE` | `false` | Enable Swarm API emulation |
 | `D2K_LOG_LEVEL` | `info` | Log level: debug, info, warn, error |
 | `D2K_LOG_FORMAT` | `text` | Log format: text, json |
 | `D2K_KUBECONFIG` | _(empty)_ | Path to kubeconfig. Empty = in-cluster auth |
+| `D2K_GPU_RESOURCE_NAME` | _(empty)_ | Device plugin resource for `--gpus` (see GPU support). Empty = GPU requests ignored with a warning |
 
 ---
 
@@ -273,7 +340,7 @@ docker --context d2k service ls
 
 ```
 Docker client
-     |  Docker Engine API (port 2375)
+     |  Docker Engine API (mutual TLS, port 2376)
      v
 +------------------------------------------+
 |  d2k                                     |
@@ -288,7 +355,7 @@ Docker client
 |  +-- /events                             |
 |  +-- /swarm, /nodes                      |
 |  +-- /services/*, /tasks/*               |
-|  +-- /stacks/*, /secrets/*, /configs/*   |
+|  +-- /secrets/*, /configs/*             |
 |  +-- /_ping, /version, /info             |
 |                                          |
 |  adapter        <- translation layer     |
@@ -311,30 +378,32 @@ Kubernetes namespace
 
 ## RBAC
 
-Docker host mode requires namespace-scoped permissions only.
+Both modes use a namespace-scoped Role and a ClusterRole (below).
 
 | Resource | Verbs |
 |---|---|
 | deployments | get, list, watch, create, update, patch, delete |
-| pods | get, list, watch |
+| pods | get, list, watch, create, delete |
 | pods/log | get |
-| pods/exec | create |
+| pods/exec, pods/attach | create |
 | services | get, list, watch, create, update, patch, delete |
 | configmaps | get, list, watch, create, update, patch, delete |
 | secrets | get, list, watch, create, update, patch, delete |
 | persistentvolumeclaims | get, list, watch, create, delete |
-| namespaces | get |
-| events | get, list |
+| namespaces | get, patch _(its own namespace only; an admission policy limits patch to `d2k.portainer.io/network-*` annotations)_ |
+| events | get, list _(not used by the code at this commit; d2k's events come from watches)_ |
+| resourcequotas | get, list _(a container created without CPU or memory settings gets the requests and limits a quota requires: 10m CPU, 32Mi memory)_ |
+| limitranges | get, list _(optional: a LimitRange's container defaults are left to apply instead of d2k's)_ |
 | metrics.k8s.io/pods | get, list _(optional)_ |
 
-Swarm mode adds a ClusterRole for node and StorageClass access:
+Both modes also need a ClusterRole for node and StorageClass access:
 
 | Resource | Verbs | Scope |
 |---|---|---|
 | nodes | get, list, watch | ClusterRole |
 | storageclasses | get, list, watch | ClusterRole |
 
-Node StorageClass read access is required for NFS volume matching.
+Node list access gives `docker info` its CPUs and memory and `docker stats` its limits, and backs the Swarm node views; without it `docker stats` prints nothing. StorageClass read access is required for NFS volume matching.
 
 ---
 
@@ -346,6 +415,14 @@ These features are absent by design. They reflect fundamental differences betwee
 
 `docker build`, `docker commit`, `docker tag`, `docker push`, `docker save`, `docker load`, `docker image prune`, and all `docker buildx` commands are not supported. d2k is a runtime translator. Image build and registry operations operate below the Kubernetes layer — Kubernetes pulls images at schedule time from a registry and has no equivalent concept of a local image daemon. Use a standard CI pipeline and container registry to build and push images before running them through d2k.
 
+d2k stores no images. `docker images` lists none, `docker pull` is acknowledged without pulling, and `docker image inspect` reports only the reference (with `Created` at the zero time, 0001-01-01): the kubelet pulls the image when a container starts. As in Docker, `docker start` (and so `docker run` and `docker compose up`) returns once the container runs, waiting at most 30 seconds for its image to pull, and fails when the image can't be pulled for good: not found, not readable without credentials, or an invalid name. The container is then left created, not running. A pull the kubelet may still get past (the registry timing out or rate-limiting), or a pull taking longer than 30 seconds, is left to the kubelet: the start returns and the container shows as created until it runs. `docker rmi` is not supported. d2k ignores the registry credentials a client sends (`X-Registry-Auth`); give the namespace pull secrets instead, for example on its default ServiceAccount or through a Portainer policy.
+
+### Container operations
+
+These answer `501 Not Implemented`: `docker kill`, `docker pause` and `docker unpause`, `docker top`, `docker update`, `docker export`, `docker diff`, `docker container prune`, and `docker cp` out of a container (`docker cp ctr:/path .`). Use `docker stop`, `docker rm` and re-create the container instead.
+
+`docker cp` into a container works for files, before the container starts (`docker create`, then `docker cp`, then `docker start`), as compose does for secrets and configs: d2k mounts each file at its path from a Secret. A started container refuses it. d2k never sees the image's files, so it can't tell whether a destination is an existing directory. Name the file's full path (`docker cp app.conf ctr:/etc/app/app.conf`): a destination ending in `/` fails with "no such directory", and `docker cp app.conf ctr:/etc/app` mounts the file at `/etc/app` itself; if that is a directory in the image, the container fails to start, and `docker inspect` shows why in `State.Error`.
+
 ### Advanced networking
 
 `docker network create --driver macvlan` and `--driver ipvlan` are not supported and will not be. macvlan and ipvlan require direct Layer 2 hardware access, assigning real MAC and IP addresses to container interfaces. Kubernetes networking is CNI-managed and operates above this level — there is no Kubernetes equivalent. If your workload requires macvlan (e.g. direct access to a physical LAN segment), it cannot be translated and must remain on a native Docker host.
@@ -353,7 +430,7 @@ These features are absent by design. They reflect fundamental differences betwee
 Additional networking features with no Kubernetes equivalent:
 
 - `--network host` — host network namespace sharing. Use `hostNetwork: true` in a raw Kubernetes manifest instead.
-- Per-container `--dns` and `--dns-search` overrides. DNS in Kubernetes is cluster-wide and namespace-scoped via CoreDNS.
+- Per-container `--dns` servers. The cluster DNS server must answer first for service names to resolve. (`--dns-search` and `--dns-option` are added to the pod's DNS configuration.)
 - `--ip` and `--mac-address` — static IP and MAC assignment. Not applicable in CNI-managed networking.
 - `--link` — legacy Docker container linking. Has no Kubernetes equivalent.
 
@@ -363,18 +440,18 @@ Additional networking features with no Kubernetes equivalent:
 - `--privileged` — may be blocked by cluster admission policy (PodSecurity, OPA/Gatekeeper). d2k passes the flag but enforcement is cluster-dependent.
 - `--device` — host device passthrough (e.g. `/dev/video0`). Requires a device plugin on Kubernetes; d2k does not configure one.
 - `--ulimit` — kernel resource limits. Not expressible in Kubernetes Pod spec.
-- `--sysctl` — kernel parameter overrides. Supported only for a restricted set by Kubernetes; d2k does not translate these.
+- `--sysctl` is translated to pod sysctls, but Kubernetes allows only its safe set unless the kubelet allowlists others; a container with a forbidden sysctl fails to start.
 - `docker system prune` and `docker system df` — operate against a local Docker daemon. Not meaningful in a Kubernetes context.
 
 ---
 
 ## Limitations
 
-- Bind mounts from arbitrary host paths are unreliable in multi-node clusters.
+- Bind mounts: Docker host mode ignores them with a warning; Swarm mode turns them into hostPath volumes, which are unreliable in multi-node clusters.
 - Network isolation is not enforced. All pods share the namespace network.
 - Image metadata is synthesised. Actual image metadata lives on cluster nodes.
 - `docker stats` requires metrics-server to return real data.
 - Swarm services are scoped to a single namespace. Multi-namespace deployments require separate d2k instances.
 - `docker swarm init` and `docker swarm leave` return `501 Not Implemented`.
-- Global mode services (`--mode global`) are deployed as replicated with a warning.
+- Global mode services (`--mode global`) are deployed as replicated with one replica, with a warning in d2k's log only.
 - NFS volumes require `nfs.csi.k8s.io` with a matching StorageClass. Other NFS provisioners are not auto-detected.
