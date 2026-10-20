@@ -108,7 +108,7 @@ func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deploym
 		}
 		// The log goes with the pod: keep its end, as for a Deployment's.
 		if tail, ok := a.logTail(ctx, p.Name); ok {
-			log = tail
+			log = mergeLogTail(log, tail)
 		}
 		if err := pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("unable to stop the pod of %q: %w", d.Name, err)
@@ -148,7 +148,7 @@ func (a *KubernetesDockerAdapter) waitForPodGone(ctx context.Context, name strin
 			code, seen = strconv.Itoa(int(s[0].State.Terminated.ExitCode)), true
 		}
 		if tail, ok := a.logTail(ctx, name); ok {
-			*log = tail
+			*log = mergeLogTail(*log, tail)
 		}
 		select {
 		case <-ctx.Done():
@@ -183,7 +183,7 @@ func (a *KubernetesDockerAdapter) waitForPodsGoneKeepingLog(ctx context.Context,
 			}
 		}
 		if tail, ok := a.logTail(ctx, pods.Items[0].Name); ok {
-			log = tail
+			log = mergeLogTail(log, tail)
 		}
 		select {
 		case <-ctx.Done():

@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -271,14 +270,7 @@ func (a *KubernetesDockerAdapter) logTail(ctx context.Context, pod string) (stri
 	if err != nil {
 		return "", false
 	}
-	if len(data) > keptLogBytes {
-		data = data[len(data)-keptLogBytes:]
-		// Keep whole lines only.
-		if i := bytes.IndexByte(data, '\n'); i >= 0 {
-			data = data[i+1:]
-		}
-	}
-	return string(data), true
+	return capLog(string(data)), true
 }
 
 // keptLog applies docker logs' --since, --tail and --timestamps to a kept
@@ -307,7 +299,47 @@ func keptLog(log string, opts *corev1.PodLogOptions) string {
 	return strings.Join(out, "")
 }
 
-// mergeLogTail adds to kept the lines of tail newer than kept's last.
+// mergeLogTail adds to kept the lines of tail newer than kept's last, by
+// the kubelet's timestamps, and keeps the result within keptLogLines and
+// keptLogBytes. A later read of a stopping pod's log can hold only its
+// newest lines, so it adds to the copy rather than replacing it.
 func mergeLogTail(kept, tail string) string {
-	return tail
+	var last time.Time
+	for line := range strings.Lines(kept) {
+		if stamp, _, ok := strings.Cut(line, " "); ok {
+			if at, err := time.Parse(time.RFC3339Nano, stamp); err == nil {
+				last = at
+			}
+		}
+	}
+	var b strings.Builder
+	b.WriteString(kept)
+	for line := range strings.Lines(tail) {
+		stamp, _, _ := strings.Cut(line, " ")
+		if at, err := time.Parse(time.RFC3339Nano, stamp); err == nil && !last.IsZero() && !at.After(last) {
+			continue
+		}
+		b.WriteString(line)
+	}
+	return capLog(b.String())
+}
+
+// capLog keeps the last keptLogLines lines of log, at most keptLogBytes,
+// whole lines only.
+func capLog(log string) string {
+	lines := strings.SplitAfter(log, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) > keptLogLines {
+		lines = lines[len(lines)-keptLogLines:]
+	}
+	log = strings.Join(lines, "")
+	if len(log) > keptLogBytes {
+		log = log[len(log)-keptLogBytes:]
+		if i := strings.IndexByte(log, '\n'); i >= 0 {
+			log = log[i+1:]
+		}
+	}
+	return log
 }
