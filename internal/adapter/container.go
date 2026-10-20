@@ -421,6 +421,11 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 	}
 	if runsAsPod(*d) {
 		err := a.startPod(ctx, d)
+		if err == nil {
+			if err = a.waitForStart(ctx, resolved); err != nil {
+				a.stopFailedRun(ctx, resolved)
+			}
+		}
 		if err != nil && d.Annotations[types.AnnotationAutoRemove] == "true" {
 			a.removeFailedStart(ctx, resolved)
 		}
@@ -429,7 +434,11 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 	if err := a.scaleDeployment(ctx, name, 1); err != nil {
 		return err
 	}
-	if err := a.waitUntilPodCreated(ctx, resolved, podCreateTimeout); err != nil {
+	err = a.waitUntilPodCreated(ctx, resolved, podCreateTimeout)
+	if err == nil {
+		err = a.waitForStart(ctx, resolved)
+	}
+	if err != nil {
 		if d.Annotations[types.AnnotationAutoRemove] == "true" {
 			a.removeFailedStart(ctx, resolved)
 			return err
@@ -442,6 +451,23 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 		return err
 	}
 	return nil
+}
+
+// stopFailedRun leaves a run-once container whose start failed as Docker
+// leaves it, created and not running: its pod goes, so the kubelet stops
+// retrying, and the start is no longer recorded.
+func (a *KubernetesDockerAdapter) stopFailedRun(ctx context.Context, name string) {
+	ctx = context.WithoutCancel(ctx)
+	pods := a.client.CoreV1().Pods(a.namespace)
+	if list, err := pods.List(ctx, podsOf(name)); err == nil {
+		grace := int64(0)
+		for _, p := range list.Items {
+			_ = pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
+		}
+	}
+	if err := a.annotate(ctx, name, map[string]*string{types.AnnotationStartedAt: nil}); err != nil && !errors.IsNotFound(err) {
+		log.Warn().Str("context", "KubernetesAdapter").Str("container", name).Err(err).Msg("Unable to record a container whose start failed")
+	}
 }
 
 // removeFailedStart removes an AutoRemove container whose start failed, as

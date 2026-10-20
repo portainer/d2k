@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/moby/moby/api/types/container"
@@ -15,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/util/retry"
 
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/types"
 )
 
@@ -221,6 +223,87 @@ func (a *KubernetesDockerAdapter) waitUntilRunStarted(ctx context.Context, deplo
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// startWaitTimeout bounds how long docker start waits for the container to
+// run, or for its image pull to fail for good. A pull that takes longer (a
+// large image) is reported starting meanwhile.
+const startWaitTimeout = 30 * time.Second
+
+// waitForStart waits until the container's newest pod runs (or has already
+// ended), up to a.startWait, and fails when its image can't be pulled for
+// good, as Docker's run fails instead of pulling: the kubelet would retry
+// forever. A pod the scheduler can't place, or a pull the kubelet may still
+// get past, is not a failure.
+func (a *KubernetesDockerAdapter) waitForStart(ctx context.Context, deployment string) error {
+	if a.startWait == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, a.startWait)
+	defer cancel()
+	for {
+		pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(deployment))
+		if err != nil {
+			return nil
+		}
+		var newest *corev1.Pod
+		for i, p := range pods.Items {
+			if p.DeletionTimestamp == nil && (newest == nil || p.CreationTimestamp.After(newest.CreationTimestamp.Time)) {
+				newest = &pods.Items[i]
+			}
+		}
+		if newest != nil {
+			if unschedulable(newest) {
+				return nil
+			}
+			if s := newest.Status.ContainerStatuses; len(s) > 0 {
+				switch st := s[0].State; {
+				case st.Running != nil, st.Terminated != nil:
+					return nil
+				case st.Waiting != nil:
+					image := ""
+					if c := newest.Spec.Containers; len(c) > 0 {
+						image = c[0].Image
+					}
+					if err := pullFailure(st.Waiting, image); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+func unschedulable(p *corev1.Pod) bool {
+	return slices.ContainsFunc(p.Status.Conditions, func(c corev1.PodCondition) bool {
+		return c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable
+	})
+}
+
+// pullFailure is the error of a start whose image can't be pulled for good:
+// not found, or not readable without credentials (Docker answers both 404),
+// or an invalid name (400). Other pull errors, a registry that times out or
+// rate-limits, are left to the kubelet's retries.
+func pullFailure(w *corev1.ContainerStateWaiting, image string) error {
+	switch w.Reason {
+	case "InvalidImageName":
+		return errdefs.InvalidParameter(fmt.Errorf("invalid image name %q: %s", image, w.Message))
+	case "ErrImageNeverPull":
+		return errdefs.NotFound(fmt.Errorf("image %q is not on the node and its pull policy is Never", image))
+	case "ErrImagePull", "ImagePullBackOff":
+		msg := strings.ToLower(w.Message)
+		for _, forGood := range []string{"not found", "manifest unknown", "pull access denied", "repository does not exist", "insufficient_scope", "authorization failed", "unauthorized", "403 forbidden"} {
+			if strings.Contains(msg, forGood) {
+				return errdefs.NotFound(fmt.Errorf("unable to pull image %q: %s", image, w.Message))
+			}
+		}
+	}
+	return nil
 }
 
 // podCreateTimeout bounds how long a start waits for Kubernetes to create

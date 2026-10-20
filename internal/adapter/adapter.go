@@ -124,6 +124,7 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 	a.gpuResourceName = opts.Config.GPUResourceName
 	a.clusterDNS = clusterDNS
 	a.clusterDomain = clusterDomain
+	a.startWait = startWaitTimeout
 	return a, nil
 }
 
