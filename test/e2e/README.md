@@ -58,6 +58,28 @@ d2k's behaviour changes, then regenerate the document.
 Re-run `setup.sh` after code changes; it rebuilds the image and restarts both
 instances. Set `CLUSTER` to use a kind cluster with another name.
 
+## Upgrades and installs
+
+These build their own images, install d2k into their own namespaces of the
+kind cluster (`CLUSTER`, default `d2k`), check it as a Docker client would,
+and remove what they created. They need no `setup.sh`.
+
+```sh
+test/e2e/upgrade-1.2.sh                          # 1.2.3 -> working tree, Docker host mode
+SWARM=true test/e2e/upgrade-1.2.sh               # 1.2.3 in Swarm mode, kept
+SWARM=true AFTER=false test/e2e/upgrade-1.2.sh   # Swarm install upgraded to host mode
+FROM=<git ref> test/e2e/upgrade.sh               # an earlier mTLS build -> working tree
+test/e2e/install-lifecycle.sh                    # README install twice, uninstall one
+```
+
+`upgrade-1.2.sh` follows README's "Upgrading from d2k 1.2.x": the new
+manifest is applied with no `d2k-tls` Secret, so d2k creates its
+certificates, and the checks use the client certificate fetched from
+`d2k-client`. `upgrade.sh` keeps the admin's own certificates and checks that
+containers, volumes, networks and compose projects come through unchanged.
+`install-lifecycle.sh` checks that removing one install leaves the shared
+admission policy, and the other install, working.
+
 ## Results
 
 - `PASS` / `FAIL`: the case's expectation held or did not.
