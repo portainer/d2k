@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,6 +70,11 @@ type KubernetesDockerAdapter struct {
 	// ID (Attaching).
 	attaches   map[string]int
 	attachesMu sync.Mutex
+
+	// startWait bounds how long docker start waits for the container to run,
+	// or for its image pull to fail for good (waitForStart). Zero skips the
+	// wait: NewWithClient's adapter, whose fake clientset runs no pods.
+	startWait time.Duration
 
 	// statsHost caches HostResources for docker stats (statsHostResources).
 	statsHost   hostResources
