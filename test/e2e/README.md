@@ -70,6 +70,7 @@ SWARM=true test/e2e/upgrade-1.2.sh               # 1.2.3 in Swarm mode, kept
 SWARM=true AFTER=false test/e2e/upgrade-1.2.sh   # Swarm install upgraded to host mode
 FROM=<git ref> test/e2e/upgrade.sh               # an earlier mTLS build -> working tree
 test/e2e/install-lifecycle.sh                    # README install twice, uninstall one
+test/e2e/portainer.sh                            # d2k driven through Portainer CE
 ```
 
 `upgrade-1.2.sh` follows README's "Upgrading from d2k 1.2.x": the new
@@ -78,7 +79,12 @@ certificates, and the checks use the client certificate fetched from
 `d2k-client`. `upgrade.sh` keeps the admin's own certificates and checks that
 containers, volumes, networks and compose projects come through unchanged.
 `install-lifecycle.sh` checks that removing one install leaves the shared
-admission policy, and the other install, working.
+admission policy, and the other install, working. `portainer.sh` runs
+Portainer CE (`PORTAINER_IMAGE`, default `portainer/portainer-ce:lts`) next to
+d2k, adds d2k as a "Docker API" environment over mutual TLS at its in-cluster
+address, and makes the calls Portainer's UI makes: containers, volumes,
+networks and a compose stack. Calls d2k doesn't support (kill, pause, top,
+system df) must answer 501; Portainer hides them for d2k.
 
 ## Results
 
