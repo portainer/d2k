@@ -949,7 +949,7 @@ func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummar
 	s := containerState(d, pods, now)
 	state, status := string(s.Status), containerStatus(s, now)
 
-	var ports []container.PortSummary
+	ports := []container.PortSummary{} // the daemon lists [], never null
 	for _, m := range publishedPorts(d) {
 		ports = append(ports, container.PortSummary{
 			IP:          netip.IPv4Unspecified(),
