@@ -75,7 +75,10 @@ func (h *Handler) Version(w http.ResponseWriter, r *http.Request) {
 // so multi-node clusters are represented correctly.
 func (h *Handler) swarmInfo(ctx context.Context) map[string]any {
 	if !h.swarmMode {
+		// As the daemon outside Swarm mode: an empty NodeID, which clients
+		// check to tell a Swarm node.
 		return map[string]any{
+			"NodeID":         "",
 			"LocalNodeState": "inactive",
 		}
 	}

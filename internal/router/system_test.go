@@ -66,6 +66,18 @@ func TestInfoDescribesTheNamespace(t *testing.T) {
 	}
 }
 
+// TestInfoSwarmOutsideSwarmMode checks /info outside Swarm mode reports an
+// empty NodeID, as the daemon does: clients such as Portainer read a missing
+// NodeID as a Swarm node.
+func TestInfoSwarmOutsideSwarmMode(t *testing.T) {
+	body := info(t)
+	swarm, _ := body["Swarm"].(map[string]any)
+	nodeID, ok := swarm["NodeID"]
+	if !ok || nodeID != "" || swarm["LocalNodeState"] != "inactive" {
+		t.Errorf("Swarm = %v, want NodeID \"\" and LocalNodeState inactive", body["Swarm"])
+	}
+}
+
 func TestInfoCountsContainers(t *testing.T) {
 	h, _ := newTestRouter()
 	for _, name := range []string{"a", "b"} {
