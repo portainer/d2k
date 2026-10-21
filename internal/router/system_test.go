@@ -92,8 +92,13 @@ func TestPingAndVersion(t *testing.T) {
 	if version["GoVersion"] == nil || version["GoVersion"] == "" {
 		t.Errorf("version = %v, want GoVersion", version)
 	}
+	// Portainer tells d2k from a Docker engine by the d2k component.
 	components, _ := version["Components"].([]any)
-	if len(components) != 1 || components[0].(map[string]any)["Name"] != "Engine" {
-		t.Errorf("version Components = %v, want the Engine component", version["Components"])
+	var names []any
+	for _, c := range components {
+		names = append(names, c.(map[string]any)["Name"])
+	}
+	if len(names) != 2 || names[0] != "Engine" || names[1] != "d2k" {
+		t.Errorf("version Components = %v, want the Engine and d2k components", version["Components"])
 	}
 }

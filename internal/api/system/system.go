@@ -55,7 +55,12 @@ func (h *Handler) Version(w http.ResponseWriter, r *http.Request) {
 	body := map[string]any{
 		"Version": types.Version,
 		// Recent Docker CLIs read the server details from its components.
-		"Components": []map[string]any{{"Name": "Engine", "Version": types.Version, "Details": details}},
+		// The d2k component lets clients such as Portainer tell d2k apart
+		// from a Docker engine.
+		"Components": []map[string]any{
+			{"Name": "Engine", "Version": types.Version, "Details": details},
+			{"Name": "d2k", "Version": types.Version},
+		},
 	}
 	for k, v := range details {
 		body[k] = v
