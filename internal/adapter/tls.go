@@ -28,8 +28,12 @@ type TLSMaterial struct {
 }
 
 // annotationGeneratedTLS marks the d2k-tls Secret d2k created itself, as
-// opposed to an admin's own.
-const annotationGeneratedTLS = types.LabelPrefix + "/generated"
+// opposed to an admin's own. annotationClientPending marks one whose
+// d2k-client hasn't been written yet: it is removed once it has.
+const (
+	annotationGeneratedTLS  = types.LabelPrefix + "/generated"
+	annotationClientPending = types.LabelPrefix + "/client-pending"
+)
 
 // EnsureTLS returns the mTLS material in the d2k-tls Secret, and reports
 // whether it created it. Without that Secret it creates a CA, a server
@@ -41,19 +45,16 @@ const annotationGeneratedTLS = types.LabelPrefix + "/generated"
 //
 // A start that created d2k-tls but not d2k-client leaves no way to issue the
 // client certificate, as the CA key is gone: the next start creates both
-// anew, when d2k-tls is d2k's own.
+// anew. It knows that start by d2k-tls's annotationClientPending, not by
+// d2k-client being missing: an admin may delete d2k-client once the files
+// are copied out, and the certificates clients have must keep working.
 func (a *KubernetesDockerAdapter) EnsureTLS(ctx context.Context, sans []string) (TLSMaterial, bool, error) {
 	secrets := a.client.CoreV1().Secrets(a.namespace)
 	existing, err := secrets.Get(ctx, TLSSecretName, metav1GetOptions())
 	switch {
 	case err == nil:
-		if existing.Annotations[annotationGeneratedTLS] != "true" {
+		if existing.Annotations[annotationGeneratedTLS] != "true" || existing.Annotations[annotationClientPending] != "true" {
 			return tlsMaterial(existing), false, nil
-		}
-		if _, err := secrets.Get(ctx, ClientTLSSecretName, metav1GetOptions()); err == nil {
-			return tlsMaterial(existing), false, nil
-		} else if !errors.IsNotFound(err) {
-			return TLSMaterial{}, false, fmt.Errorf("unable to read Secret %s: %w", ClientTLSSecretName, err)
 		}
 	case errors.IsNotFound(err):
 		existing = nil
@@ -74,7 +75,7 @@ func (a *KubernetesDockerAdapter) EnsureTLS(ctx context.Context, sans []string) 
 	server := tlsSecret(TLSSecretName, map[string][]byte{
 		"tls.crt": files["server/tls.crt"], "tls.key": files["server/tls.key"], "ca.crt": files["server/ca.crt"],
 	})
-	server.Annotations = map[string]string{annotationGeneratedTLS: "true"}
+	server.Annotations = map[string]string{annotationGeneratedTLS: "true", annotationClientPending: "true"}
 
 	var stored *corev1.Secret
 	if existing == nil {
@@ -106,6 +107,10 @@ func (a *KubernetesDockerAdapter) EnsureTLS(ctx context.Context, sans []string) 
 		}
 	} else if err != nil {
 		return TLSMaterial{}, false, fmt.Errorf("unable to create Secret %s: %w", ClientTLSSecretName, err)
+	}
+	delete(stored.Annotations, annotationClientPending)
+	if stored, err = secrets.Update(ctx, stored, metav1.UpdateOptions{}); err != nil {
+		return TLSMaterial{}, false, fmt.Errorf("unable to update Secret %s: %w", TLSSecretName, err)
 	}
 	return tlsMaterial(stored), true, nil
 }

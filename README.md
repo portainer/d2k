@@ -262,7 +262,7 @@ kubectl -n d2k get secret d2k-client -o jsonpath='{.data.cert\.pem}' | base64 -d
 kubectl -n d2k get secret d2k-client -o jsonpath='{.data.key\.pem}' | base64 -d > d2k-client/key.pem
 ```
 
-On its first start without a `d2k-tls` Secret, d2k creates its certificates: a CA, a server certificate for `D2K_TLS_SANS` plus the Service's in-cluster names (`d2k.<namespace>.svc...`) and `localhost`, and a client certificate. It stores the server's in `d2k-tls` and the client's in `d2k-client`, and keeps using them on every later start. It does not keep the CA key, so nothing in the cluster can issue further client certificates. To change the names, delete both Secrets, restart d2k, and give clients the new `d2k-client` files.
+On its first start without a `d2k-tls` Secret, d2k creates its certificates: a CA, a server certificate for `D2K_TLS_SANS` plus the Service's in-cluster names (`d2k.<namespace>.svc...`) and `localhost`, and a client certificate. It stores the server's in `d2k-tls` and the client's in `d2k-client`, and keeps using them on every later start, even once `d2k-client` is deleted (you may delete it after copying the files out). Only a first start that failed before writing `d2k-client` makes the next start create them anew. It does not keep the CA key, so nothing in the cluster can issue further client certificates. To change the names, delete both Secrets, restart d2k, and give clients the new `d2k-client` files.
 
 To use your own CA instead (to keep the CA key, or to issue several client certificates), create the `d2k-tls` Secret before applying the manifest; d2k then uses it and creates no certificates:
 

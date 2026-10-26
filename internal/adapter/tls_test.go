@@ -139,3 +139,26 @@ func TestEnsureTLSRecoversAFailedFirstStart(t *testing.T) {
 		t.Errorf("third EnsureTLS = created %v, %v: want the stored material", created, err)
 	}
 }
+
+// An admin who copies the client certificate out and then deletes d2k-client
+// keeps the certificates: only a first start that never finished writing
+// d2k-client creates them anew, so existing clients keep connecting.
+func TestEnsureTLSKeepsTheCertificatesWhenD2KClientIsDeleted(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	got, created, err := a.EnsureTLS(ctx, nil)
+	if err != nil || !created {
+		t.Fatalf("EnsureTLS = created %v, %v, want the Secrets created", created, err)
+	}
+	if err := client.CoreV1().Secrets(testNamespace).Delete(ctx, ClientTLSSecretName, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	again, created, err := a.EnsureTLS(ctx, nil)
+	if err != nil || created || !bytes.Equal(again.CA, got.CA) || !bytes.Equal(again.Cert, got.Cert) {
+		t.Errorf("EnsureTLS after d2k-client was deleted = created %v, %v: want the stored material, unchanged", created, err)
+	}
+	if _, err := client.CoreV1().Secrets(testNamespace).Get(ctx, ClientTLSSecretName, metav1.GetOptions{}); err == nil {
+		t.Error("d2k wrote a d2k-client again, which no longer matches the CA clients have")
+	}
+}
