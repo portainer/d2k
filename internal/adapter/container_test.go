@@ -1440,38 +1440,46 @@ func TestContainerNamesFollowDocker(t *testing.T) {
 // docker stop -t and docker restart -t set how long the container has to
 // stop before it is killed: its pods are deleted with that grace period.
 func TestStopContainerTimeout(t *testing.T) {
-	for _, policy := range []string{"always", "no"} {
-		t.Run("restart "+policy, func(t *testing.T) {
-			a, client := newTestAdapter(t)
-			ctx := context.Background()
-			if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "web", Image: "nginx", RestartPolicy: policy}); err != nil {
-				t.Fatal(err)
-			}
-			d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			pod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "web-1", Namespace: testNamespace, Labels: d.Spec.Template.Labels},
-				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
-			}
-			if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
-				t.Fatal(err)
-			}
-
-			zero := 0
-			if err := a.StopContainer(ctx, "web", &zero); err != nil {
-				t.Fatalf("StopContainer: %v", err)
-			}
-			var grace *int64
-			for _, action := range client.Actions() {
-				if del, ok := action.(k8stesting.DeleteAction); ok && action.GetResource().Resource == "pods" && del.GetName() == "web-1" {
-					grace = del.GetDeleteOptions().GracePeriodSeconds
+	// -t 0 gives 1 s, not 0: a grace period of 0 removes the pod from the API
+	// before the kubelet has killed it, releasing its volumes while it runs.
+	for _, tc := range []struct{ timeout, want int }{{0, 1}, {5, 5}} {
+		for _, policy := range []string{"always", "no"} {
+			t.Run(fmt.Sprintf("restart %s, -t %d", policy, tc.timeout), func(t *testing.T) {
+				a, client := newTestAdapter(t)
+				ctx := context.Background()
+				if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "web", Image: "nginx", RestartPolicy: policy}); err != nil {
+					t.Fatal(err)
 				}
-			}
-			if grace == nil || *grace != 0 {
-				t.Errorf("pod deleted with grace period %v, want 0 from -t 0", grace)
-			}
-		})
+				d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				pod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Name: "web-1", Namespace: testNamespace, Labels: d.Spec.Template.Labels},
+					Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+				}
+				if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+
+				timeout := tc.timeout
+				if err := a.StopContainer(ctx, "web", &timeout); err != nil {
+					t.Fatalf("StopContainer: %v", err)
+				}
+				var grace *int64
+				for _, action := range client.Actions() {
+					if del, ok := action.(k8stesting.DeleteAction); ok && action.GetResource().Resource == "pods" && del.GetName() == "web-1" {
+						grace = del.GetDeleteOptions().GracePeriodSeconds
+					}
+				}
+				if grace == nil || *grace != int64(tc.want) {
+					got := "none"
+					if grace != nil {
+						got = fmt.Sprint(*grace)
+					}
+					t.Errorf("pod deleted with grace period %s, want %d from -t %d", got, tc.want, tc.timeout)
+				}
+			})
+		}
 	}
 }

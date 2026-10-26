@@ -125,7 +125,7 @@ func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deploym
 		grace = *g
 	}
 	if timeout != nil && *timeout >= 0 {
-		grace = int64(*timeout)
+		grace = stopGracePeriod(*timeout)
 	}
 	exitCode, log := "", ""
 	for _, p := range list.Items {

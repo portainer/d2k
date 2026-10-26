@@ -397,6 +397,7 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 // docker stop -t, is how many seconds the container has to stop before it
 // is killed: its pods' grace period. Without it, or at -1 (Docker's "wait
 // for ever", which Kubernetes has no equivalent of), the pods keep theirs.
+// -t 0 gives 1 s, as rm -f does: see stopGracePeriod.
 func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string, timeout *int) error {
 	resolved, err := a.resolveDeploymentName(ctx, name)
 	if err != nil {
@@ -421,7 +422,7 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 	if timeout != nil && *timeout >= 0 {
 		// The ReplicaSet deletes the pods with their own grace period: a
 		// shorter one, given on a delete of its own, takes over.
-		grace = int64(*timeout)
+		grace = stopGracePeriod(*timeout)
 		pods := a.client.CoreV1().Pods(a.namespace)
 		if list, err := pods.List(ctx, podsOf(resolved)); err == nil {
 			for _, p := range list.Items {
@@ -599,6 +600,15 @@ func (a *KubernetesDockerAdapter) killRunOncePods(ctx context.Context, name stri
 			_ = pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
 		}
 	}
+}
+
+// stopGracePeriod is the grace period docker stop -t timeout gives a
+// container's pods: timeout seconds, but at least 1. A grace period of 0 is
+// a force delete: it removes the pod from the API before the kubelet has
+// killed its container, so a replacement could mount the same volumes while
+// it still runs. Clients see no difference.
+func stopGracePeriod(timeout int) int64 {
+	return max(int64(timeout), 1)
 }
 
 // killPods cuts the grace period of a removed container's pods to 1 s, as
