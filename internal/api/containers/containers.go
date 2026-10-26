@@ -143,6 +143,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		ID        string                  `json:"Id"`
 		Names     []string                `json:"Names"`
 		Image     string                  `json:"Image"`
+		ImageID   string                  `json:"ImageID"`
 		Status    string                  `json:"Status"`
 		State     string                  `json:"State"`
 		Created   int64                   `json:"Created"`
@@ -162,6 +163,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 			ID:        c.ID,
 			Names:     c.Names,
 			Image:     c.Image,
+			ImageID:   c.ImageID,
 			Status:    c.Status,
 			State:     c.State,
 			Created:   c.Created,

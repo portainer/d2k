@@ -7,12 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
@@ -100,9 +102,12 @@ type TmpfsMount struct {
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
 type ContainerSummary struct {
-	ID        string
-	Names     []string
-	Image     string
+	ID    string
+	Names []string
+	Image string
+	// ImageID is the ID docker images lists the container's image by, its
+	// digest, once a pod runs it.
+	ImageID   string
 	Status    string
 	State     string
 	Created   int64
@@ -963,6 +968,7 @@ func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummar
 		ID:      containerID(d.UID),
 		Names:   []string{"/" + dockerName(d)},
 		Image:   d.Annotations[types.AnnotationImageRef],
+		ImageID: runningImageID(pods),
 		Status:  status,
 		State:   state,
 		Created: d.CreationTimestamp.Unix(),
@@ -972,6 +978,24 @@ func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummar
 		Networks: networkIDs(d),
 		Mounts:   containerMounts(d),
 	}
+}
+
+// runningImageID returns the ID of the image a container's pods run: the
+// digest a pod reports, as docker images lists it, or "" before a pod runs
+// it.
+func runningImageID(pods []corev1.Pod) string {
+	for _, p := range pods {
+		for _, status := range p.Status.ContainerStatuses {
+			if digest := digestName(status.ImageID); digest != "" {
+				if named, err := reference.ParseNormalizedNamed(digest); err == nil {
+					if canonical, ok := named.(reference.Canonical); ok {
+						return canonical.Digest().String()
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // publishedPorts returns the container's explicit port bindings, as
@@ -1220,10 +1244,37 @@ func recordedName(m metav1.ObjectMeta) string {
 }
 
 // dockerLabels returns the Docker labels exactly as the container was created
-// with, falling back to the Deployment labels for older containers.
+// with, falling back to the Deployment labels for older containers. The
+// container of a Swarm service also carries the labels Docker gives a task's
+// container: its service, and its stack. Clients such as Portainer find the
+// service, and the access to it, of a container by them.
 func dockerLabels(d appsv1.Deployment) map[string]string {
-	return recordedLabels(d.ObjectMeta)
+	labels := recordedLabels(d.ObjectMeta)
+
+	service := d.Labels[types.LabelSwarmService]
+	if service == "" {
+		return labels
+	}
+
+	labels = maps.Clone(labels)
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[labelSwarmServiceID] = serviceSwarmID(d)
+	labels[labelSwarmServiceName] = service
+	if stack := d.Labels[types.LabelSwarmStack]; stack != "" {
+		labels[labelStackNamespace] = stack
+	}
+
+	return labels
 }
+
+// The labels Docker gives the container of a Swarm task.
+const (
+	labelSwarmServiceID   = "com.docker.swarm.service.id"
+	labelSwarmServiceName = "com.docker.swarm.service.name"
+	labelStackNamespace   = "com.docker.stack.namespace"
+)
 
 // recordedLabels returns the Docker labels recorded on an object, falling
 // back to its Kubernetes labels for objects created before they were recorded.

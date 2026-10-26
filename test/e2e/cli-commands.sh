@@ -229,8 +229,11 @@ network_cases() {
 image_cases() {
   echo "== image =="
   check "pull is acknowledged, not performed" bash -c 'docker pull nginx:alpine 2>&1 | grep -q "the kubelet pulls it"'
-  check "images lists none" bash -c '[ -z "$(docker images -q)" ]'
-  check "image inspect reports the reference only" bash -c '[ "$(docker image inspect -f "{{.RepoTags}}" nginx:alpine)" = "[nginx:alpine]" ]'
+  check "images lists the images its containers use" bash -c 'docker run -d --name e2e-images nginx:alpine >/dev/null &&
+    for _ in $(seq 60); do [ "$(docker inspect -f {{.State.Status}} e2e-images)" = running ] && break; sleep 2; done &&
+    for _ in $(seq 15); do docker images --format "{{.Repository}}:{{.Tag}}" | grep -qx nginx:alpine && break; sleep 2; done &&
+    docker images --format "{{.Repository}}:{{.Tag}}" | grep -qx nginx:alpine; rc=$?; docker rm -f e2e-images >/dev/null 2>&1; exit $rc'
+  check "image inspect reports an unused reference only" bash -c '[ "$(docker image inspect -f "{{.RepoTags}}" e2e/never-used:1)" = "[e2e/never-used:1]" ]'
   known "README: rmi answers not supported" "rmi removes an image" bash -c 'docker rmi nginx:alpine 2>&1 | grep -qv "not supported by d2k"'
   known "README: image prune answers 501" "image prune" bash -c 'docker image prune -f 2>&1 | grep -qv "not supported by d2k"'
   known "README: tag answers 501" "tag creates an alias" bash -c 'docker tag nginx:alpine e2e/nginx:test 2>&1 | grep -qv "not supported by d2k"'

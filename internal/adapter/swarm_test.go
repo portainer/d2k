@@ -250,3 +250,76 @@ func TestSwarmCreateServiceConfigMustBeManaged(t *testing.T) {
 		t.Fatalf("SwarmCreateService() with managed config error: %v", err)
 	}
 }
+
+// The container of a Swarm service carries the labels Docker gives a task's
+// container, and its tasks name it: clients such as Portainer find the
+// service, and the access to it, of a container by them.
+func TestSwarmServiceContainerIsTheTasksContainer(t *testing.T) {
+	ctx := context.Background()
+	a, client := newTestAdapter(t)
+
+	created, err := a.SwarmCreateService(ctx, strings.NewReader(`{"Name":"web","Labels":{"com.docker.stack.namespace":"shop"},"TaskTemplate":{"ContainerSpec":{"Image":"nginx:1.27"}}}`))
+	if err != nil {
+		t.Fatalf("SwarmCreateService() error: %v", err)
+	}
+	serviceID := created["ID"].(string)
+
+	containers, err := a.ListContainers(ctx, true)
+	if err != nil || len(containers) != 1 {
+		t.Fatalf("ListContainers() = %v, %v; want the service's container", containers, err)
+	}
+	labels := containers[0].Labels
+	for key, want := range map[string]string{
+		"com.docker.swarm.service.id":   serviceID,
+		"com.docker.swarm.service.name": "web",
+		"com.docker.stack.namespace":    "shop",
+	} {
+		if labels[key] != want {
+			t.Errorf("label %s = %q, want %q", key, labels[key], want)
+		}
+	}
+
+	inspected, err := a.InspectContainer(ctx, "web")
+	if err != nil {
+		t.Fatalf("InspectContainer() error: %v", err)
+	}
+	if got := inspected.Config.Labels["com.docker.swarm.service.id"]; got != serviceID {
+		t.Errorf("inspected service ID label = %q, want %q", got, serviceID)
+	}
+
+	// A running pod of the service: its task names the service's container.
+	d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-1", Namespace: testNamespace, UID: "dddddddd-0000-0000-0000-000000000000", Labels: d.Spec.Template.Labels},
+		Status: corev1.PodStatus{
+			Phase:             corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "web", ContainerID: "containerd://0123456789abcdef"}},
+		},
+	}
+	if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	tasks, err := a.SwarmListTasks(ctx, "", "")
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("SwarmListTasks() = %v, %v; want one task", tasks, err)
+	}
+	status := tasks[0]["Status"].(map[string]any)["ContainerStatus"].(map[string]any)
+	if status["ContainerID"] != containers[0].ID {
+		t.Errorf("task container ID = %v, want the service's container %s", status["ContainerID"], containers[0].ID)
+	}
+
+	task, err := a.SwarmInspectTask(ctx, tasks[0]["ID"].(string))
+	if err != nil {
+		t.Fatalf("SwarmInspectTask() error: %v", err)
+	}
+	if task["ServiceID"] != serviceID {
+		t.Errorf("inspected task service = %v, want %s", task["ServiceID"], serviceID)
+	}
+	if got := task["Status"].(map[string]any)["ContainerStatus"].(map[string]any)["ContainerID"]; got != containers[0].ID {
+		t.Errorf("inspected task container ID = %v, want %s", got, containers[0].ID)
+	}
+}
