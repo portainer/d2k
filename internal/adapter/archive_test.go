@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -182,5 +184,38 @@ func TestCopyToContainerLeavesSwarmSecrets(t *testing.T) {
 	s, _ := client.CoreV1().Secrets(testNamespace).Get(ctx, "db-files", metav1.GetOptions{})
 	if len(s.OwnerReferences) != 0 || len(s.Data) != 1 || string(s.Data["db-files"]) != "swarm secret" {
 		t.Errorf("Secret db-files = owners %+v, data %v, want it unchanged: removing the container would delete it", s.OwnerReferences, s.Data)
+	}
+}
+
+// An archive's files are refused once they hold more than d2k can store in
+// total, as they are read: a request can't make d2k hold an archive's whole
+// content, however many entries it has.
+func TestReadArchiveStopsAtTheTotalLimit(t *testing.T) {
+	r, w := io.Pipe()
+	written := make(chan int, 1)
+	go func() {
+		tw := tar.NewWriter(w)
+		n := 0
+		defer func() { written <- n }()
+		for ; n < 64; n++ {
+			content := bytes.Repeat([]byte("x"), 512<<10)
+			if tw.WriteHeader(&tar.Header{Name: fmt.Sprintf("/f%d", n), Mode: 0o644, Size: int64(len(content)), Typeflag: tar.TypeReg}) != nil {
+				return
+			}
+			if _, err := tw.Write(content); err != nil {
+				return
+			}
+		}
+		_ = tw.Close()
+		_ = w.Close()
+	}()
+
+	_, err := readArchive("/", r)
+	_ = r.CloseWithError(io.ErrClosedPipe)
+	if !errdefs.IsInvalidParameter(err) {
+		t.Fatalf("readArchive() error = %v, want invalid parameter", err)
+	}
+	if n := <-written; n > 4 {
+		t.Errorf("read %d entries of 512 KiB before refusing, want it to stop past 1 MiB", n)
 	}
 }

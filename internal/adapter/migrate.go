@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -25,13 +26,16 @@ const migratedConfigHash = "d2k-migrated"
 // migrate, once. Volumes need no migration: their name falls back to the
 // PVC's and their labels to legacyDockerLabels, and d2k may not patch PVCs. Objects of Swarm services are
 // left as they are; in Docker host mode, finding them is logged, as the
-// install probably ran Swarm mode before.
+// install probably ran Swarm mode before. A container that fails to migrate
+// doesn't stop the others: the returned error joins every failure, and the
+// next start retries them.
 func (a *KubernetesDockerAdapter) MigrateLegacyObjects(ctx context.Context, swarmMode bool) error {
 	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
 	if err != nil {
 		return fmt.Errorf("unable to list deployments: %w", err)
 	}
 	swarmObjects := 0
+	var failures []error
 	for _, d := range deployments.Items {
 		if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
 			swarmObjects++
@@ -47,7 +51,8 @@ func (a *KubernetesDockerAdapter) MigrateLegacyObjects(ctx context.Context, swar
 		}
 		updates, err := recordedNameAndLabels(name, labels)
 		if err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("unable to migrate container %q: %w", name, err))
+			continue
 		}
 		if _, ok := d.Annotations[types.AnnotationStartedAt]; !ok {
 			updates[types.AnnotationStartedAt] = ptr(d.CreationTimestamp.UTC().Format(time.RFC3339Nano))
@@ -59,7 +64,8 @@ func (a *KubernetesDockerAdapter) MigrateLegacyObjects(ctx context.Context, swar
 			}
 		}
 		if err := a.annotate(ctx, d.Name, updates); err != nil {
-			return fmt.Errorf("unable to migrate container %q: %w", name, err)
+			failures = append(failures, fmt.Errorf("unable to migrate container %q: %w", name, err))
+			continue
 		}
 		log.Info().Str("context", "Migration").Str("container", name).Msg("Recorded the Docker name and labels of a container an earlier d2k created")
 	}
@@ -67,7 +73,7 @@ func (a *KubernetesDockerAdapter) MigrateLegacyObjects(ctx context.Context, swar
 		log.Warn().Str("context", "Migration").Int("deployments", swarmObjects).
 			Msg("This namespace has Swarm services, which Docker host mode does not list: set D2K_SWARM_MODE=true if this install ran Swarm mode")
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 // legacyDockerName is the Docker name an earlier release kept: the workload

@@ -28,6 +28,8 @@ import (
 // the size limit of the Kubernetes Secret that stores them.
 const maxCopiedBytes = 1 << 20
 
+var errCopiedTooLarge = errdefs.InvalidParameter(fmt.Errorf("files copied into a container are limited to 1 MiB in total by d2k (the size of a Kubernetes Secret)"))
+
 // copiedFilesVolume is the pod volume of a container's copied files.
 const copiedFilesVolume = "copied-files"
 
@@ -111,6 +113,9 @@ func readArchive(dir string, archive io.Reader) ([]copiedFile, error) {
 
 	dir = path.Clean("/" + dir)
 	var files []copiedFile
+	// The files are held in memory until they are stored: they are refused
+	// as soon as they hold more than d2k can store, as they are read.
+	total := 0
 	tr := tar.NewReader(archive)
 	for {
 		h, err := tr.Next()
@@ -131,9 +136,12 @@ func readArchive(dir string, archive io.Reader) ([]copiedFile, error) {
 		default:
 			return nil, errdefs.InvalidParameter(fmt.Errorf("%q is not a regular file: d2k copies regular files only", h.Name))
 		}
-		content, err := io.ReadAll(io.LimitReader(tr, maxCopiedBytes+1))
+		content, err := io.ReadAll(io.LimitReader(tr, int64(maxCopiedBytes-total+1)))
 		if err != nil {
 			return nil, errdefs.InvalidParameter(fmt.Errorf("invalid archive: %w", err))
+		}
+		if total += len(content); total > maxCopiedBytes {
+			return nil, errCopiedTooLarge
 		}
 		files = append(files, copiedFile{target: target, mode: int32(h.Mode & 0o777), content: content})
 	}
@@ -176,7 +184,7 @@ func (a *KubernetesDockerAdapter) storeCopiedFiles(ctx context.Context, d *appsv
 			size += len(v)
 		}
 		if size > maxCopiedBytes {
-			return errdefs.InvalidParameter(fmt.Errorf("files copied into a container are limited to 1 MiB in total by d2k (the size of a Kubernetes Secret)"))
+			return errCopiedTooLarge
 		}
 		if create {
 			_, err = secrets.Create(ctx, secret, metav1.CreateOptions{})

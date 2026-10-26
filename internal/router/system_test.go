@@ -80,7 +80,7 @@ func TestInfoSwarmOutsideSwarmMode(t *testing.T) {
 
 func TestInfoCountsContainers(t *testing.T) {
 	h, _ := newTestRouter()
-	for _, name := range []string{"a", "b"} {
+	for _, name := range []string{"web", "db"} {
 		if rec := do(t, h, "POST", "/containers/create?name="+name, `{"Image":"nginx"}`); rec.Code != http.StatusCreated {
 			t.Fatalf("create %s = %d", name, rec.Code)
 		}

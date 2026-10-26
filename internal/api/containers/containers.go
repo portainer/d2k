@@ -354,7 +354,12 @@ func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 // Stop handles POST /containers/{id}/stop.
 func (h *Handler) Stop(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/stop")
-	if err := h.adapter.StopContainer(r.Context(), name); err != nil {
+	timeout, err := timeoutParam(r)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	if err := h.adapter.StopContainer(r.Context(), name, timeout); err != nil {
 		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("StopContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
@@ -365,7 +370,12 @@ func (h *Handler) Stop(w http.ResponseWriter, r *http.Request) {
 // Restart handles POST /containers/{id}/restart.
 func (h *Handler) Restart(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/restart")
-	if err := h.adapter.RestartContainer(r.Context(), name); err != nil {
+	timeout, err := timeoutParam(r)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	if err := h.adapter.RestartContainer(r.Context(), name, timeout); err != nil {
 		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("RestartContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
@@ -503,6 +513,21 @@ func copyLogLines(src io.Reader, until time.Time, keepTimestamps bool, emit func
 
 func boolParam(v string) bool { return v == "1" || v == "true" }
 
+// timeoutParam reads the t parameter of stop and restart: the seconds the
+// container has to stop before it is killed, nil when not given. Their signal
+// parameter has no Kubernetes equivalent: the pods get SIGTERM.
+func timeoutParam(r *http.Request) (*int, error) {
+	v := r.URL.Query().Get("t")
+	if v == "" {
+		return nil, nil
+	}
+	t, err := strconv.Atoi(v)
+	if err != nil {
+		return nil, errdefs.InvalidParameter(fmt.Errorf("invalid timeout %q: %w", v, err))
+	}
+	return &t, nil
+}
+
 // containerName extracts the container name from a path like /containers/<name>/start
 // by stripping the /containers/ prefix and the given action suffix.
 func containerName(path, suffix string) string {
@@ -525,16 +550,25 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The first sample is read before answering: a failure to read it is
+	// the request's error, not a 200 without a body.
+	u, err := h.adapter.ContainerUsage(r.Context(), ctr.ID)
+	if err != nil {
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	enc := json.NewEncoder(w)
 	var clock cpuClock
-	for {
-		u, err := h.adapter.ContainerUsage(r.Context(), ctr.ID)
-		if err != nil {
-			log.Warn().Str("context", "ContainersAPI").Str("name", name).Err(err).Msg("Unable to read container usage")
-			return
+	for first := true; ; first = false {
+		if !first {
+			if u, err = h.adapter.ContainerUsage(r.Context(), ctr.ID); err != nil {
+				log.Warn().Str("context", "ContainersAPI").Str("name", name).Err(err).Msg("Unable to read container usage")
+				return
+			}
 		}
 		s := clock.sample(u.CPUNanoCores, u.OnlineCPUs, time.Now())
 		s.ID, s.Name, s.OSType = ctr.ID, ctr.Name, "linux"

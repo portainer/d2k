@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"maps"
 	"slices"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func parseCert(t *testing.T, data []byte) *x509.Certificate {
@@ -89,5 +92,50 @@ func TestEnsureTLSUsesAnExistingSecret(t *testing.T) {
 	}
 	if _, err := client.CoreV1().Secrets(testNamespace).Get(context.Background(), ClientTLSSecretName, metav1.GetOptions{}); err == nil {
 		t.Error("d2k created a client certificate beside the admin's own")
+	}
+}
+
+// A start that created d2k-tls but failed to write d2k-client doesn't leave
+// d2k without a client certificate for good: the next start sees d2k's own
+// d2k-tls without its d2k-client, and creates both anew.
+func TestEnsureTLSRecoversAFailedFirstStart(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	failed := false
+	client.PrependReactor("create", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		s := action.(k8stesting.CreateAction).GetObject().(*corev1.Secret)
+		if s.Name == ClientTLSSecretName && !failed {
+			failed = true
+			return true, nil, fmt.Errorf("the API server is unavailable")
+		}
+		return false, nil, nil
+	})
+
+	if _, _, err := a.EnsureTLS(ctx, nil); err == nil {
+		t.Fatal("EnsureTLS succeeded although d2k-client couldn't be written")
+	}
+
+	got, created, err := a.EnsureTLS(ctx, nil)
+	if err != nil || !created {
+		t.Fatalf("second EnsureTLS = created %v, %v: want the certificates created anew", created, err)
+	}
+	clientSecret, err := client.CoreV1().Secrets(testNamespace).Get(ctx, ClientTLSSecretName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("no d2k-client after the second start: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM(got.CA)
+	if _, err := parseCert(t, clientSecret.Data["cert.pem"]).Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		t.Errorf("client certificate doesn't chain to the CA d2k serves: %v", err)
+	}
+	server, _ := client.CoreV1().Secrets(testNamespace).Get(ctx, TLSSecretName, metav1.GetOptions{})
+	if !bytes.Equal(server.Data["ca.crt"], got.CA) {
+		t.Error("d2k-tls holds another CA than the one EnsureTLS returned")
+	}
+
+	// With both Secrets there, later starts use them as they are.
+	again, created, err := a.EnsureTLS(ctx, nil)
+	if err != nil || created || !bytes.Equal(again.CA, got.CA) {
+		t.Errorf("third EnsureTLS = created %v, %v: want the stored material", created, err)
 	}
 }

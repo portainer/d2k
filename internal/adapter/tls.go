@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/portainer/d2k/internal/pki"
+	"github.com/portainer/d2k/internal/types"
 )
 
 // The Secrets that hold d2k's mTLS material: the server certificate, key
@@ -26,6 +27,10 @@ type TLSMaterial struct {
 	Cert, Key, CA []byte
 }
 
+// annotationGeneratedTLS marks the d2k-tls Secret d2k created itself, as
+// opposed to an admin's own.
+const annotationGeneratedTLS = types.LabelPrefix + "/generated"
+
 // EnsureTLS returns the mTLS material in the d2k-tls Secret, and reports
 // whether it created it. Without that Secret it creates a CA, a server
 // certificate for sans and the d2k Service's in-cluster names, and a
@@ -33,11 +38,26 @@ type TLSMaterial struct {
 // (the files DOCKER_CERT_PATH needs). The CA key is not kept: to change
 // the names, delete both Secrets and restart d2k, then give clients the new
 // client certificate. An admin's own d2k-tls Secret is used as it is.
+//
+// A start that created d2k-tls but not d2k-client leaves no way to issue the
+// client certificate, as the CA key is gone: the next start creates both
+// anew, when d2k-tls is d2k's own.
 func (a *KubernetesDockerAdapter) EnsureTLS(ctx context.Context, sans []string) (TLSMaterial, bool, error) {
 	secrets := a.client.CoreV1().Secrets(a.namespace)
-	if s, err := secrets.Get(ctx, TLSSecretName, metav1GetOptions()); err == nil {
-		return tlsMaterial(s), false, nil
-	} else if !errors.IsNotFound(err) {
+	existing, err := secrets.Get(ctx, TLSSecretName, metav1GetOptions())
+	switch {
+	case err == nil:
+		if existing.Annotations[annotationGeneratedTLS] != "true" {
+			return tlsMaterial(existing), false, nil
+		}
+		if _, err := secrets.Get(ctx, ClientTLSSecretName, metav1GetOptions()); err == nil {
+			return tlsMaterial(existing), false, nil
+		} else if !errors.IsNotFound(err) {
+			return TLSMaterial{}, false, fmt.Errorf("unable to read Secret %s: %w", ClientTLSSecretName, err)
+		}
+	case errors.IsNotFound(err):
+		existing = nil
+	default:
 		return TLSMaterial{}, false, fmt.Errorf("unable to read Secret %s: %w", TLSSecretName, err)
 	}
 
@@ -54,15 +74,25 @@ func (a *KubernetesDockerAdapter) EnsureTLS(ctx context.Context, sans []string) 
 	server := tlsSecret(TLSSecretName, map[string][]byte{
 		"tls.crt": files["server/tls.crt"], "tls.key": files["server/tls.key"], "ca.crt": files["server/ca.crt"],
 	})
-	created, err := secrets.Create(ctx, server, metav1.CreateOptions{})
-	if errors.IsAlreadyExists(err) {
+	server.Annotations = map[string]string{annotationGeneratedTLS: "true"}
+
+	var stored *corev1.Secret
+	if existing == nil {
+		stored, err = secrets.Create(ctx, server, metav1.CreateOptions{})
+	} else {
+		// Replaced only as it was read: another d2k replacing it meanwhile
+		// wins, and writes the client certificate that goes with it.
+		server.ResourceVersion = existing.ResourceVersion
+		stored, err = secrets.Update(ctx, server, metav1.UpdateOptions{})
+	}
+	if errors.IsAlreadyExists(err) || errors.IsConflict(err) {
 		// Another d2k created it meanwhile: use that one.
 		if s, err := secrets.Get(ctx, TLSSecretName, metav1GetOptions()); err == nil {
 			return tlsMaterial(s), false, nil
 		}
 	}
 	if err != nil {
-		return TLSMaterial{}, false, fmt.Errorf("unable to create Secret %s: %w", TLSSecretName, err)
+		return TLSMaterial{}, false, fmt.Errorf("unable to write Secret %s: %w", TLSSecretName, err)
 	}
 
 	// A d2k-client left from earlier certificates no longer matches the CA.
@@ -77,7 +107,7 @@ func (a *KubernetesDockerAdapter) EnsureTLS(ctx context.Context, sans []string) 
 	} else if err != nil {
 		return TLSMaterial{}, false, fmt.Errorf("unable to create Secret %s: %w", ClientTLSSecretName, err)
 	}
-	return tlsMaterial(created), true, nil
+	return tlsMaterial(stored), true, nil
 }
 
 func tlsSecret(name string, data map[string][]byte) *corev1.Secret {

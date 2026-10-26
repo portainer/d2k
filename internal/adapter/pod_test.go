@@ -69,7 +69,7 @@ func TestStopPodListPodsError(t *testing.T) {
 	client.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, errors.New("list failed")
 	})
-	if err := a.StopContainer(ctx, id); err == nil || !strings.Contains(err.Error(), "unable to list the pods") {
+	if err := a.StopContainer(ctx, id, nil); err == nil || !strings.Contains(err.Error(), "unable to list the pods") {
 		t.Errorf("StopContainer error = %v, want an \"unable to list the pods\" error", err)
 	}
 }
@@ -92,7 +92,7 @@ func TestStopPodDeleteError(t *testing.T) {
 	client.PrependReactor("delete", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, p.Name, errors.New("conflict"))
 	})
-	if err := a.StopContainer(ctx, id); err == nil || !strings.Contains(err.Error(), "unable to stop the pod") {
+	if err := a.StopContainer(ctx, id, nil); err == nil || !strings.Contains(err.Error(), "unable to stop the pod") {
 		t.Errorf("StopContainer error = %v, want an \"unable to stop the pod\" error", err)
 	}
 }
@@ -209,5 +209,40 @@ func TestAnnotateReturnsNonConflictError(t *testing.T) {
 	v := "x"
 	if err := a.annotate(ctx, "web", map[string]*string{"k": &v}); err == nil || err.Error() != "boom" {
 		t.Errorf("annotate error = %v, want \"boom\"", err)
+	}
+}
+
+// Two starts of a run-once container at once each see no pod running: they
+// still run it once. The pod is named after the version of the container
+// both read, so only one pod is created.
+func TestStartPodRunsOnceForConcurrentStarts(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	id, _, err := a.CreateContainer(ctx, RunOptions{Name: "job", Image: "busybox", RestartPolicy: "no"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "job", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both starts list the pods before either creates one.
+	client.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &corev1.PodList{}, nil
+	})
+	first, second := d.DeepCopy(), d.DeepCopy()
+	if err := a.startPod(ctx, first); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if err := a.startPod(ctx, second); err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+
+	pods, err := client.Tracker().List(schema.GroupVersionResource{Version: "v1", Resource: "pods"}, schema.GroupVersionKind{Version: "v1", Kind: "Pod"}, testNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(pods.(*corev1.PodList).Items); n != 1 {
+		t.Errorf("%s has %d pods after two concurrent starts, want 1", id, n)
 	}
 }

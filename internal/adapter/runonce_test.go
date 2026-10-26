@@ -107,7 +107,7 @@ func TestRunOnceContainer(t *testing.T) {
 	if again := podOf(t, a, "job"); again.Name == p.Name {
 		t.Error("start reused the exited pod")
 	}
-	if err := a.StopContainer(ctx, "job"); err != nil {
+	if err := a.StopContainer(ctx, "job", nil); err != nil {
 		t.Fatal(err)
 	}
 	pods, _ := client.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: "app=job"})
@@ -198,7 +198,7 @@ func TestRunOnceLeavesOtherPodsAlone(t *testing.T) {
 	if ctr, err := a.InspectContainer(ctx, "web"); err != nil || ctr.State.Running {
 		t.Fatalf("inspect = %+v, %v; want the state of d2k's pod, not running", ctr.State, err)
 	}
-	if err := a.StopContainer(ctx, "web"); err != nil {
+	if err := a.StopContainer(ctx, "web", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.CoreV1().Pods(testNamespace).Get(ctx, "web-0", metav1.GetOptions{}); err != nil {
@@ -238,7 +238,7 @@ func TestRunOncePodGoneAfterStopAndStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	setStatus(t, a, podOf(t, a, "job"), corev1.PodRunning, corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}})
-	if err := a.StopContainer(ctx, "job"); err != nil {
+	if err := a.StopContainer(ctx, "job", nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.StartContainer(ctx, "job"); err != nil {
