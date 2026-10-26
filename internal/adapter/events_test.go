@@ -529,7 +529,7 @@ func TestEventsFinishRestartsCutShortByD2kStopping(t *testing.T) {
 		if err := a.annotate(ctx, name, map[string]*string{"d2k.portainer.io/restarting": ptr("2026-01-01T00:00:00Z")}); err != nil {
 			t.Fatal(err)
 		}
-		if err := a.StopContainer(ctx, name); err != nil {
+		if err := a.StopContainer(ctx, name, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

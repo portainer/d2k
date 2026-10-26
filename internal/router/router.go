@@ -32,7 +32,7 @@ func New(a *adapter.KubernetesDockerAdapter, namespace string, swarmMode bool) h
 	c := containers.NewHandler(a)
 	v := volumes.NewHandler(a)
 	n := networks.NewHandler(a)
-	img := images.NewHandler()
+	img := images.NewHandler(a)
 	ev := events.NewHandler(a)
 	e := exec.NewHandler(a)
 

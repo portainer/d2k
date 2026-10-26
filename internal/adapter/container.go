@@ -7,12 +7,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/netip"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
@@ -100,9 +103,12 @@ type TmpfsMount struct {
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
 type ContainerSummary struct {
-	ID        string
-	Names     []string
-	Image     string
+	ID    string
+	Names []string
+	Image string
+	// ImageID is the ID docker images lists the container's image by, its
+	// digest, once a pod runs it.
+	ImageID   string
 	Status    string
 	State     string
 	Created   int64
@@ -115,11 +121,29 @@ type ContainerSummary struct {
 	Mounts   []container.MountPoint
 }
 
+// containerNameChars are the characters Docker allows in a container name,
+// and validContainerName Docker's rule for one (moby daemon/names).
+const containerNameChars = `[a-zA-Z0-9][a-zA-Z0-9_.-]`
+
+var validContainerName = regexp.MustCompile(`^/?` + containerNameChars + `+$`)
+
+// validateContainerName refuses a name Docker refuses, with Docker's error.
+func validateContainerName(name string) error {
+	if !validContainerName.MatchString(name) {
+		//nolint:staticcheck // ST1005: Docker's own message, which clients may match
+		return errdefs.InvalidParameter(fmt.Errorf("Invalid container name (%s), only %s are allowed", name, containerNameChars))
+	}
+	return nil
+}
+
 // CreateContainer implements docker run: creates a Deployment and, where
 // required, a Service in the target namespace.
 func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunOptions) (string, []string, error) {
 	if opts.Name == "" {
 		return "", nil, errdefs.InvalidParameter(fmt.Errorf("container name is required"))
+	}
+	if err := validateContainerName(opts.Name); err != nil {
+		return "", nil, err
 	}
 	if opts.AutoRemove && opts.RestartPolicy != "" && opts.RestartPolicy != string(container.RestartPolicyDisabled) {
 		return "", nil, errdefs.InvalidParameter(fmt.Errorf("can't create 'AutoRemove' container with restart policy"))
@@ -136,7 +160,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 
 	// Sanitise the name for Kubernetes: lowercase, underscores and dots to
 	// hyphens (Service names allow neither), max 63 chars.
-	opts.Name = strings.ToLower(strings.NewReplacer("_", "-", ".", "-").Replace(opts.Name))
+	opts.Name = strings.ToLower(strings.NewReplacer("_", "-", ".", "-").Replace(dockerName))
 	if len(opts.Name) > 63 {
 		opts.Name = opts.Name[:63]
 	}
@@ -369,8 +393,11 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 }
 
 // StopContainer implements docker stop: scales the Deployment to 0 replicas.
-// Returns an error if the Deployment is managed by the Swarm layer.
-func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string) error {
+// Returns an error if the Deployment is managed by the Swarm layer. timeout,
+// docker stop -t, is how many seconds the container has to stop before it
+// is killed: its pods' grace period. Without it, or at -1 (Docker's "wait
+// for ever", which Kubernetes has no equivalent of), the pods keep theirs.
+func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string, timeout *int) error {
 	resolved, err := a.resolveDeploymentName(ctx, name)
 	if err != nil {
 		return err
@@ -380,7 +407,7 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 		return errdefs.Conflict(fmt.Errorf("cannot stop a container that is managed by swarm: use docker service scale instead"))
 	}
 	if getErr == nil && runsAsPod(*d) {
-		return a.stopPod(ctx, d)
+		return a.stopPod(ctx, d, timeout)
 	}
 	if err := a.scaleDeployment(ctx, name, 0); err != nil {
 		return err
@@ -390,6 +417,19 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 	grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
 	if getErr == nil && d.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
 		grace = *d.Spec.Template.Spec.TerminationGracePeriodSeconds
+	}
+	if timeout != nil && *timeout >= 0 {
+		// The ReplicaSet deletes the pods with their own grace period: a
+		// shorter one, given on a delete of its own, takes over.
+		grace = int64(*timeout)
+		pods := a.client.CoreV1().Pods(a.namespace)
+		if list, err := pods.List(ctx, podsOf(resolved)); err == nil {
+			for _, p := range list.Items {
+				if err := pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace}); err != nil && !errors.IsNotFound(err) {
+					return fmt.Errorf("unable to stop the pod of %q: %w", resolved, err)
+				}
+			}
+		}
 	}
 	code, log, ok := a.waitForPodsGoneKeepingLog(ctx, resolved, time.Duration(grace+30)*time.Second)
 	updates := map[string]*string{}
@@ -482,7 +522,7 @@ func (a *KubernetesDockerAdapter) removeFailedStart(ctx context.Context, name st
 // RestartContainer implements docker restart: it stops the container, then
 // starts it. As in Docker, the end of the run a restart stops does not
 // remove an AutoRemove container.
-func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name string) error {
+func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name string, timeout *int) error {
 	// As in Docker, a client that goes away does not cancel the restart: a
 	// stop without its start would leave the container stopped (D2K-083).
 	ctx = context.WithoutCancel(ctx)
@@ -496,7 +536,7 @@ func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name str
 		return fmt.Errorf("unable to restart container %q: %w", name, err)
 	}
 	defer a.clearRestarting(ctx, resolved)
-	if err := a.StopContainer(ctx, name); err != nil {
+	if err := a.StopContainer(ctx, name, timeout); err != nil {
 		return err
 	}
 	if err := a.StartContainer(ctx, name); err != nil {
@@ -600,6 +640,9 @@ func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID,
 		return err
 	}
 
+	if err := validateContainerName(newName); err != nil {
+		return err
+	}
 	newName = strings.TrimPrefix(newName, "/")
 	inUse, err := a.dockerNameInUse(ctx, newName)
 	if err != nil {
@@ -949,7 +992,7 @@ func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummar
 	s := containerState(d, pods, now)
 	state, status := string(s.Status), containerStatus(s, now)
 
-	var ports []container.PortSummary
+	ports := []container.PortSummary{} // the daemon lists [], never null
 	for _, m := range publishedPorts(d) {
 		ports = append(ports, container.PortSummary{
 			IP:          netip.IPv4Unspecified(),
@@ -963,6 +1006,7 @@ func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummar
 		ID:      containerID(d.UID),
 		Names:   []string{"/" + dockerName(d)},
 		Image:   d.Annotations[types.AnnotationImageRef],
+		ImageID: runningImageID(pods),
 		Status:  status,
 		State:   state,
 		Created: d.CreationTimestamp.Unix(),
@@ -972,6 +1016,24 @@ func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummar
 		Networks: networkIDs(d),
 		Mounts:   containerMounts(d),
 	}
+}
+
+// runningImageID returns the ID of the image a container's pods run: the
+// digest a pod reports, as docker images lists it, or "" before a pod runs
+// it.
+func runningImageID(pods []corev1.Pod) string {
+	for _, p := range pods {
+		for _, status := range p.Status.ContainerStatuses {
+			if digest := digestName(status.ImageID); digest != "" {
+				if named, err := reference.ParseNormalizedNamed(digest); err == nil {
+					if canonical, ok := named.(reference.Canonical); ok {
+						return canonical.Digest().String()
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // publishedPorts returns the container's explicit port bindings, as
@@ -1220,10 +1282,37 @@ func recordedName(m metav1.ObjectMeta) string {
 }
 
 // dockerLabels returns the Docker labels exactly as the container was created
-// with, falling back to the Deployment labels for older containers.
+// with, falling back to the Deployment labels for older containers. The
+// container of a Swarm service also carries the labels Docker gives a task's
+// container: its service, and its stack. Clients such as Portainer find the
+// service, and the access to it, of a container by them.
 func dockerLabels(d appsv1.Deployment) map[string]string {
-	return recordedLabels(d.ObjectMeta)
+	labels := recordedLabels(d.ObjectMeta)
+
+	service := d.Labels[types.LabelSwarmService]
+	if service == "" {
+		return labels
+	}
+
+	labels = maps.Clone(labels)
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[labelSwarmServiceID] = serviceSwarmID(d)
+	labels[labelSwarmServiceName] = service
+	if stack := d.Labels[types.LabelSwarmStack]; stack != "" {
+		labels[labelStackNamespace] = stack
+	}
+
+	return labels
 }
+
+// The labels Docker gives the container of a Swarm task.
+const (
+	labelSwarmServiceID   = "com.docker.swarm.service.id"
+	labelSwarmServiceName = "com.docker.swarm.service.name"
+	labelStackNamespace   = "com.docker.stack.namespace"
+)
 
 // recordedLabels returns the Docker labels recorded on an object, falling
 // back to its Kubernetes labels for objects created before they were recorded.

@@ -29,7 +29,8 @@ import (
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
-// finishedRetention is how long a finished exec instance stays inspectable.
+// finishedRetention is how long a finished exec instance stays inspectable,
+// and how long one created but never started is kept.
 const finishedRetention = 10 * time.Minute
 
 // startingTimeout bounds how long exec waits for a started container's pod
@@ -48,6 +49,7 @@ type instance struct {
 	containerID string
 	opts        adapter.ExecOptions
 	resize      *streams.SizeQueue
+	created     time.Time
 
 	mu       sync.Mutex
 	started  bool
@@ -116,7 +118,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 			AttachStderr: req.AttachStderr,
 			Tty:          req.Tty,
 		},
-		resize: streams.NewSizeQueue(),
+		resize:  streams.NewSizeQueue(),
+		created: time.Now(),
 	}
 	if req.ConsoleSize != nil {
 		inst.resize.Push(req.ConsoleSize[0], req.ConsoleSize[1])
@@ -124,7 +127,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 
 	h.mu.Lock()
 	for id, old := range h.instances {
-		if old.isFinishedBefore(time.Now().Add(-finishedRetention)) {
+		if old.isStaleBefore(time.Now().Add(-finishedRetention)) {
 			delete(h.instances, id)
 		}
 	}
@@ -337,8 +340,13 @@ func (i *instance) finish(code int) {
 	i.running, i.exitCode, i.finished = false, &code, time.Now()
 }
 
-func (i *instance) isFinishedBefore(t time.Time) bool {
+// isStaleBefore reports whether the instance finished before t, or was
+// created before t and never started.
+func (i *instance) isStaleBefore(t time.Time) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if !i.started {
+		return i.created.Before(t)
+	}
 	return i.exitCode != nil && i.finished.Before(t)
 }

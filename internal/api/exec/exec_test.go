@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -100,5 +101,31 @@ func TestStartErrorExitCode(t *testing.T) {
 		if got := startErrorExitCode(errors.New(tc.err)); got != tc.want {
 			t.Errorf("exit code for %q = %d, want %d", tc.err, got, tc.want)
 		}
+	}
+}
+
+// An exec instance that is created but never started, as a client that fails
+// between the two calls leaves, is forgotten too, as a finished one is.
+func TestUnstartedExecIsForgotten(t *testing.T) {
+	now := time.Now()
+	cutoff := now.Add(-finishedRetention)
+
+	old := &instance{created: now.Add(-2 * finishedRetention)}
+	if !old.isStaleBefore(cutoff) {
+		t.Error("an instance never started for longer than the retention is kept")
+	}
+	recent := &instance{created: now}
+	if recent.isStaleBefore(cutoff) {
+		t.Error("an instance just created is forgotten before it can start")
+	}
+	running := &instance{created: now.Add(-2 * finishedRetention)}
+	running.markStarted()
+	if running.isStaleBefore(cutoff) {
+		t.Error("a running instance is forgotten")
+	}
+	running.finish(0)
+	running.finished = now.Add(-2 * finishedRetention)
+	if !running.isStaleBefore(cutoff) {
+		t.Error("an instance finished for longer than the retention is kept")
 	}
 }

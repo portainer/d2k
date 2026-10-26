@@ -486,7 +486,7 @@ func TestCreateDoesNotStart(t *testing.T) {
 		t.Fatalf("after start: replicas = %d, started-at = %q", *d.Spec.Replicas, d.Annotations[types.AnnotationStartedAt])
 	}
 
-	if err := a.StopContainer(ctx, "web"); err != nil {
+	if err := a.StopContainer(ctx, "web", nil); err != nil {
 		t.Fatal(err)
 	}
 	inspect, _ = a.InspectContainer(ctx, "web")
@@ -931,7 +931,7 @@ func TestStopWaitsForThePod(t *testing.T) {
 	}
 
 	stopped := make(chan error, 1)
-	go func() { stopped <- a.StopContainer(ctx, "db") }()
+	go func() { stopped <- a.StopContainer(ctx, "db", nil) }()
 	select {
 	case err := <-stopped:
 		t.Fatalf("stop returned (%v) while the container's pod still runs", err)
@@ -971,7 +971,7 @@ func TestLogsOfAStoppedContainer(t *testing.T) {
 	}
 
 	stopped := make(chan error, 1)
-	go func() { stopped <- a.StopContainer(ctx, "db") }()
+	go func() { stopped <- a.StopContainer(ctx, "db", nil) }()
 	time.Sleep(1500 * time.Millisecond)
 	if err := client.CoreV1().Pods(testNamespace).Delete(ctx, "db-abc", metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
@@ -1005,7 +1005,7 @@ func TestLogsOfAStoppedRunOnceContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	setStatus(t, a, podOf(t, a, "web"), corev1.PodRunning, corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}})
-	if err := a.StopContainer(ctx, "web"); err != nil {
+	if err := a.StopContainer(ctx, "web", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1045,7 +1045,7 @@ func TestStopRecordsTheExitCode(t *testing.T) {
 		time.Sleep(700 * time.Millisecond)
 		_ = client.CoreV1().Pods(testNamespace).Delete(ctx, "db-abc", metav1.DeleteOptions{})
 	}()
-	if err := a.StopContainer(ctx, "db"); err != nil {
+	if err := a.StopContainer(ctx, "db", nil); err != nil {
 		t.Fatal(err)
 	}
 	ctr, err := a.InspectContainer(ctx, "db")
@@ -1060,7 +1060,7 @@ func TestStopRecordsTheExitCode(t *testing.T) {
 	if err := a.StartContainer(ctx, "db"); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.StopContainer(ctx, "db"); err != nil {
+	if err := a.StopContainer(ctx, "db", nil); err != nil {
 		t.Fatal(err)
 	}
 	if ctr, err = a.InspectContainer(ctx, "db"); err != nil {
@@ -1234,7 +1234,7 @@ func TestRestartCompletesWhenTheClientGoesAway(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	_ = a.RestartContainer(ctx, "db")
+	_ = a.RestartContainer(ctx, "db", nil)
 	d, err := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "db", metav1.GetOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -1290,7 +1290,7 @@ func TestRestartRecordsItIsRestarting(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	if err := a.RestartContainer(context.Background(), "db"); err != nil {
+	if err := a.RestartContainer(context.Background(), "db", nil); err != nil {
 		t.Fatal(err)
 	}
 	if !recorded {
@@ -1404,5 +1404,74 @@ func TestFailedStartOfARunOnceAutoRemoveContainerRemovesIt(t *testing.T) {
 	}
 	if _, err := a.InspectContainer(ctx, "job"); !errdefs.IsNotFound(err) {
 		t.Fatalf("inspect after the failed start of an AutoRemove container = %v, want not found", err)
+	}
+}
+
+// Container names follow Docker's rules: a leading / is dropped, as Docker
+// does, and a name Docker refuses is refused with Docker's error, before
+// Kubernetes sees it.
+func TestContainerNamesFollowDocker(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+
+	if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "/web", Image: "nginx"}); err != nil {
+		t.Fatalf("CreateContainer(/web) error: %v", err)
+	}
+	d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("no Deployment web for /web: %v", err)
+	}
+	if got := dockerName(*d); got != "web" {
+		t.Errorf("Docker name of /web = %q, want web", got)
+	}
+
+	for _, name := range []string{"a b", "-x", "x", "café", "a/b"} {
+		_, _, err := a.CreateContainer(ctx, RunOptions{Name: name, Image: "nginx"})
+		if !errdefs.IsInvalidParameter(err) || !strings.Contains(err.Error(), "Invalid container name") {
+			t.Errorf("CreateContainer(%q) error = %v, want Docker's invalid container name", name, err)
+		}
+	}
+
+	if err := a.RenameContainer(ctx, "web", "a b"); !errdefs.IsInvalidParameter(err) || !strings.Contains(err.Error(), "Invalid container name") {
+		t.Errorf("RenameContainer to \"a b\" error = %v, want Docker's invalid container name", err)
+	}
+}
+
+// docker stop -t and docker restart -t set how long the container has to
+// stop before it is killed: its pods are deleted with that grace period.
+func TestStopContainerTimeout(t *testing.T) {
+	for _, policy := range []string{"always", "no"} {
+		t.Run("restart "+policy, func(t *testing.T) {
+			a, client := newTestAdapter(t)
+			ctx := context.Background()
+			if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "web", Image: "nginx", RestartPolicy: policy}); err != nil {
+				t.Fatal(err)
+			}
+			d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "web-1", Namespace: testNamespace, Labels: d.Spec.Template.Labels},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+
+			zero := 0
+			if err := a.StopContainer(ctx, "web", &zero); err != nil {
+				t.Fatalf("StopContainer: %v", err)
+			}
+			var grace *int64
+			for _, action := range client.Actions() {
+				if del, ok := action.(k8stesting.DeleteAction); ok && action.GetResource().Resource == "pods" && del.GetName() == "web-1" {
+					grace = del.GetDeleteOptions().GracePeriodSeconds
+				}
+			}
+			if grace == nil || *grace != 0 {
+				t.Errorf("pod deleted with grace period %v, want 0 from -t 0", grace)
+			}
+		})
 	}
 }

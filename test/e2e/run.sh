@@ -232,10 +232,14 @@ standalone_cases() {
     docker exec e2e-native grep -q "NoNewPrivs:.*1" /proc/self/status'
   docker rm -f e2e-native >/dev/null 2>&1
 
-  # Images: d2k stores none; the kubelet pulls them.
+  # Images: d2k stores none; the kubelet pulls them. docker images lists the
+  # images d2k's containers use, as the nodes report them.
   check "docker pull is acknowledged" bash -c 'docker pull nginx:alpine 2>&1 | grep -q "the kubelet pulls it"'
-  check "docker images lists none" bash -c '[ -z "$(docker images -q)" ]'
-  check "image inspect reports the reference only" bash -c '[ "$(docker image inspect -f "{{.RepoTags}} {{.Config}}" nginx:alpine)" = "[nginx:alpine] <nil>" ]'
+  check "docker images lists the images its containers use" bash -c 'docker run -d --name e2e-images nginx:alpine >/dev/null &&
+    for _ in $(seq 60); do [ "$(docker inspect -f {{.State.Status}} e2e-images)" = running ] && break; sleep 2; done &&
+    for _ in $(seq 15); do docker images --format "{{.Repository}}:{{.Tag}}" | grep -qx nginx:alpine && break; sleep 2; done &&
+    docker images --format "{{.Repository}}:{{.Tag}}" | grep -qx nginx:alpine; rc=$?; docker rm -f e2e-images >/dev/null 2>&1; exit $rc'
+  check "image inspect reports an unused reference only" bash -c '[ "$(docker image inspect -f "{{.RepoTags}} {{.Config}}" e2e/never-used:1)" = "[e2e/never-used:1] <nil>" ]'
   check "docker rmi is not supported" bash -c 'docker rmi nginx:alpine 2>&1 | grep -q "not supported by d2k"'
 
   # Docker Engine API operations d2k does not implement answer 501.
@@ -453,6 +457,12 @@ swarm_cases() {
 
   check "info reports swarm active" bash -c '[ "$(docker info -f {{.Swarm.LocalNodeState}})" = active ]'
   check "service create converges" bash -c "perl -e 'alarm 120; exec @ARGV' docker service create --name e2e-svc nginx:alpine"
+  check "service container carries the service's labels" bash -c "
+    id=\$(docker service inspect -f {{.ID}} e2e-svc) &&
+    [ \"\$(docker ps -q --filter label=com.docker.swarm.service.id=\$id | wc -l | tr -d ' ')\" = 1 ] &&
+    [ \"\$(docker ps --filter label=com.docker.swarm.service.name=e2e-svc --format '{{.Label \"com.docker.swarm.service.id\"}}')\" = \"\$id\" ]"
+  check "service task names its container" bash -c "
+    [ \"\$(docker service ps -q e2e-svc | head -1 | xargs docker inspect --type task -f '{{.Status.ContainerStatus.ContainerID}}')\" = \"\$(docker ps -q --no-trunc --filter label=com.docker.swarm.service.name=e2e-svc)\" ]"
   check "service scale" bash -c "perl -e 'alarm 120; exec @ARGV' docker service scale e2e-svc=2 && [ \"\$(kubectl --context $CONTEXT -n d2k-swarm get deploy e2e-svc -o jsonpath={.spec.replicas})\" = 2 ]"
   check "service rm" bash -c "docker service rm e2e-svc >/dev/null && ! kubectl --context $CONTEXT -n d2k-swarm get deploy e2e-svc >/dev/null 2>&1"
 

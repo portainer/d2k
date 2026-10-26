@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"testing"
 
@@ -9,6 +10,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -102,5 +105,29 @@ func TestMigrateLeavesCurrentObjectsAlone(t *testing.T) {
 	after, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
 	if !maps.Equal(before.Annotations, after.Annotations) {
 		t.Errorf("migration changed a current container: %v to %v", before.Annotations, after.Annotations)
+	}
+}
+
+// A container that fails to migrate doesn't keep the others from migrating:
+// the next start retries only what failed.
+func TestMigrateLegacyObjectsContinuesPastAFailure(t *testing.T) {
+	a, client := newTestAdapter(t, legacyDeployment("first", 1, nil), legacyDeployment("second", 1, nil))
+	client.PrependReactor("update", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.(k8stesting.UpdateAction).GetObject().(*appsv1.Deployment).Name == "first" {
+			return true, nil, fmt.Errorf("refused")
+		}
+		return false, nil, nil
+	})
+	ctx := context.Background()
+
+	if err := a.MigrateLegacyObjects(ctx, false); err == nil {
+		t.Error("MigrateLegacyObjects() = nil, want the failure on first")
+	}
+	second, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "second", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Annotations[types.AnnotationDockerName] != "second" {
+		t.Errorf("second's annotations = %v, want it migrated", second.Annotations)
 	}
 }

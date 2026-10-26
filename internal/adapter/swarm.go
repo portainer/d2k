@@ -46,6 +46,16 @@ import (
 // swarmID converts a Kubernetes UID (UUID format) into a Swarm-style ID:
 // 25 uppercase alphanumeric characters, matching the format Docker Swarm uses.
 // The conversion is deterministic - the same UID always produces the same swarm ID.
+// serviceSwarmID returns the Swarm ID of the service a Deployment runs: the
+// one recorded when the service was created, or else one derived from the
+// Deployment's UID.
+func serviceSwarmID(d appsv1.Deployment) string {
+	if id := d.Annotations[types.AnnotationSwarmServiceID]; id != "" {
+		return id
+	}
+	return swarmID(string(d.UID))
+}
+
 func swarmID(uid string) string {
 	// Strip hyphens from UUID, uppercase, truncate/pad to 25 chars.
 	s := strings.ToUpper(strings.ReplaceAll(uid, "-", ""))
@@ -1249,10 +1259,7 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 
 	for _, dep := range deps.Items {
 		// Resolve stable service ID.
-		svcID := dep.Annotations[types.AnnotationSwarmServiceID]
-		if svcID == "" {
-			svcID = swarmID(string(dep.UID))
-		}
+		svcID := serviceSwarmID(dep)
 
 		// Apply service filter if present - match by swarm ID or deployment name.
 		if serviceFilter != "" && serviceFilter != svcID && serviceFilter != dep.Name {
@@ -1312,7 +1319,7 @@ func (a *KubernetesDockerAdapter) SwarmListTasks(ctx context.Context, serviceFil
 		for slot := int32(1); slot <= desired; slot++ {
 			if p, ok := podsBySlot[slot]; ok {
 				nodeID := nodeSwarmIDs[p.Spec.NodeName]
-				result = append(result, kubePodToSwarmTask(p, svcID, nodeID, int(slot)))
+				result = append(result, kubePodToSwarmTask(p, svcID, nodeID, int(slot), containerID(dep.UID)))
 			} else {
 				// Pod not yet scheduled - synthesise a preparing task.
 				result = append(result, map[string]any{
@@ -1366,7 +1373,12 @@ func (a *KubernetesDockerAdapter) SwarmInspectTask(ctx context.Context, id strin
 	}
 	for _, p := range pods.Items {
 		if swarmID(string(p.UID)) == id || string(p.UID) == id || p.Name == id {
-			return kubePodToSwarmTask(p, "", "", 0), nil
+			// The task's service and container are those of its Deployment.
+			dep, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, p.Labels["app"], metav1.GetOptions{})
+			if err != nil {
+				return kubePodToSwarmTask(p, "", "", 0, ""), nil
+			}
+			return kubePodToSwarmTask(p, serviceSwarmID(*dep), "", 0, containerID(dep.UID)), nil
 		}
 	}
 	return nil, errdefs.NotFound(fmt.Errorf("task %q not found", id))
@@ -2147,7 +2159,10 @@ func (a *KubernetesDockerAdapter) swarmServiceEndpointSpec(ctx context.Context, 
 	return map[string]any{"Mode": "vip", "Ports": ports}
 }
 
-func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot int) map[string]any {
+// kubePodToSwarmTask returns the Swarm task a pod runs. containerID is the
+// Docker ID of the task's container: d2k lists a service's pods as one
+// container, its Deployment's.
+func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot int, containerID string) map[string]any {
 	// Map pod phase + container readiness to a Swarm task state.
 	// Only report "running" when the pod is Running AND at least one
 	// container is ready - otherwise the CLI progress loop won't advance.
@@ -2180,14 +2195,13 @@ func kubePodToSwarmTask(p corev1.Pod, serviceID string, nodeSwarmID string, slot
 
 	// ContainerStatus for docker service ps error column.
 	containerStatus := map[string]any{
-		"ContainerID": "",
+		"ContainerID": containerID,
 		"PID":         0,
 		"ExitCode":    0,
 	}
 	statusErr := p.Status.Message
 	if len(p.Status.ContainerStatuses) > 0 {
 		cs := p.Status.ContainerStatuses[0]
-		containerStatus["ContainerID"] = cs.ContainerID
 		if cs.State.Terminated != nil {
 			containerStatus["ExitCode"] = cs.State.Terminated.ExitCode
 			statusErr = cs.State.Terminated.Message

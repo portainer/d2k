@@ -165,7 +165,7 @@ func TestRemoveNetworkOfStoppedContainers(t *testing.T) {
 	if err := a.StartContainer(ctx, web); err != nil {
 		t.Fatal(err)
 	}
-	if err := a.StopContainer(ctx, web); err != nil {
+	if err := a.StopContainer(ctx, web, nil); err != nil {
 		t.Fatal(err)
 	}
 	mustCreate(t, a, RunOptions{Name: "idle", Image: "nginx", Networks: []string{"demo_default"}})

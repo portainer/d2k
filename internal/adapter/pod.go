@@ -2,6 +2,8 @@ package adapter
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"slices"
 	"strconv"
@@ -41,6 +43,14 @@ func restartPolicyOf(d appsv1.Deployment) container.RestartPolicyMode {
 	return container.RestartPolicyAlways
 }
 
+// runPodName names the pod a start runs after the version of the container
+// it read: two starts of the same version at once create the same pod, and
+// only one of them succeeds.
+func runPodName(d *appsv1.Deployment) string {
+	sum := sha256.Sum256([]byte(string(d.UID) + "/" + d.ResourceVersion))
+	return truncate(d.Name, 57) + "-" + hex.EncodeToString(sum[:])[:5]
+}
+
 // startPod runs a new pod for the container, replacing any previous one.
 func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deployment) error {
 	pods := a.client.CoreV1().Pods(a.namespace)
@@ -62,7 +72,7 @@ func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deploy
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        truncate(d.Name, 57) + "-" + rand.String(5),
+			Name:        runPodName(d),
 			Namespace:   a.namespace,
 			Labels:      tmpl.Labels,
 			Annotations: tmpl.Annotations,
@@ -72,7 +82,18 @@ func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deploy
 		},
 		Spec: tmpl.Spec,
 	}
-	if _, err := pods.Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+	_, err = pods.Create(ctx, pod, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		// Another start of the same version of the container created it:
+		// the container runs once. A pod of that name whose run ended is an
+		// earlier run's: this start runs a new one.
+		if existing, getErr := pods.Get(ctx, pod.Name, metav1.GetOptions{}); getErr == nil && existing.DeletionTimestamp == nil && !podEnded(*existing) {
+			return nil
+		}
+		pod.Name = truncate(d.Name, 57) + "-" + rand.String(5)
+		_, err = pods.Create(ctx, pod, metav1.CreateOptions{})
+	}
+	if err != nil {
 		return fmt.Errorf("unable to create the pod of %q: %w", d.Name, err)
 	}
 	if err := a.annotate(ctx, d.Name, map[string]*string{
@@ -93,7 +114,7 @@ func (a *KubernetesDockerAdapter) startPod(ctx context.Context, d *appsv1.Deploy
 // stopPod stops the container's pod, as docker stop does: it waits for the
 // pod to end and records its exit code. A pod that has ended is kept, with
 // its logs.
-func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deployment) error {
+func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deployment, timeout *int) error {
 	pods := a.client.CoreV1().Pods(a.namespace)
 	list, err := pods.List(ctx, podsOf(d.Name))
 	if err != nil {
@@ -102,6 +123,9 @@ func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deploym
 	grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
 	if g := d.Spec.Template.Spec.TerminationGracePeriodSeconds; g != nil {
 		grace = *g
+	}
+	if timeout != nil && *timeout >= 0 {
+		grace = int64(*timeout)
 	}
 	exitCode, log := "", ""
 	for _, p := range list.Items {

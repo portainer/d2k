@@ -140,3 +140,19 @@ func TestContainerListNewestFirstAndLimit(t *testing.T) {
 		}
 	}
 }
+
+// TestContainerListSendsEmptyPorts checks that a container with no published
+// ports lists "Ports": [], as the daemon does, not null.
+func TestContainerListSendsEmptyPorts(t *testing.T) {
+	h, _ := newTestRouter()
+	if rec := do(t, h, "POST", "/containers/create?name=web", `{"Image":"nginx"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("container create = %d %s", rec.Code, rec.Body)
+	}
+	var list []map[string]json.RawMessage
+	if err := json.Unmarshal(do(t, h, "GET", "/containers/json?all=1", "").Body.Bytes(), &list); err != nil || len(list) != 1 {
+		t.Fatalf("container list = %v, %v", list, err)
+	}
+	if got := string(list[0]["Ports"]); got != "[]" {
+		t.Errorf("Ports = %s, want []", got)
+	}
+}

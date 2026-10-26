@@ -313,6 +313,11 @@ func resources(r container.Resources) corev1.ResourceRequirements {
 	}
 	if r.CPUShares > 0 {
 		requests[corev1.ResourceCPU] = *resource.NewMilliQuantity(r.CPUShares*1000/1024, resource.DecimalSI)
+		// Shares are a weight in Docker, valid above --cpus; Kubernetes
+		// refuses a request above the limit.
+		if limit, ok := limits[corev1.ResourceCPU]; ok && requests.Cpu().Cmp(limit) > 0 {
+			requests[corev1.ResourceCPU] = limit
+		}
 	}
 	out := corev1.ResourceRequirements{}
 	if len(limits) > 0 {

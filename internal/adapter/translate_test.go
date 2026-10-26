@@ -334,3 +334,22 @@ func TestDockerSizeMatchesRAMInBytes(t *testing.T) {
 		}
 	}
 }
+
+// Docker's CPU shares are a weight, not a reservation, so --cpus 0.5
+// --cpu-shares 1024 is a valid container: its request, from the shares, is
+// capped at its limit, which Kubernetes otherwise refuses it for exceeding.
+func TestResourcesCapsTheCPURequestAtTheLimit(t *testing.T) {
+	got := resources(container.Resources{NanoCPUs: 500_000_000, CPUShares: 1024})
+	request, limit := got.Requests[corev1.ResourceCPU], got.Limits[corev1.ResourceCPU]
+	if request.Cmp(limit) > 0 {
+		t.Errorf("CPU request %s is above the limit %s", request.String(), limit.String())
+	}
+	if request.MilliValue() != 500 {
+		t.Errorf("CPU request = %s, want the limit, 500m", request.String())
+	}
+
+	got = resources(container.Resources{NanoCPUs: 2_000_000_000, CPUShares: 512})
+	if r := got.Requests[corev1.ResourceCPU]; r.MilliValue() != 500 {
+		t.Errorf("CPU request under the limit = %s, want 500m from the shares", r.String())
+	}
+}
