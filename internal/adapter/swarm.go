@@ -43,9 +43,6 @@ import (
 	"github.com/portainer/d2k/internal/types"
 )
 
-// swarmID converts a Kubernetes UID (UUID format) into a Swarm-style ID:
-// 25 uppercase alphanumeric characters, matching the format Docker Swarm uses.
-// The conversion is deterministic - the same UID always produces the same swarm ID.
 // serviceSwarmID returns the Swarm ID of the service a Deployment runs: the
 // one recorded when the service was created, or else one derived from the
 // Deployment's UID.
@@ -56,6 +53,9 @@ func serviceSwarmID(d appsv1.Deployment) string {
 	return swarmID(string(d.UID))
 }
 
+// swarmID converts a Kubernetes UID (UUID format) into a Swarm-style ID:
+// 25 uppercase alphanumeric characters, matching the format Docker Swarm uses.
+// The conversion is deterministic - the same UID always produces the same swarm ID.
 func swarmID(uid string) string {
 	// Strip hyphens from UUID, uppercase, truncate/pad to 25 chars.
 	s := strings.ToUpper(strings.ReplaceAll(uid, "-", ""))
