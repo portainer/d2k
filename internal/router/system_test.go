@@ -64,6 +64,14 @@ func TestInfoDescribesTheNamespace(t *testing.T) {
 	if body["NCPU"] != float64(2) || body["MemTotal"] != float64(1<<30) {
 		t.Errorf("with quota: NCPU = %v, MemTotal = %v, want 2 and 1Gi", body["NCPU"], body["MemTotal"])
 	}
+
+	// Under a quota of less than one CPU, the namespace can still run: as
+	// Docker on a fractional CPU does, report 1, not 0.
+	quota.Spec.Hard[corev1.ResourceLimitsCPU] = resource.MustParse("500m")
+	body = info(t, append(nodes, quota)...)
+	if body["NCPU"] != float64(1) {
+		t.Errorf("with a 500m quota: NCPU = %v, want 1", body["NCPU"])
+	}
 }
 
 // TestInfoSwarmOutsideSwarmMode checks /info outside Swarm mode reports an

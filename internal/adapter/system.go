@@ -45,8 +45,14 @@ func (a *KubernetesDockerAdapter) HostResources(ctx context.Context) (int, int64
 			memory = limit
 		}
 	}
-	// Value rounds up; report the whole CPUs workloads can rely on.
-	return int(cpu.MilliValue() / 1000), memory.Value(), nil
+	// Value rounds up; report the whole CPUs workloads can rely on, but at
+	// least 1 when there is any CPU: a quota below one CPU still runs
+	// containers, and clients divide by NCPU.
+	ncpu := int(cpu.MilliValue() / 1000)
+	if ncpu == 0 && cpu.MilliValue() > 0 {
+		ncpu = 1
+	}
+	return ncpu, memory.Value(), nil
 }
 
 // quotaLimit returns the first of names set in hard. Limits come before
