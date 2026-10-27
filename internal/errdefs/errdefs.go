@@ -15,6 +15,7 @@ type (
 	errForbidden        struct{ error }
 	errNotImplemented   struct{ error }
 	errUnavailable      struct{ error }
+	errNotModified      struct{ error }
 )
 
 func (errNotFound) NotFound()                 {}
@@ -23,6 +24,7 @@ func (errConflict) Conflict()                 {}
 func (errForbidden) Forbidden()               {}
 func (errNotImplemented) NotImplemented()     {}
 func (errUnavailable) Unavailable()           {}
+func (errNotModified) NotModified()           {}
 
 func (e errNotFound) Unwrap() error         { return e.error }
 func (e errInvalidParameter) Unwrap() error { return e.error }
@@ -30,6 +32,7 @@ func (e errConflict) Unwrap() error         { return e.error }
 func (e errForbidden) Unwrap() error        { return e.error }
 func (e errNotImplemented) Unwrap() error   { return e.error }
 func (e errUnavailable) Unwrap() error      { return e.error }
+func (e errNotModified) Unwrap() error      { return e.error }
 
 // NotFound marks err as a missing object (404).
 func NotFound(err error) error {
@@ -61,6 +64,12 @@ func Unavailable(err error) error {
 	return wrap(err, IsUnavailable, func(e error) error { return errUnavailable{e} })
 }
 
+// NotModified marks err as a request that changed nothing (304): starting
+// a running container, stopping a stopped one.
+func NotModified(err error) error {
+	return wrap(err, IsNotModified, func(e error) error { return errNotModified{e} })
+}
+
 func wrap(err error, is func(error) bool, mark func(error) error) error {
 	if err == nil || is(err) {
 		return err
@@ -85,6 +94,9 @@ func IsNotImplemented(err error) bool { return isKind[interface{ NotImplemented(
 
 // IsUnavailable reports whether err is of the Unavailable kind.
 func IsUnavailable(err error) bool { return isKind[interface{ Unavailable() }](err) }
+
+// IsNotModified reports whether err is of the NotModified kind.
+func IsNotModified(err error) bool { return isKind[interface{ NotModified() }](err) }
 
 func isKind[T any](err error) bool {
 	var target T

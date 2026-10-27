@@ -419,6 +419,12 @@ func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string
 	if getErr == nil && runsAsPod(*d) {
 		return a.stopPod(ctx, d, timeout)
 	}
+	if getErr == nil && (d.Spec.Replicas == nil || *d.Spec.Replicas == 0) {
+		// Stopped, and no pod left to wait for: as Docker, change nothing.
+		if list, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(resolved)); err == nil && len(list.Items) == 0 {
+			return errdefs.NotModified(fmt.Errorf("container %q is not running", name))
+		}
+	}
 	if err := a.scaleDeployment(ctx, name, 0); err != nil {
 		return err
 	}
@@ -468,6 +474,11 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
 	if err != nil {
 		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+	}
+	// As Docker, change nothing for a container that runs (or restarts).
+	if pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(resolved)); err == nil &&
+		(runsAsPod(*d) || d.Spec.Replicas != nil && *d.Spec.Replicas > 0) && containerState(*d, pods.Items, time.Now()).Running {
+		return errdefs.NotModified(fmt.Errorf("container %q is already running", name))
 	}
 	if runsAsPod(*d) {
 		err := a.startPod(ctx, d)
@@ -546,10 +557,11 @@ func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name str
 		return fmt.Errorf("unable to restart container %q: %w", name, err)
 	}
 	defer a.clearRestarting(ctx, resolved)
-	if err := a.StopContainer(ctx, name, timeout); err != nil {
+	// A restart starts a stopped container too.
+	if err := a.StopContainer(ctx, name, timeout); err != nil && !errdefs.IsNotModified(err) {
 		return err
 	}
-	if err := a.StartContainer(ctx, name); err != nil {
+	if err := a.StartContainer(ctx, name); err != nil && !errdefs.IsNotModified(err) {
 		return err
 	}
 	// As Docker's restart does, return once the container runs again:

@@ -207,7 +207,7 @@ func TestRunOnceLeavesOtherPodsAlone(t *testing.T) {
 }
 
 // As in Docker, starting a container that is running leaves it running:
-// its process is not restarted.
+// its process is not restarted, and the start reports it changed nothing.
 func TestStartRunningContainerKeepsItsRun(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	ctx := context.Background()
@@ -220,8 +220,8 @@ func TestStartRunningContainerKeepsItsRun(t *testing.T) {
 		t.Fatalf("start of a starting container = %v", err)
 	}
 	setStatus(t, a, podOf(t, a, "job"), corev1.PodRunning, corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}})
-	if err := a.StartContainer(ctx, "job"); err != nil {
-		t.Fatalf("start of a running container = %v", err)
+	if err := a.StartContainer(ctx, "job"); !errdefs.IsNotModified(err) {
+		t.Fatalf("start of a running container = %v, want not modified", err)
 	}
 	if p := podOf(t, a, "job"); p.Name != first.Name {
 		t.Fatalf("pod after starting a running container = %s, want %s: the run was replaced", p.Name, first.Name)

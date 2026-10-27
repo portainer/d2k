@@ -1508,3 +1508,42 @@ func TestCreateContainerClearsTheEntrypoint(t *testing.T) {
 		t.Errorf("create with an empty entrypoint and no command = %v, want an invalid parameter", err)
 	}
 }
+
+// As Docker does, starting a running container and stopping one that isn't
+// running change nothing and say so: errdefs.NotModified, which the API
+// answers with 304.
+func TestStartAndStopReportNotModified(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	for _, c := range []RunOptions{{Name: "web", Image: "nginx", RestartPolicy: "always"}, {Name: "job", Image: "busybox", RestartPolicy: "no"}} {
+		if _, _, err := a.CreateContainer(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		// Created, never started: there is nothing to stop.
+		if err := a.StopContainer(ctx, c.Name, nil); !errdefs.IsNotModified(err) {
+			t.Errorf("stop of the created container %s = %v, want not modified", c.Name, err)
+		}
+	}
+
+	// web runs: its Deployment is at 1 replica and its container runs.
+	d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Spec.Replicas = ptr(int32(1))
+	if _, err := client.AppsV1().Deployments(testNamespace).Update(ctx, d, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-1", Namespace: testNamespace, Labels: d.Spec.Template.Labels},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+			Name: "web", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
+		}}},
+	}
+	if _, err := client.CoreV1().Pods(testNamespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StartContainer(ctx, "web"); !errdefs.IsNotModified(err) {
+		t.Errorf("start of the running container = %v, want not modified", err)
+	}
+}

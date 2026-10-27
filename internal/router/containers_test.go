@@ -156,3 +156,14 @@ func TestContainerListSendsEmptyPorts(t *testing.T) {
 		t.Errorf("Ports = %s, want []", got)
 	}
 }
+
+// As the daemon does, stopping a container that isn't running answers 304.
+func TestStopStoppedContainerIsNotModified(t *testing.T) {
+	h, _ := newTestRouter()
+	if rec := do(t, h, "POST", "/containers/create?name=web", `{"Image":"nginx"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d", rec.Code)
+	}
+	if rec := do(t, h, "POST", "/containers/web/stop", ""); rec.Code != http.StatusNotModified || rec.Body.Len() != 0 {
+		t.Errorf("stop of a created container = %d %q, want 304 with no body", rec.Code, rec.Body.String())
+	}
+}

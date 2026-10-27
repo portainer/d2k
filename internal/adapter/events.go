@@ -247,7 +247,7 @@ func (a *KubernetesDockerAdapter) finishRestarts(ctx context.Context, deps []app
 			}
 			// A start that fails leaves the container stopped, as a failed
 			// docker start does: it is no longer restarting either way.
-			if err := a.StartContainer(ctx, d.Name); err != nil {
+			if err := a.StartContainer(ctx, d.Name); err != nil && !errdefs.IsNotModified(err) {
 				log.Warn().Str("context", "KubernetesAdapter").Str("container", d.Name).Err(err).Msg("Unable to finish a restart")
 			}
 			a.clearRestarting(ctx, d.Name)

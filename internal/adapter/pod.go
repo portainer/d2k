@@ -120,6 +120,10 @@ func (a *KubernetesDockerAdapter) stopPod(ctx context.Context, d *appsv1.Deploym
 	if err != nil {
 		return fmt.Errorf("unable to list the pods of %q: %w", d.Name, err)
 	}
+	if !slices.ContainsFunc(list.Items, func(p corev1.Pod) bool { return !podEnded(p) }) {
+		// Not running: as Docker, change nothing.
+		return errdefs.NotModified(fmt.Errorf("container %q is not running", d.Name))
+	}
 	grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
 	if g := d.Spec.Template.Spec.TerminationGracePeriodSeconds; g != nil {
 		grace = *g

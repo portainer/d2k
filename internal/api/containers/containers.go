@@ -343,7 +343,11 @@ func (h *Handler) Wait(w http.ResponseWriter, r *http.Request) {
 // Start handles POST /containers/{id}/start.
 func (h *Handler) Start(w http.ResponseWriter, r *http.Request) {
 	name := containerName(r.URL.Path, "/start")
-	if err := h.adapter.StartContainer(r.Context(), name); err != nil {
+	if err := h.adapter.StartContainer(r.Context(), name); errdefs.IsNotModified(err) {
+		// Already running: Docker answers 304.
+		w.WriteHeader(http.StatusNotModified)
+		return
+	} else if err != nil {
 		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("StartContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
@@ -359,7 +363,11 @@ func (h *Handler) Stop(w http.ResponseWriter, r *http.Request) {
 		httputils.WriteErrorFrom(w, err)
 		return
 	}
-	if err := h.adapter.StopContainer(r.Context(), name, timeout); err != nil {
+	if err := h.adapter.StopContainer(r.Context(), name, timeout); errdefs.IsNotModified(err) {
+		// Already stopped: Docker answers 304.
+		w.WriteHeader(http.StatusNotModified)
+		return
+	} else if err != nil {
 		log.Error().Str("context", "ContainersAPI").Any("name", name).Err(err).Msg("StopContainer failed")
 		httputils.WriteErrorFrom(w, err)
 		return
