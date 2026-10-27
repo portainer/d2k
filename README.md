@@ -287,6 +287,8 @@ With your own CA, `d2k-pki/client` holds the client certificate (`ca.pem`, `cert
 3. Apply `deploy/admission-policy.yaml` (once per cluster) and `deploy/kubernetes.yaml` with the install's namespace. d2k creates its certificates on first start (see above), unless you created a `d2k-tls` Secret.
 4. Re-add the environment in Portainer: "Docker API" with TLS at port 2376, with the client certificate from the `d2k-client` Secret. Docker CLI users need `DOCKER_TLS_VERIFY=1` and that certificate too.
 
+**The first `docker compose up` of each compose project after the upgrade re-creates every container of the project**, even with an unchanged compose file: 1.2.x did not keep compose's config hash (see below). Plan for each container restarting once, and copy out data 1.2.x left outside volumes first.
+
 On its first start, d2k records on the containers and volumes 1.2.x created what it reads now: their Docker names and labels, and the start of each container (a stopped one shows as exited). What 1.2.x did not keep can't be recovered:
 
 - **Volume data.** In Docker host mode, 1.2.x created volumes but did not mount them into containers, so what those containers wrote is in the container's own filesystem, not the volume. It is lost when the container is re-created (the first `docker compose up` after the upgrade does), as it was on any restart under 1.2.x. Copy out anything you need before upgrading.
