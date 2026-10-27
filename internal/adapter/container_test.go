@@ -1483,3 +1483,28 @@ func TestStopContainerTimeout(t *testing.T) {
 		}
 	}
 }
+
+// --entrypoint "" (Entrypoint [""]) clears the image's entrypoint, as in
+// Docker: the command runs on its own. Kubernetes can't run an empty
+// command, and has no way to clear an entrypoint but to replace it, so the
+// command becomes the container's command. Without a command there is
+// nothing to run, which Docker refuses too.
+func TestCreateContainerClearsTheEntrypoint(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx := context.Background()
+	if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "web", Image: "nginx", Entrypoint: []string{""}, Cmd: []string{"sh", "-c", "echo hi"}}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := client.AppsV1().Deployments(testNamespace).Get(ctx, "web", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := d.Spec.Template.Spec.Containers[0]
+	if !slices.Equal(c.Command, []string{"sh", "-c", "echo hi"}) || len(c.Args) != 0 {
+		t.Errorf("Command = %q, Args = %q, want the command alone as the Command", c.Command, c.Args)
+	}
+
+	if _, _, err := a.CreateContainer(ctx, RunOptions{Name: "db", Image: "nginx", Entrypoint: []string{""}}); !errdefs.IsInvalidParameter(err) {
+		t.Errorf("create with an empty entrypoint and no command = %v, want an invalid parameter", err)
+	}
+}

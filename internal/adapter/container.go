@@ -148,6 +148,15 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	if opts.AutoRemove && opts.RestartPolicy != "" && opts.RestartPolicy != string(container.RestartPolicyDisabled) {
 		return "", nil, errdefs.InvalidParameter(fmt.Errorf("can't create 'AutoRemove' container with restart policy"))
 	}
+	// Entrypoint [""] (--entrypoint "") clears the image's entrypoint, as in
+	// Docker. Kubernetes can only replace one, and can't run an empty
+	// command: the command becomes the container's command.
+	if len(opts.Entrypoint) == 1 && opts.Entrypoint[0] == "" {
+		if len(opts.Cmd) == 0 {
+			return "", nil, errdefs.InvalidParameter(fmt.Errorf("no command specified"))
+		}
+		opts.Entrypoint, opts.Cmd = opts.Cmd, nil
+	}
 
 	dockerName := strings.TrimPrefix(opts.Name, "/")
 	inUse, err := a.dockerNameInUse(ctx, dockerName)
