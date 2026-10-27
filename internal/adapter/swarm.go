@@ -547,7 +547,14 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 			} else {
 				pvcName := sanitiseResourceName(m.Source)
 				// Create a fallback PVC if it doesn't exist yet.
-				if _, pvcErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, pvcName, metav1.GetOptions{}); pvcErr != nil {
+				existing, pvcErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, pvcName, metav1.GetOptions{})
+				if pvcErr == nil {
+					// Names that differ only by case, _ or - share a PVC
+					// name: don't mount another volume's.
+					if _, err := a.InspectVolume(ctx, m.Source); errdefs.IsNotFound(err) {
+						return nil, volumeNameConflict(m.Source, *existing)
+					}
+				} else {
 					if errors.IsNotFound(pvcErr) {
 						qty := resource.MustParse("1Gi")
 						pvcLabels := map[string]string{
@@ -571,9 +578,10 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 						}
 						fallbackPVC := &corev1.PersistentVolumeClaim{
 							ObjectMeta: metav1.ObjectMeta{
-								Name:      pvcName,
-								Namespace: a.namespace,
-								Labels:    pvcLabels,
+								Name:        pvcName,
+								Namespace:   a.namespace,
+								Labels:      pvcLabels,
+								Annotations: map[string]string{types.AnnotationDockerName: m.Source},
 							},
 							Spec: pvcSpec,
 						}

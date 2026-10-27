@@ -210,6 +210,9 @@ func (a *KubernetesDockerAdapter) createPVC(ctx context.Context, name string, pv
 		}
 		existing, err := a.InspectVolume(ctx, name)
 		if errdefs.IsNotFound(err) {
+			if old, getErr := a.client.CoreV1().PersistentVolumeClaims(a.namespace).Get(ctx, pvc.Name, metav1.GetOptions{}); getErr == nil {
+				return nil, volumeNameConflict(name, *old)
+			}
 			return nil, errdefs.Conflict(fmt.Errorf("volume name %q is used by a PersistentVolumeClaim not managed by d2k", name))
 		}
 		return existing, err
@@ -218,6 +221,16 @@ func (a *KubernetesDockerAdapter) createPVC(ctx context.Context, name string, pv
 		return nil, fmt.Errorf("unable to create PVC %q: %w", pvc.Name, err)
 	}
 	return pvcToVolume(*created), nil
+}
+
+// volumeNameConflict is the error for volume name, whose PVC name is
+// already pvc's: a PVC not managed by d2k, or another volume's. Volume
+// names that differ only by case, _ or - map to the same PVC name.
+func volumeNameConflict(name string, pvc corev1.PersistentVolumeClaim) error {
+	if pvc.Labels[types.LabelManagedBy] != types.LabelManagedByValue {
+		return errdefs.Conflict(fmt.Errorf("volume name %q is used by a PersistentVolumeClaim not managed by d2k", name))
+	}
+	return errdefs.Conflict(fmt.Errorf("volume name %q conflicts with volume %q: d2k stores both as PersistentVolumeClaim %q", name, recordedName(pvc.ObjectMeta), pvc.Name))
 }
 
 // waitForPVCGone waits until the PVC old no longer exists, or timeout

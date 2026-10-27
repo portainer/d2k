@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -133,8 +134,8 @@ func TestVolumeNamesSharingAPVCName(t *testing.T) {
 	if _, err := a.InspectVolume(ctx, "demo_data"); !errdefs.IsNotFound(err) {
 		t.Fatalf("inspect of another name for the PVC = %v, want not found", err)
 	}
-	if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: "demo_data"}); !errdefs.IsConflict(err) {
-		t.Fatalf("create of another name for the PVC = %v, want conflict", err)
+	if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: "demo_data"}); !errdefs.IsConflict(err) || !strings.Contains(err.Error(), `"demo-data"`) {
+		t.Fatalf("create of another name for the PVC = %v, want a conflict naming demo-data", err)
 	}
 }
 

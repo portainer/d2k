@@ -323,3 +323,31 @@ func TestSwarmServiceContainerIsTheTasksContainer(t *testing.T) {
 		t.Errorf("inspected task container ID = %v, want %s", got, containers[0].ID)
 	}
 }
+
+// Volume names that differ only by case, _ or - map to the same PVC. A
+// service doesn't mount another volume's PVC: it is refused, as docker
+// volume create is. The PVC a service creates for its volume records the
+// volume's name, so the other names don't find it either.
+func TestServiceVolumeNamesSharingAPVCName(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	ctx := context.Background()
+	if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: "demo-data"}); err != nil {
+		t.Fatal(err)
+	}
+	service := func(name, volume string) string {
+		return `{"Name":"` + name + `","TaskTemplate":{"ContainerSpec":{"Image":"nginx","Mounts":[{"Type":"volume","Source":"` + volume + `","Target":"/data"}]}}}`
+	}
+	if _, err := a.SwarmCreateService(ctx, strings.NewReader(service("web", "Demo_Data"))); !errdefs.IsConflict(err) {
+		t.Errorf("service mounting another name for demo-data's PVC = %v, want conflict", err)
+	}
+
+	if _, err := a.SwarmCreateService(ctx, strings.NewReader(service("db", "db_data"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.InspectVolume(ctx, "db_data"); err != nil {
+		t.Errorf("inspect of the service's volume = %v", err)
+	}
+	if _, err := a.InspectVolume(ctx, "db-data"); !errdefs.IsNotFound(err) {
+		t.Errorf("inspect of another name for the service's volume = %v, want not found", err)
+	}
+}
