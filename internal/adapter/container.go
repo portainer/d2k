@@ -1,24 +1,37 @@
 package adapter
 
 import (
+	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"maps"
+	"net/netip"
+	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
-	dockertypes "github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/go-connections/nat"
+	"github.com/distribution/reference"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
+	"github.com/rs/zerolog/log"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/util/retry"
 
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/internal/types"
 	"github.com/portainer/d2k/pkg/portmapper"
 )
@@ -27,6 +40,7 @@ import (
 type RunOptions struct {
 	Name         string
 	Image        string
+	Entrypoint   []string
 	Cmd          []string
 	Env          []string
 	Labels       map[string]string
@@ -35,34 +49,137 @@ type RunOptions struct {
 	ExposedPorts map[string]struct{}
 	Volumes      []string
 	GPUCount     int
+	// Binds are HostConfig.Binds entries: "<volume>:<path>[:<options>]".
+	Binds []string
+	// Aliases are the container's network aliases (NetworkingConfig).
+	Aliases []string
+	// Networks are the names of the Docker networks the container joins.
+	Networks []string
+
+	WorkingDir  string
+	Tty         bool
+	Stdin       bool
+	StdinOnce   bool
+	RunAsUser   *int64
+	RunAsGroup  *int64
+	StopTimeout *int64 // seconds; the pod's termination grace period
+	HostAliases []corev1.HostAlias
+	Resources   corev1.ResourceRequirements
+	CapAdd      []string
+	CapDrop     []string
+	Privileged  bool
+	ReadOnly    bool
+	Healthcheck *corev1.Probe // readiness probe; the container's health
+	// RestartPolicy is Docker's: "no" and "on-failure" containers run as
+	// pods, "always" and "unless-stopped" ones as Deployment replicas.
+	RestartPolicy string
+	// AutoRemove removes the container when its run ends.
+	AutoRemove bool
+
+	// Hostname is the pod's hostname. Compose services keep their service
+	// name, which their DNS needs.
+	Hostname   string
+	DNSSearch  []string
+	DNSOptions []corev1.PodDNSConfigOption
+	Sysctls    []corev1.Sysctl
+	// Tmpfs are memory-backed mounts, including /dev/shm for ShmSize.
+	Tmpfs              []TmpfsMount
+	NoNewPrivileges    bool
+	Seccomp            *corev1.SeccompProfile
+	AppArmor           *corev1.AppArmorProfile
+	SELinux            *corev1.SELinuxOptions
+	SupplementalGroups []int64
+	// Annotations are set on the pod.
+	Annotations map[string]string
+	// VolumeSubpaths maps mount targets to the volume subdirectory mounted.
+	VolumeSubpaths map[string]string
+}
+
+// TmpfsMount is a memory-backed mount.
+type TmpfsMount struct {
+	Target    string
+	SizeLimit *resource.Quantity
 }
 
 // ContainerSummary is a Docker-compatible summary row, as returned by docker ps.
 type ContainerSummary struct {
-	ID        string
-	Names     []string
-	Image     string
+	ID    string
+	Names []string
+	Image string
+	// ImageID is the ID docker images lists the container's image by, its
+	// digest, once a pod runs it.
+	ImageID   string
 	Status    string
 	State     string
 	Created   int64
-	Ports     []dockertypes.Port
+	Ports     []container.PortSummary
 	Labels    map[string]string
 	IPAddress string
+
+	// Networks maps the names of the container's networks to their IDs.
+	Networks map[string]string
+	Mounts   []container.MountPoint
+}
+
+// containerNameChars are the characters Docker allows in a container name,
+// and validContainerName Docker's rule for one (moby daemon/names).
+const containerNameChars = `[a-zA-Z0-9][a-zA-Z0-9_.-]`
+
+var validContainerName = regexp.MustCompile(`^/?` + containerNameChars + `+$`)
+
+// validateContainerName refuses a name Docker refuses, with Docker's error.
+func validateContainerName(name string) error {
+	if !validContainerName.MatchString(name) {
+		//nolint:staticcheck // ST1005: Docker's own message, which clients may match
+		return errdefs.InvalidParameter(fmt.Errorf("Invalid container name (%s), only %s are allowed", name, containerNameChars))
+	}
+	return nil
 }
 
 // CreateContainer implements docker run: creates a Deployment and, where
 // required, a Service in the target namespace.
 func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunOptions) (string, []string, error) {
 	if opts.Name == "" {
-		return "", nil, fmt.Errorf("container name is required")
+		return "", nil, errdefs.InvalidParameter(fmt.Errorf("container name is required"))
+	}
+	if err := validateContainerName(opts.Name); err != nil {
+		return "", nil, err
+	}
+	if opts.AutoRemove && opts.RestartPolicy != "" && opts.RestartPolicy != string(container.RestartPolicyDisabled) {
+		return "", nil, errdefs.InvalidParameter(fmt.Errorf("can't create 'AutoRemove' container with restart policy"))
+	}
+	// Entrypoint [""] (--entrypoint "") clears the image's entrypoint, as in
+	// Docker. Kubernetes can only replace one, and can't run an empty
+	// command: the command becomes the container's command.
+	if len(opts.Entrypoint) == 1 && opts.Entrypoint[0] == "" {
+		if len(opts.Cmd) == 0 {
+			return "", nil, errdefs.InvalidParameter(fmt.Errorf("no command specified"))
+		}
+		opts.Entrypoint, opts.Cmd = opts.Cmd, nil
 	}
 
-	// Sanitise the name for Kubernetes: lowercase, underscores to hyphens, max 63 chars.
-	opts.Name = strings.ToLower(strings.ReplaceAll(opts.Name, "_", "-"))
+	dockerName := strings.TrimPrefix(opts.Name, "/")
+	inUse, err := a.dockerNameInUse(ctx, dockerName)
+	if err != nil {
+		return "", nil, err
+	}
+	if inUse {
+		return "", nil, errdefs.Conflict(fmt.Errorf("container name %q is already in use", dockerName))
+	}
+
+	// Sanitise the name for Kubernetes: lowercase, underscores and dots to
+	// hyphens (Service names allow neither), max 63 chars.
+	opts.Name = strings.ToLower(strings.NewReplacer("_", "-", ".", "-").Replace(dockerName))
 	if len(opts.Name) > 63 {
 		opts.Name = opts.Name[:63]
 	}
 	opts.Name = strings.TrimRight(opts.Name, "-")
+
+	// A renamed container keeps its Deployment name, which may be the name
+	// requested here. The Docker name is free, so use another Deployment name.
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, opts.Name, metav1GetOptions()); err == nil {
+		opts.Name = strings.TrimRight(truncate(opts.Name, 57), "-") + "-" + rand.String(5)
+	}
 
 	// Resolve port mappings and determine Service type.
 	pmReq := portmapper.Request{
@@ -76,16 +193,86 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, fmt.Errorf("unable to resolve port mappings: %w", err)
 	}
 
+	volumes, volumeMounts, volumeNames, volumeWarnings, err := a.namedVolumeMounts(ctx, opts.Binds)
+	if err != nil {
+		return "", nil, err
+	}
+	warnings = append(warnings, volumeWarnings...)
+	warnings = append(warnings, a.networkWarnings(ctx, opts.Networks)...)
+	for i := range volumeMounts {
+		volumeMounts[i].SubPath = opts.VolumeSubpaths[volumeMounts[i].MountPath]
+	}
+	for i, m := range opts.Tmpfs {
+		name := fmt.Sprintf("tmpfs-%d", i)
+		volumes = append(volumes, corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: m.SizeLimit},
+		}})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: name, MountPath: m.Target})
+	}
+	if opts.Hostname != "" && len(validation.IsDNS1123Label(opts.Hostname)) > 0 {
+		warnings = append(warnings, fmt.Sprintf("hostname %q ignored: a pod hostname must be a DNS label", opts.Hostname))
+		opts.Hostname = ""
+	}
+	if opts.GPUCount > 0 && a.gpuResourceName == "" {
+		warnings = append(warnings, "GPU request ignored: set D2K_GPU_RESOURCE_NAME to the device plugin resource name")
+	}
+
 	// Build and create the Deployment.
 	deployment, err := a.buildDeployment(ctx, opts, kind, mappings)
 	if err != nil {
 		return "", nil, fmt.Errorf("unable to build deployment: %w", err)
 	}
+	deployment.Annotations[types.AnnotationDockerName] = dockerName
+	if opts.RestartPolicy != "" {
+		deployment.Annotations[types.AnnotationRestartPolicy] = opts.RestartPolicy
+	}
+	if opts.AutoRemove {
+		deployment.Annotations[types.AnnotationAutoRemove] = "true"
+	}
+	if len(opts.Labels) > 0 {
+		dockerLabels, err := json.Marshal(opts.Labels)
+		if err != nil {
+			return "", nil, fmt.Errorf("unable to encode labels: %w", err)
+		}
+		deployment.Annotations[types.AnnotationDockerLabels] = string(dockerLabels)
+	}
+	if len(volumeNames) > 0 {
+		raw, err := json.Marshal(volumeNames)
+		if err != nil {
+			return "", nil, fmt.Errorf("unable to encode volume names: %w", err)
+		}
+		deployment.Annotations[types.AnnotationVolumeNames] = string(raw)
+	}
+	deployment.Spec.Template.Spec.Volumes = volumes
+	deployment.Spec.Template.Spec.Containers[0].VolumeMounts = volumeMounts
 
+	if len(opts.Networks) > 0 {
+		networks, err := json.Marshal(opts.Networks)
+		if err != nil {
+			return "", nil, fmt.Errorf("unable to encode networks: %w", err)
+		}
+		deployment.Annotations[types.AnnotationNetworks] = string(networks)
+	}
+
+	// Compose makes each service resolvable by its service name.
+	project := opts.Labels["com.docker.compose.project"]
+	service := opts.Labels["com.docker.compose.service"]
+	scoped := project != "" && service != ""
+	if scoped {
+		if opts.Hostname != "" {
+			warnings = append(warnings, fmt.Sprintf("hostname %q ignored: compose services use their service name, which their DNS needs", opts.Hostname))
+		}
+		warnings = append(warnings, a.scopeDNSToProject(deployment, project, service)...)
+	}
+	warnings = append(warnings, ignoredAliases(opts.Aliases, dockerName, service)...)
+
+	// From here the container is created whole or rolled back, even if the
+	// client goes away: a half-created one would hold its name.
+	ctx = context.WithoutCancel(ctx)
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			return "", nil, fmt.Errorf("container name %q is already in use", opts.Name)
+			return "", nil, errdefs.Conflict(fmt.Errorf("container name %q is already in use", opts.Name))
 		}
 		if errors.IsForbidden(err) {
 			return "", nil, fmt.Errorf("deployment rejected by Kubernetes: %w", err)
@@ -98,9 +285,9 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	// short-name DNS work (e.g. "redis", "postgres") without needing FQDNs.
 	// Build ClusterIP ports from container port mappings.
 	var clusterPorts []corev1.ServicePort
-	for i, m := range mappings {
+	for _, m := range uniqueContainerPorts(mappings) {
 		clusterPorts = append(clusterPorts, corev1.ServicePort{
-			Name:       fmt.Sprintf("port-%d", i),
+			Name:       fmt.Sprintf("port-%d", len(clusterPorts)),
 			Protocol:   corev1.Protocol(m.Protocol),
 			Port:       int32(m.ContainerPort),
 			TargetPort: intstr.FromInt(m.ContainerPort),
@@ -112,6 +299,8 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	clusterSpec := corev1.ServiceSpec{
 		Selector: map[string]string{"app": opts.Name},
 		Ports:    clusterPorts,
+		// A failing healthcheck must not take the container out of service.
+		PublishNotReadyAddresses: true,
 	}
 	if len(clusterPorts) == 0 {
 		clusterSpec.ClusterIP = "None"
@@ -120,7 +309,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 	}
 	clusterSvc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      opts.Name,
+			Name:      serviceName(opts.Name),
 			Namespace: a.namespace,
 			Labels:    managedLabels(opts.Name),
 			Annotations: map[string]string{
@@ -129,11 +318,13 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		},
 		Spec: clusterSpec,
 	}
-	if _, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{}); svcErr != nil {
-		if !errors.IsAlreadyExists(svcErr) {
-			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			return "", nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
-		}
+	_, svcErr := a.client.CoreV1().Services(a.namespace).Create(ctx, clusterSvc, metav1.CreateOptions{})
+	if errors.IsAlreadyExists(svcErr) && a.ownService(ctx, clusterSvc.Name, opts.Name) == nil {
+		svcErr = errdefs.Conflict(fmt.Errorf("the name %q is taken by Service %q, which is not this container's", dockerName, clusterSvc.Name))
+	}
+	if svcErr != nil && !errors.IsAlreadyExists(svcErr) {
+		_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+		return "", nil, fmt.Errorf("unable to create ClusterIP service for %q: %w", opts.Name, svcErr)
 	}
 
 	// Create a LoadBalancer or NodePort Service for externally published ports.
@@ -145,12 +336,21 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		if _, svcErr = a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{}); svcErr != nil {
 			// Roll back the Deployment and ClusterIP service so we don't leave orphans.
 			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
-			_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+			a.deleteOwnService(ctx, serviceName(opts.Name), opts.Name)
 			return "", nil, fmt.Errorf("unable to create service for %q: %w", opts.Name, svcErr)
 		}
 	}
 
-	return string(created.UID), warnings, nil
+	if scoped {
+		if err := a.ensureProjectDNSService(ctx, project, created); err != nil {
+			_ = a.client.AppsV1().Deployments(a.namespace).Delete(ctx, opts.Name, metav1.DeleteOptions{})
+			a.deleteOwnService(ctx, serviceName(opts.Name), opts.Name)
+			a.deleteOwnService(ctx, publishedServiceName(opts.Name), opts.Name)
+			return "", nil, err
+		}
+	}
+
+	return containerID(created.UID), warnings, nil
 }
 
 // ListContainers implements docker ps.
@@ -160,19 +360,35 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 		return nil, fmt.Errorf("unable to list deployments: %w", err)
 	}
 
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list pods: %w", err)
+	}
+	podsByContainer := map[string][]corev1.Pod{}
+	for _, p := range pods.Items {
+		podsByContainer[p.Labels["app"]] = append(podsByContainer[p.Labels["app"]], p)
+	}
+	// One list for all containers: a lookup per container is throttled by
+	// the client's rate limit and made `docker ps` take seconds.
+	services, err := a.client.CoreV1().Services(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list services: %w", err)
+	}
+	servicesByName := map[string]corev1.Service{}
+	for _, svc := range services.Items {
+		servicesByName[svc.Name] = svc
+	}
+
 	var summaries []ContainerSummary
 
 	for _, d := range deployments.Items {
-		if !all && d.Status.ReadyReplicas == 0 {
+		summary := deploymentToSummary(d, podsByContainer[d.Name])
+		if !all && summary.State != string(container.StateRunning) && summary.State != string(container.StateRestarting) {
 			continue
 		}
-		summary := deploymentToSummary(d)
 
-		// Look up the Service to get the LoadBalancer IP.
-		// Service name may have a "svc-" prefix if the deployment name started with a digit.
-		svcName := serviceName(d.Name)
-		svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, svcName, metav1GetOptions())
-		if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
+		// The published Service, if any, gives the LoadBalancer IP.
+		if svc, ok := servicesByName[publishedServiceName(d.Name)]; ok && len(svc.Status.LoadBalancer.Ingress) > 0 {
 			summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].IP
 			if summary.IPAddress == "" {
 				summary.IPAddress = svc.Status.LoadBalancer.Ingress[0].Hostname
@@ -186,22 +402,173 @@ func (a *KubernetesDockerAdapter) ListContainers(ctx context.Context, all bool) 
 }
 
 // StopContainer implements docker stop: scales the Deployment to 0 replicas.
-// Returns an error if the Deployment is managed by the Swarm layer.
-func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string) error {
+// Returns an error if the Deployment is managed by the Swarm layer. timeout,
+// docker stop -t, is how many seconds the container has to stop before it
+// is killed: its pods' grace period. Without it, or at -1 (Docker's "wait
+// for ever", which Kubernetes has no equivalent of), the pods keep theirs.
+// -t 0 gives 1 s, as rm -f does: see stopGracePeriod.
+func (a *KubernetesDockerAdapter) StopContainer(ctx context.Context, name string, timeout *int) error {
 	resolved, err := a.resolveDeploymentName(ctx, name)
 	if err != nil {
 		return err
 	}
 	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
 	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
-		return fmt.Errorf("cannot stop a container that is managed by swarm: use docker service scale instead")
+		return errdefs.Conflict(fmt.Errorf("cannot stop a container that is managed by swarm: use docker service scale instead"))
 	}
-	return a.scaleDeployment(ctx, name, 0)
+	if getErr == nil && runsAsPod(*d) {
+		return a.stopPod(ctx, d, timeout)
+	}
+	if getErr == nil && (d.Spec.Replicas == nil || *d.Spec.Replicas == 0) {
+		// Stopped, and no pod left to wait for: as Docker, change nothing.
+		if list, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(resolved)); err == nil && len(list.Items) == 0 {
+			return errdefs.NotModified(fmt.Errorf("container %q is not running", name))
+		}
+	}
+	if err := a.scaleDeployment(ctx, name, 0); err != nil {
+		return err
+	}
+	// As Docker's stop does, return once the container has stopped: compose
+	// starts its replacement, on the same volumes, right after.
+	grace := int64(corev1.DefaultTerminationGracePeriodSeconds)
+	if getErr == nil && d.Spec.Template.Spec.TerminationGracePeriodSeconds != nil {
+		grace = *d.Spec.Template.Spec.TerminationGracePeriodSeconds
+	}
+	if timeout != nil && *timeout >= 0 {
+		// The ReplicaSet deletes the pods with their own grace period: a
+		// shorter one, given on a delete of its own, takes over.
+		grace = stopGracePeriod(*timeout)
+		pods := a.client.CoreV1().Pods(a.namespace)
+		if list, err := pods.List(ctx, podsOf(resolved)); err == nil {
+			for _, p := range list.Items {
+				if err := pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace}); err != nil && !errors.IsNotFound(err) {
+					return fmt.Errorf("unable to stop the pod of %q: %w", resolved, err)
+				}
+			}
+		}
+	}
+	code, log, ok := a.waitForPodsGoneKeepingLog(ctx, resolved, time.Duration(grace+30)*time.Second)
+	updates := map[string]*string{}
+	if ok {
+		updates[types.AnnotationExitCode] = &code
+	}
+	if log != "" {
+		updates[types.AnnotationLastLog] = &log
+	}
+	if len(updates) > 0 {
+		// A container removed meanwhile has no state left to record.
+		if err := a.annotate(ctx, resolved, updates); err != nil && !errors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
-// StartContainer implements docker start: scales the Deployment back to 1 replica.
+// StartContainer implements docker start: it runs a pod for a container that
+// runs once, and scales the Deployment back to 1 replica otherwise.
 func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name string) error {
-	return a.scaleDeployment(ctx, name, 1)
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return err
+	}
+	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+	if err != nil {
+		return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+	}
+	// As Docker, change nothing for a container that runs (or restarts).
+	if pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(resolved)); err == nil &&
+		(runsAsPod(*d) || d.Spec.Replicas != nil && *d.Spec.Replicas > 0) && containerState(*d, pods.Items, time.Now()).Running {
+		return errdefs.NotModified(fmt.Errorf("container %q is already running", name))
+	}
+	if runsAsPod(*d) {
+		err := a.startPod(ctx, d)
+		if err == nil {
+			if err = a.waitForStart(ctx, resolved); err != nil {
+				a.stopFailedRun(ctx, resolved)
+			}
+		}
+		if err != nil && d.Annotations[types.AnnotationAutoRemove] == "true" {
+			a.removeFailedStart(ctx, resolved)
+		}
+		return err
+	}
+	if err := a.scaleDeployment(ctx, name, 1); err != nil {
+		return err
+	}
+	err = a.waitUntilPodCreated(ctx, resolved, podCreateTimeout)
+	if err == nil {
+		err = a.waitForStart(ctx, resolved)
+	}
+	if err != nil {
+		if d.Annotations[types.AnnotationAutoRemove] == "true" {
+			a.removeFailedStart(ctx, resolved)
+			return err
+		}
+		// As Docker's failed start does, leave the container stopped: at 1
+		// replica it would start by itself once the quota frees.
+		if scaleErr := a.scaleDeployment(context.WithoutCancel(ctx), resolved, 0); scaleErr != nil {
+			log.Warn().Str("context", "KubernetesAdapter").Str("container", resolved).Err(scaleErr).Msg("Unable to stop a container whose start failed")
+		}
+		return err
+	}
+	return nil
+}
+
+// stopFailedRun leaves a run-once container whose start failed as Docker
+// leaves it, created and not running: its pod goes, so the kubelet stops
+// retrying, and the start is no longer recorded.
+func (a *KubernetesDockerAdapter) stopFailedRun(ctx context.Context, name string) {
+	ctx = context.WithoutCancel(ctx)
+	pods := a.client.CoreV1().Pods(a.namespace)
+	if list, err := pods.List(ctx, podsOf(name)); err == nil {
+		grace := int64(0)
+		for _, p := range list.Items {
+			_ = pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
+		}
+	}
+	if err := a.annotate(ctx, name, map[string]*string{types.AnnotationStartedAt: nil}); err != nil && !errors.IsNotFound(err) {
+		log.Warn().Str("context", "KubernetesAdapter").Str("container", name).Err(err).Msg("Unable to record a container whose start failed")
+	}
+}
+
+// removeFailedStart removes an AutoRemove container whose start failed, as
+// Docker does, the same as one whose run ends: docker run --rm waits for
+// the removal before it reports the start's error.
+func (a *KubernetesDockerAdapter) removeFailedStart(ctx context.Context, name string) {
+	if err := a.RemoveContainer(context.WithoutCancel(ctx), name); err != nil {
+		log.Warn().Str("context", "KubernetesAdapter").Str("container", name).Err(err).Msg("Unable to remove an AutoRemove container whose start failed")
+	}
+}
+
+// RestartContainer implements docker restart: it stops the container, then
+// starts it. As in Docker, the end of the run a restart stops does not
+// remove an AutoRemove container.
+func (a *KubernetesDockerAdapter) RestartContainer(ctx context.Context, name string, timeout *int) error {
+	// As in Docker, a client that goes away does not cancel the restart: a
+	// stop without its start would leave the container stopped (D2K-083).
+	ctx = context.WithoutCancel(ctx)
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return err
+	}
+	// Recorded on the container, not in d2k: another d2k, as in a rollout,
+	// sees it, and finishes the restart if this one stops before the start.
+	if err := a.annotate(ctx, resolved, map[string]*string{types.AnnotationRestarting: ptr(time.Now().UTC().Format(time.RFC3339Nano))}); err != nil {
+		return fmt.Errorf("unable to restart container %q: %w", name, err)
+	}
+	defer a.clearRestarting(ctx, resolved)
+	// A restart starts a stopped container too.
+	if err := a.StopContainer(ctx, name, timeout); err != nil && !errdefs.IsNotModified(err) {
+		return err
+	}
+	if err := a.StartContainer(ctx, name); err != nil && !errdefs.IsNotModified(err) {
+		return err
+	}
+	// As Docker's restart does, return once the container runs again:
+	// clients that list containers right after, as compose pause and port
+	// do, skip one that is still starting.
+	a.waitUntilRunStarted(ctx, resolved, restartStartTimeout)
+	return nil
 }
 
 // RemoveContainer implements docker rm: deletes the Deployment and its associated Service (if any).
@@ -216,58 +583,120 @@ func (a *KubernetesDockerAdapter) RemoveContainer(ctx context.Context, name stri
 	// Docker Swarm applies: "cannot remove a running container that is managed by swarm".
 	d, getErr := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
 	if getErr == nil && d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue {
-		return fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead")
+		return errdefs.Conflict(fmt.Errorf("cannot remove a running container that is managed by swarm: use docker service rm instead"))
+	}
+	// From here the removal runs to the end even if the client goes (Ctrl-C):
+	// stopping between steps would leave the container's Services behind.
+	// Only the wait for its pods to die ends with the client.
+	steps := context.WithoutCancel(ctx)
+	if getErr == nil && runsAsPod(*d) {
+		a.killRunOncePods(steps, resolved)
 	}
 
-	if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
+	if err := a.client.AppsV1().Deployments(a.namespace).Delete(steps, resolved, metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("unable to delete deployment %q: %w", resolved, err)
 	}
 
 	// Best-effort Service deletion — remove ClusterIP DNS service and LB/NodePort service.
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{})
-	_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, serviceName(resolved), metav1.DeleteOptions{})
+	a.deleteOwnService(steps, serviceName(resolved), resolved)
+	a.deleteOwnService(steps, publishedServiceName(resolved), resolved)
 
+	a.killPods(ctx, resolved)
 	return nil
 }
-// Rename Container
+
+// killRunOncePods deletes a run-once container's pods with a 1 s grace
+// period before its Deployment goes. The kubelet stops a pod with the grace
+// period of the first delete it sees, and the garbage collector's would be
+// the full stop grace period. Nothing replaces these pods.
+func (a *KubernetesDockerAdapter) killRunOncePods(ctx context.Context, name string) {
+	grace := int64(1)
+	pods := a.client.CoreV1().Pods(a.namespace)
+	list, err := pods.List(ctx, podsOf(name))
+	if err != nil {
+		return
+	}
+	for _, p := range list.Items {
+		if p.DeletionTimestamp == nil {
+			_ = pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
+		}
+	}
+}
+
+// stopGracePeriod is the grace period docker stop -t timeout gives a
+// container's pods: timeout seconds, but at least 1. A grace period of 0 is
+// a force delete: it removes the pod from the API before the kubelet has
+// killed its container, so a replacement could mount the same volumes while
+// it still runs. Clients see no difference.
+func stopGracePeriod(timeout int) int64 {
+	return max(int64(timeout), 1)
+}
+
+// killPods cuts the grace period of a removed container's pods to 1 s, as
+// Docker's rm -f kills the container, and waits until they are gone: the
+// garbage collector deletes them with their stop grace period. A kubelet
+// that has already begun stopping a pod keeps the longer one.
+func (a *KubernetesDockerAdapter) killPods(ctx context.Context, name string) {
+	// Not 0: that removes the pod from the API before the kubelet has killed
+	// its container, so its volumes would be released while it still runs.
+	grace := int64(1)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(corev1.DefaultTerminationGracePeriodSeconds+30)*time.Second)
+	defer cancel()
+	pods := a.client.CoreV1().Pods(a.namespace)
+	for {
+		list, err := pods.List(ctx, podsOf(name))
+		if err != nil || len(list.Items) == 0 {
+			return
+		}
+		for _, p := range list.Items {
+			// Only a pod the collector is deleting: its ReplicaSet, which d2k
+			// may not touch, would replace one deleted before.
+			if g := p.DeletionGracePeriodSeconds; p.DeletionTimestamp != nil && (g == nil || *g > grace) {
+				_ = pods.Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: &grace})
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// RenameContainer implements docker rename. The Docker name lives in an
+// annotation, so the Deployment, and with it the container ID, is unchanged.
 func (a *KubernetesDockerAdapter) RenameContainer(ctx context.Context, nameOrID, newName string) error {
-    resolved, err := a.resolveDeploymentName(ctx, nameOrID)
-    if err != nil {
-        return err
-    }
+	resolved, err := a.resolveDeploymentName(ctx, nameOrID)
+	if err != nil {
+		return err
+	}
 
-    d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
-    if err != nil {
-        return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
-    }
+	if err := validateContainerName(newName); err != nil {
+		return err
+	}
+	newName = strings.TrimPrefix(newName, "/")
+	inUse, err := a.dockerNameInUse(ctx, newName)
+	if err != nil {
+		return err
+	}
+	if inUse {
+		return errdefs.Conflict(fmt.Errorf("container name %q is already in use", newName))
+	}
 
-    // Sanitise the new name.
-    newName = strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(newName, "/"), "_", "-"))
-    if len(newName) > 63 {
-        newName = newName[:63]
-    }
-    newName = strings.TrimRight(newName, "-")
-
-    // Create a new Deployment with the new name, copying the spec.
-    newDeployment := d.DeepCopy()
-    newDeployment.Name = newName
-    newDeployment.ResourceVersion = ""
-    newDeployment.UID = ""
-
-    if _, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, newDeployment, metav1.CreateOptions{}); err != nil {
-        return fmt.Errorf("unable to create renamed deployment %q: %w", newName, err)
-    }
-
-    // Delete the old Deployment.
-    if err := a.client.AppsV1().Deployments(a.namespace).Delete(ctx, resolved, metav1.DeleteOptions{}); err != nil {
-        return fmt.Errorf("unable to delete old deployment %q: %w", resolved, err)
-    }
-
-    return nil
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"annotations": map[string]string{types.AnnotationDockerName: newName}},
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := a.client.AppsV1().Deployments(a.namespace).Patch(ctx, resolved, k8stypes.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("unable to rename container %q: %w", nameOrID, err)
+	}
+	return nil
 }
 
 // InspectContainer implements docker inspect for a single container.
-func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name string) (*dockertypes.ContainerJSON, error) {
+func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name string) (*container.InspectResponse, error) {
 	resolved, err := a.resolveDeploymentName(ctx, name)
 	if err != nil {
 		return nil, err
@@ -279,7 +708,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 	}
 
 	lbIP := ""
-	svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, serviceName(resolved), metav1GetOptions())
+	svc, svcErr := a.client.CoreV1().Services(a.namespace).Get(ctx, publishedServiceName(resolved), metav1GetOptions())
 	if svcErr == nil && len(svc.Status.LoadBalancer.Ingress) > 0 {
 		lbIP = svc.Status.LoadBalancer.Ingress[0].IP
 		if lbIP == "" {
@@ -287,7 +716,24 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 		}
 	}
 
-	result := deploymentToContainerJSON(*d, lbIP)
+	pods, err := a.client.CoreV1().Pods(a.namespace).List(ctx, podsOf(d.Name))
+	if err != nil {
+		return nil, fmt.Errorf("unable to list pods of %q: %w", resolved, err)
+	}
+
+	result := deploymentToContainerJSON(*d, pods.Items, lbIP)
+	if c := d.Spec.Template.Spec.Containers; a.gpuResourceName != "" && len(c) > 0 {
+		if q, ok := c[0].Resources.Limits[corev1.ResourceName(a.gpuResourceName)]; ok && q.Value() > 0 {
+			// The request docker run --gpus N sends.
+			result.HostConfig.DeviceRequests = []container.DeviceRequest{{Count: int(q.Value()), Capabilities: [][]string{{"gpu"}}}}
+		}
+	}
+	// A restart stops the container fully before it starts it again. Docker
+	// starts it again at once, so clients that inspect it on the restart's
+	// die, as compose does, see it running, not exited.
+	if _, restarting := d.Annotations[types.AnnotationRestarting]; restarting && result.State.Status == container.StateExited {
+		result.State.Status, result.State.Running, result.State.Restarting = container.StateRestarting, true, true
+	}
 	return &result, nil
 }
 
@@ -295,11 +741,7 @@ func (a *KubernetesDockerAdapter) InspectContainer(ctx context.Context, name str
 
 func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunOptions, kind portmapper.MappingKind, mappings []portmapper.PortMapping) (*appsv1.Deployment, error) {
 	labels := managedLabels(opts.Name)
-	for k, v := range opts.Labels {
-		if clean, ok := sanitiseLabelValue(v); ok {
-			labels[k] = clean
-		}
-	}
+	addDockerLabels(labels, opts.Labels)
 
 	portAnnotation, err := encodePortMappings(opts.PortBindings, opts.PublishAll)
 	if err != nil {
@@ -320,7 +762,7 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 	labels[types.LabelServiceType] = serviceTypeLabel
 
 	var containerPorts []corev1.ContainerPort
-	for _, m := range mappings {
+	for _, m := range uniqueContainerPorts(mappings) {
 		containerPorts = append(containerPorts, corev1.ContainerPort{
 			ContainerPort: int32(m.ContainerPort),
 			Protocol:      corev1.Protocol(m.Protocol),
@@ -336,24 +778,24 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 		envVars = append(envVars, corev1.EnvVar{Name: parts[0], Value: parts[1]})
 	}
 
-	var resourceLimits corev1.ResourceList
+	requested := *opts.Resources.DeepCopy()
 	if opts.GPUCount > 0 && a.gpuResourceName != "" {
-		resourceLimits = corev1.ResourceList{
-			corev1.ResourceName(a.gpuResourceName): resource.MustParse(fmt.Sprintf("%d", opts.GPUCount)),
+		if requested.Limits == nil {
+			requested.Limits = corev1.ResourceList{}
 		}
+		requested.Limits[corev1.ResourceName(a.gpuResourceName)] = resource.MustParse(fmt.Sprintf("%d", opts.GPUCount))
 	}
 
 	// Inject requests.cpu / requests.memory when the namespace has a ResourceQuota
 	// that requires them. Docker has no concept of ResourceQuotas so the caller
 	// cannot know they are needed. injectQuotaDefaults is a no-op when no quota exists.
-	resourceReqs, err := a.injectQuotaDefaults(ctx, corev1.ResourceRequirements{
-		Limits: resourceLimits,
-	})
+	resourceReqs, err := a.injectQuotaDefaults(ctx, requested)
 	if err != nil {
 		return nil, err
 	}
 
-	replicas := int32(1)
+	// Created, not started: start scales the Deployment up.
+	replicas := int32(0)
 
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -374,16 +816,32 @@ func (a *KubernetesDockerAdapter) buildDeployment(ctx context.Context, opts RunO
 						types.LabelManagedBy:    types.LabelManagedByValue,
 						types.LabelWorkloadName: opts.Name,
 					},
+					Annotations: opts.Annotations,
 				},
 				Spec: corev1.PodSpec{
+					// Docker sets no <SERVICE>_PORT variables; they collide
+					// with apps' own (MEMOS_PORT for a container named memos).
+					EnableServiceLinks:            new(bool),
+					Hostname:                      opts.Hostname,
+					DNSConfig:                     dnsConfig(opts),
+					SecurityContext:               podSecurityContext(opts),
+					HostAliases:                   opts.HostAliases,
+					TerminationGracePeriodSeconds: opts.StopTimeout,
 					Containers: []corev1.Container{
 						{
-							Name:    opts.Name,
-							Image:   opts.Image,
-							Command: opts.Cmd,
-							Env:     envVars,
-							Ports:   containerPorts,
-							Resources: resourceReqs,
+							Name:            opts.Name,
+							Image:           opts.Image,
+							Command:         opts.Entrypoint,
+							Args:            opts.Cmd,
+							Env:             envVars,
+							Ports:           containerPorts,
+							WorkingDir:      opts.WorkingDir,
+							TTY:             opts.Tty,
+							Stdin:           opts.Stdin,
+							StdinOnce:       opts.StdinOnce,
+							SecurityContext: containerSecurityContext(opts),
+							ReadinessProbe:  opts.Healthcheck,
+							Resources:       resourceReqs,
 						},
 					},
 				},
@@ -417,7 +875,7 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 		ports = append(ports, sp)
 	}
 
-	svcName := serviceName(name)
+	svcName := publishedServiceName(name)
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -426,11 +884,28 @@ func (a *KubernetesDockerAdapter) buildService(name string, kind portmapper.Mapp
 			Labels:    managedLabels(name),
 		},
 		Spec: corev1.ServiceSpec{
-			Type:     svcType,
-			Selector: map[string]string{"app": name},
-			Ports:    ports,
+			Type:                     svcType,
+			Selector:                 map[string]string{"app": name},
+			Ports:                    ports,
+			PublishNotReadyAddresses: true,
 		},
 	}, nil
+}
+
+// uniqueContainerPorts returns mappings with one entry per container port
+// and protocol: Docker publishes a container port on several host ports,
+// but a Service or pod lists each port once.
+func uniqueContainerPorts(mappings []portmapper.PortMapping) []portmapper.PortMapping {
+	var out []portmapper.PortMapping
+	seen := map[string]bool{}
+	for _, m := range mappings {
+		key := fmt.Sprintf("%d/%s", m.ContainerPort, m.Protocol)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // serviceName returns the Kubernetes Service name for a given deployment name.
@@ -446,39 +921,63 @@ func serviceName(name string) string {
 	return strings.TrimRight(name, "-")
 }
 
+// ownService returns the named Service if d2k created it for the container
+// whose Deployment is named deployment, and nil otherwise: another
+// container's published Service, or another workload's Service, may have
+// its name.
+func (a *KubernetesDockerAdapter) ownService(ctx context.Context, name, deployment string) *corev1.Service {
+	svc, err := a.client.CoreV1().Services(a.namespace).Get(ctx, name, metav1GetOptions())
+	if err != nil || svc.Labels[types.LabelManagedBy] != types.LabelManagedByValue || svc.Labels[types.LabelWorkloadName] != deployment {
+		return nil
+	}
+	return svc
+}
+
+// deleteOwnService deletes the named Service, best effort, if it is the
+// container's.
+func (a *KubernetesDockerAdapter) deleteOwnService(ctx context.Context, name, deployment string) {
+	if svc := a.ownService(ctx, name, deployment); svc != nil {
+		_ = a.client.CoreV1().Services(a.namespace).Delete(ctx, name, metav1.DeleteOptions{Preconditions: metav1.NewUIDPreconditions(string(svc.UID))})
+	}
+}
+
 // --- name/ID resolution ---
 
 func (a *KubernetesDockerAdapter) resolveDeploymentName(ctx context.Context, nameOrID string) (string, error) {
-	_, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, nameOrID, metav1GetOptions())
-	if err == nil {
+	nameOrID = strings.TrimPrefix(nameOrID, "/")
+	d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, nameOrID, metav1GetOptions())
+	if err == nil && d.Labels[types.LabelManagedBy] == types.LabelManagedByValue && dockerName(*d) == nameOrID {
 		return nameOrID, nil
 	}
-	if !errors.IsNotFound(err) {
+	if err != nil && !errors.IsNotFound(err) {
 		return "", fmt.Errorf("unable to look up container %q: %w", nameOrID, err)
+	}
+	if nameOrID == "" {
+		return "", errdefs.NotFound(fmt.Errorf("container name or ID is empty"))
 	}
 	list, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
 	if err != nil {
 		return "", fmt.Errorf("unable to list deployments: %w", err)
 	}
+	// As in Docker: a full ID or an exact name, else a unique ID prefix.
+	var byPrefix []string
 	for _, d := range list.Items {
-		uid := string(d.UID)
-		if uid == nameOrID {
+		id := containerID(d.UID)
+		if id == nameOrID || dockerName(d) == nameOrID {
 			return d.Name, nil
 		}
-		if strings.HasSuffix(d.Name, "-"+nameOrID) {
-			return d.Name, nil
-		}
-		// Match the truncated UID format returned by docker ps (e.g. "2665dc61-cb7").
-		// docker ps shows the first 8 chars of the UID, a hyphen, then chars 9-11.
-		// Reconstruct and compare against the full UID with hyphens stripped to be safe,
-		// or do a simple prefix match on the normalised form.
-		normID := strings.ReplaceAll(nameOrID, "-", "")
-		normUID := strings.ReplaceAll(uid, "-", "")
-		if strings.HasPrefix(normUID, normID) && len(normID) >= 8 {
-			return d.Name, nil
+		if strings.HasPrefix(id, nameOrID) {
+			byPrefix = append(byPrefix, d.Name)
 		}
 	}
-	return "", fmt.Errorf("container %q not found", nameOrID)
+	switch len(byPrefix) {
+	case 1:
+		return byPrefix[0], nil
+	case 0:
+	default:
+		return "", errdefs.InvalidParameter(fmt.Errorf("multiple IDs found with provided prefix: %s", nameOrID))
+	}
+	return "", errdefs.NotFound(fmt.Errorf("container %q not found", nameOrID))
 }
 
 // --- scale helper ---
@@ -496,6 +995,15 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 		}
 
 		d.Spec.Replicas = &replicas
+		if d.Annotations == nil {
+			d.Annotations = map[string]string{}
+		}
+		stamp := types.AnnotationStoppedAt
+		if replicas > 0 {
+			stamp = types.AnnotationStartedAt
+			delete(d.Annotations, types.AnnotationExitCode)
+		}
+		d.Annotations[stamp] = time.Now().UTC().Format(time.RFC3339Nano)
 		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, d, metav1.UpdateOptions{})
 		if err == nil {
 			return nil
@@ -510,122 +1018,181 @@ func (a *KubernetesDockerAdapter) scaleDeployment(ctx context.Context, name stri
 
 // --- converters ---
 
-func deploymentToSummary(d appsv1.Deployment) ContainerSummary {
-	state := "exited"
-	status := "Exited (0)"
-	if d.Spec.Replicas != nil && *d.Spec.Replicas > 0 {
-		if d.Status.ReadyReplicas > 0 {
-			state = "running"
-			uptime := time.Since(d.CreationTimestamp.Time)
-			status = fmt.Sprintf("Up %s", humanizeDuration(uptime))
-		} else {
-			state = "starting"
-			status = "Starting"
-		}
+func deploymentToSummary(d appsv1.Deployment, pods []corev1.Pod) ContainerSummary {
+	now := time.Now()
+	s := containerState(d, pods, now)
+	state, status := string(s.Status), containerStatus(s, now)
+
+	ports := []container.PortSummary{} // the daemon lists [], never null
+	for _, m := range publishedPorts(d) {
+		ports = append(ports, container.PortSummary{
+			IP:          netip.IPv4Unspecified(),
+			PrivatePort: uint16(m.ContainerPort),
+			PublicPort:  uint16(m.HostPort),
+			Type:        strings.ToLower(m.Protocol),
+		})
 	}
 
-	var ports []dockertypes.Port
-	rawPorts := d.Annotations[types.AnnotationPortMappings]
-	if rawPorts != "" {
-		var bindings []string
-		if err := json.Unmarshal([]byte(rawPorts), &bindings); err == nil {
-			for _, raw := range bindings {
-				parts := strings.SplitN(raw, ":", 2)
-				if len(parts) == 2 {
-					containerPort, _ := strconv.ParseUint(parts[1], 10, 16)
-					hostPort, _ := strconv.ParseUint(parts[0], 10, 16)
-					ports = append(ports, dockertypes.Port{
-						IP:          "0.0.0.0",
-						PrivatePort: uint16(containerPort),
-						PublicPort:  uint16(hostPort),
-						Type:        "tcp",
-					})
+	return ContainerSummary{
+		ID:      containerID(d.UID),
+		Names:   []string{"/" + dockerName(d)},
+		Image:   d.Annotations[types.AnnotationImageRef],
+		ImageID: runningImageID(pods),
+		Status:  status,
+		State:   state,
+		Created: d.CreationTimestamp.Unix(),
+		Labels:  dockerLabels(d),
+		Ports:   ports,
+
+		Networks: networkIDs(d),
+		Mounts:   containerMounts(d),
+	}
+}
+
+// runningImageID returns the ID of the image a container's pods run: the
+// digest a pod reports, as docker images lists it, or "" before a pod runs
+// it.
+func runningImageID(pods []corev1.Pod) string {
+	for _, p := range pods {
+		for _, status := range p.Status.ContainerStatuses {
+			if digest := digestName(status.ImageID); digest != "" {
+				if named, err := reference.ParseNormalizedNamed(digest); err == nil {
+					if canonical, ok := named.(reference.Canonical); ok {
+						return canonical.Digest().String()
+					}
 				}
 			}
 		}
 	}
-
-	return ContainerSummary{
-		ID:      string(d.UID),
-		Names:   []string{"/" + d.Name},
-		Image:   d.Annotations[types.AnnotationImageRef],
-		Status:  status,
-		State:   state,
-		Created: d.CreationTimestamp.Unix(),
-		Labels:  d.Labels,
-		Ports:   ports,
-	}
+	return ""
 }
 
-func deploymentToContainerJSON(d appsv1.Deployment, lbIP string) dockertypes.ContainerJSON {
-	running := d.Status.ReadyReplicas > 0
+// publishedPorts returns the container's explicit port bindings, as
+// recorded when it was created.
+func publishedPorts(d appsv1.Deployment) []portmapper.PortMapping {
+	var bindings []string
+	if raw := d.Annotations[types.AnnotationPortMappings]; raw == "" || json.Unmarshal([]byte(raw), &bindings) != nil {
+		return nil
+	}
+	var mappings []portmapper.PortMapping
+	for _, b := range bindings {
+		if _, m, _, err := portmapper.Resolve(portmapper.Request{PortBindings: []string{b}}); err == nil {
+			mappings = append(mappings, m...)
+		}
+	}
+	return mappings
+}
 
-	state := &dockertypes.ContainerState{
-		Status:  "exited",
-		Running: false,
+// networkIDs maps the names of a container's networks to their IDs.
+func networkIDs(d appsv1.Deployment) map[string]string {
+	ids := map[string]string{}
+	for _, name := range containerNetworks(d) {
+		ids[name] = networkIDForName(name, d.Namespace)
 	}
-	if running {
-		state.Status = "running"
-		state.Running = true
-		state.StartedAt = d.CreationTimestamp.Time.Format(time.RFC3339)
+	return ids
+}
+
+func deploymentToContainerJSON(d appsv1.Deployment, pods []corev1.Pod, lbIP string) container.InspectResponse {
+	state := containerState(d, pods, time.Now())
+
+	var spec corev1.Container
+	if containers := d.Spec.Template.Spec.Containers; len(containers) > 0 {
+		spec = containers[0]
 	}
+	env := []string{}
+	for _, e := range spec.Env {
+		env = append(env, e.Name+"="+e.Value)
+	}
+	// lbIP may be a hostname or empty; only an address is an endpoint IP.
+	ip, _ := netip.ParseAddr(lbIP)
+	endpoints := map[string]*network.EndpointSettings{}
+	for name, id := range networkIDs(d) {
+		endpoints[name] = &network.EndpointSettings{NetworkID: id, IPAddress: ip}
+	}
+
+	user, capAdd, capDrop, privileged, readOnly, securityOpt := dockerSecurityContext(spec.SecurityContext)
+	groupAdd, sysctls := dockerPodSecurityContext(d.Spec.Template.Spec.SecurityContext)
+	dnsSearch, dnsOptions := dockerDNSConfig(d.Spec.Template.Spec.DNSConfig)
+	shmSize, tmpfs := dockerTmpfs(d)
 
 	hostConfig := &container.HostConfig{
 		LogConfig: container.LogConfig{
 			Type: "json-file",
 		},
+		RestartPolicy: container.RestartPolicy{Name: restartPolicyOf(d)},
+		AutoRemove:    d.Annotations[types.AnnotationAutoRemove] == "true",
+		// Each pod has its own cgroup namespace, as with Docker's default on cgroup v2.
+		CgroupnsMode:   container.CgroupnsModePrivate,
+		Resources:      dockerResources(spec.Resources),
+		CapAdd:         capAdd,
+		CapDrop:        capDrop,
+		Privileged:     privileged,
+		ReadonlyRootfs: readOnly,
+		GroupAdd:       groupAdd,
+		Sysctls:        sysctls,
+		SecurityOpt:    securityOpt,
+		ExtraHosts:     dockerExtraHosts(d.Spec.Template.Spec.HostAliases),
+		DNSSearch:      dnsSearch,
+		DNSOptions:     dnsOptions,
+		ShmSize:        shmSize,
+		Tmpfs:          tmpfs,
+	}
+	hostConfig.Binds, hostConfig.Mounts = volumeConfig(d)
+	process := append(append([]string{}, spec.Command...), spec.Args...)
+	var path string
+	var args []string
+	if len(process) > 0 {
+		path, args = process[0], process[1:]
 	}
 
-	portMap := nat.PortMap{}
-	rawPorts := d.Annotations[types.AnnotationPortMappings]
-	if rawPorts != "" {
-		var bindings []string
-		if err := json.Unmarshal([]byte(rawPorts), &bindings); err == nil {
-			for _, raw := range bindings {
-				parts := strings.SplitN(raw, ":", 2)
-				if len(parts) == 2 {
-					p := nat.Port(parts[1] + "/tcp")
-					portMap[p] = []nat.PortBinding{{HostPort: parts[0]}}
-				}
-			}
+	portMap := network.PortMap{}
+	for _, m := range publishedPorts(d) {
+		if p, err := network.ParsePort(fmt.Sprintf("%d/%s", m.ContainerPort, strings.ToLower(m.Protocol))); err == nil {
+			portMap[p] = append(portMap[p], network.PortBinding{HostIP: netip.IPv4Unspecified(), HostPort: strconv.Itoa(m.HostPort)})
 		}
+	}
+	if d.Annotations[types.AnnotationPortMappings] != "" {
 		hostConfig.PortBindings = portMap
 	}
 
-	return dockertypes.ContainerJSON{
-		ContainerJSONBase: &dockertypes.ContainerJSONBase{
-			ID:         string(d.UID),
-			Name:       "/" + d.Name,
-			Image:      d.Annotations[types.AnnotationImageRef],
-			Created:    d.CreationTimestamp.Time.Format(time.RFC3339),
-			State:      state,
-			HostConfig: hostConfig,
-		},
+	var stopTimeout *int
+	if grace := d.Spec.Template.Spec.TerminationGracePeriodSeconds; grace != nil {
+		seconds := int(*grace)
+		stopTimeout = &seconds
+	}
+
+	return container.InspectResponse{
+		ID:           containerID(d.UID),
+		Name:         "/" + dockerName(d),
+		Image:        d.Annotations[types.AnnotationImageRef],
+		Created:      d.CreationTimestamp.Format(time.RFC3339),
+		Path:         path,
+		Args:         args,
+		State:        &state,
+		RestartCount: containerRestartCount(d, pods),
+		HostConfig:   hostConfig,
+		Mounts:       containerMounts(d),
 		Config: &container.Config{
 			Image:        d.Annotations[types.AnnotationImageRef],
-			ExposedPorts: nat.PortSet{},
-			Tty:          false,
+			User:         user,
+			WorkingDir:   spec.WorkingDir,
+			Hostname:     d.Spec.Template.Spec.Hostname,
+			StopTimeout:  stopTimeout,
+			ExposedPorts: network.PortSet{},
+			Tty:          spec.TTY,
+			OpenStdin:    spec.Stdin,
 			AttachStdin:  false,
 			AttachStdout: true,
 			AttachStderr: true,
-			Cmd:          []string{"/bin/sh"},
-			Entrypoint:   []string{},
-			Env:          []string{},
-			Labels:       map[string]string{},
+			Cmd:          spec.Args,
+			Entrypoint:   spec.Command,
+			Env:          env,
+			Labels:       dockerLabels(d),
+			Healthcheck:  healthConfig(spec.ReadinessProbe),
 		},
-		NetworkSettings: &dockertypes.NetworkSettings{
-			NetworkSettingsBase: dockertypes.NetworkSettingsBase{
-				Ports: nat.PortMap(portMap),
-			},
-			DefaultNetworkSettings: dockertypes.DefaultNetworkSettings{
-				IPAddress: lbIP,
-			},
-			Networks: map[string]*network.EndpointSettings{
-				"bridge": {
-					IPAddress: lbIP,
-					NetworkID: "bridge",
-				},
-			},
+		NetworkSettings: &container.NetworkSettings{
+			Ports:    portMap,
+			Networks: endpoints,
 		},
 	}
 }
@@ -674,7 +1241,437 @@ func encodePortMappings(bindings []string, publishAll bool) (string, error) {
 	return string(b), err
 }
 
-// ResolveContainerName is the public wrapper around resolveDeploymentName.
-func (a *KubernetesDockerAdapter) ResolveContainerName(ctx context.Context, name string) (string, error) {
-	return a.resolveDeploymentName(ctx, name)
+// containerSecurityContext translates the user, capabilities, privileged
+// and read-only root settings, or returns nil when none is set. Whether they
+// are allowed is decided by the namespace's Pod Security policy.
+func containerSecurityContext(opts RunOptions) *corev1.SecurityContext {
+	if opts.RunAsUser == nil && opts.RunAsGroup == nil && len(opts.CapAdd) == 0 && len(opts.CapDrop) == 0 && !opts.Privileged && !opts.ReadOnly &&
+		!opts.NoNewPrivileges && opts.Seccomp == nil && opts.AppArmor == nil && opts.SELinux == nil {
+		return nil
+	}
+	sc := &corev1.SecurityContext{RunAsUser: opts.RunAsUser, RunAsGroup: opts.RunAsGroup,
+		SeccompProfile: opts.Seccomp, AppArmorProfile: opts.AppArmor, SELinuxOptions: opts.SELinux}
+	if opts.NoNewPrivileges {
+		sc.AllowPrivilegeEscalation = new(bool)
+	}
+	if opts.Privileged {
+		sc.Privileged = &opts.Privileged
+	}
+	if opts.ReadOnly {
+		sc.ReadOnlyRootFilesystem = &opts.ReadOnly
+	}
+	if len(opts.CapAdd) > 0 || len(opts.CapDrop) > 0 {
+		sc.Capabilities = &corev1.Capabilities{}
+		for _, c := range opts.CapAdd {
+			sc.Capabilities.Add = append(sc.Capabilities.Add, corev1.Capability(strings.TrimPrefix(strings.ToUpper(c), "CAP_")))
+		}
+		for _, c := range opts.CapDrop {
+			sc.Capabilities.Drop = append(sc.Capabilities.Drop, corev1.Capability(strings.TrimPrefix(strings.ToUpper(c), "CAP_")))
+		}
+	}
+	return sc
+}
+
+// podSecurityContext returns the pod-level security settings, if any.
+func podSecurityContext(opts RunOptions) *corev1.PodSecurityContext {
+	if len(opts.Sysctls) == 0 && len(opts.SupplementalGroups) == 0 {
+		return nil
+	}
+	return &corev1.PodSecurityContext{Sysctls: opts.Sysctls, SupplementalGroups: opts.SupplementalGroups}
+}
+
+// dnsConfig returns the DNS search domains and options the container adds
+// to the cluster's.
+func dnsConfig(opts RunOptions) *corev1.PodDNSConfig {
+	if len(opts.DNSSearch) == 0 && len(opts.DNSOptions) == 0 {
+		return nil
+	}
+	return &corev1.PodDNSConfig{Searches: opts.DNSSearch, Options: opts.DNSOptions}
+}
+
+// containerID returns the Docker ID of the container a Deployment backs: 64
+// hex characters, as Docker IDs are, derived from the Deployment's UID so it
+// is stable for the container's lifetime and unique.
+func containerID(uid k8stypes.UID) string {
+	sum := sha256.Sum256([]byte(uid))
+	return hex.EncodeToString(sum[:])
+}
+
+// dockerName returns the Docker name of a container, falling back to the
+// Deployment name for containers created before the name was recorded.
+func dockerName(d appsv1.Deployment) string {
+	return recordedName(d.ObjectMeta)
+}
+
+// recordedName returns the Docker name recorded on an object, falling back to
+// the object's name.
+func recordedName(m metav1.ObjectMeta) string {
+	if name := m.Annotations[types.AnnotationDockerName]; name != "" {
+		return name
+	}
+	return m.Name
+}
+
+// dockerLabels returns the Docker labels exactly as the container was created
+// with, falling back to the Deployment labels for older containers. The
+// container of a Swarm service also carries the labels Docker gives a task's
+// container: its service, and its stack. Clients such as Portainer find the
+// service, and the access to it, of a container by them.
+func dockerLabels(d appsv1.Deployment) map[string]string {
+	labels := recordedLabels(d.ObjectMeta)
+
+	service := d.Labels[types.LabelSwarmService]
+	if service == "" {
+		return labels
+	}
+
+	labels = maps.Clone(labels)
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[labelSwarmServiceID] = serviceSwarmID(d)
+	labels[labelSwarmServiceName] = service
+	if stack := d.Labels[types.LabelSwarmStack]; stack != "" {
+		labels[labelStackNamespace] = stack
+	}
+
+	return labels
+}
+
+// The labels Docker gives the container of a Swarm task.
+const (
+	labelSwarmServiceID   = "com.docker.swarm.service.id"
+	labelSwarmServiceName = "com.docker.swarm.service.name"
+	labelStackNamespace   = "com.docker.stack.namespace"
+)
+
+// recordedLabels returns the Docker labels recorded on an object, falling
+// back to its Kubernetes labels for objects created before they were recorded.
+func recordedLabels(m metav1.ObjectMeta) map[string]string {
+	var labels map[string]string
+	if raw := m.Annotations[types.AnnotationDockerLabels]; raw != "" && json.Unmarshal([]byte(raw), &labels) == nil {
+		return labels
+	}
+	if _, recorded := m.Annotations[types.AnnotationDockerName]; recorded {
+		return map[string]string{}
+	}
+	// Created before labels were recorded: its Kubernetes labels, without
+	// d2k's own.
+	return legacyDockerLabels(m, legacyDockerName(m))
+}
+
+// dockerNameInUse reports whether a managed container already has the Docker name.
+func (a *KubernetesDockerAdapter) dockerNameInUse(ctx context.Context, name string) (bool, error) {
+	list, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return false, fmt.Errorf("unable to list deployments: %w", err)
+	}
+	for _, d := range list.Items {
+		if dockerName(d) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+// publishedServiceName returns the name of the Service that publishes a
+// container's ports. It must differ from the container's DNS Service, which
+// carries the container's own name.
+func publishedServiceName(name string) string {
+	return strings.TrimRight(truncate(serviceName(name), 60), "-") + "-lb"
+}
+
+// namedVolumeMounts translates Docker binds into PVC mounts, and returns the
+// Docker volume name of each PVC. Missing named volumes are created, as Docker
+// does on run. Host path binds are not supported and produce a warning.
+func (a *KubernetesDockerAdapter) namedVolumeMounts(ctx context.Context, binds []string) ([]corev1.Volume, []corev1.VolumeMount, map[string]string, []string, error) {
+	var volumes []corev1.Volume
+	var mounts []corev1.VolumeMount
+	names := map[string]string{}
+	var warnings []string
+	for _, bind := range binds {
+		parts := strings.Split(bind, ":")
+		if len(parts) < 2 {
+			return nil, nil, nil, nil, errdefs.InvalidParameter(fmt.Errorf("invalid volume specification: %q", bind))
+		}
+		source, target := parts[0], parts[1]
+		if strings.HasPrefix(source, "/") || strings.HasPrefix(source, ".") {
+			warnings = append(warnings, fmt.Sprintf("bind mount %q ignored: host paths are not supported by d2k", bind))
+			continue
+		}
+
+		// Creating a volume that exists returns it, as in Docker.
+		if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: source}); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("unable to create volume %q: %w", source, err)
+		}
+		claim := sanitiseResourceName(source)
+		names[claim] = source
+
+		name := fmt.Sprintf("volume-%d", len(volumes))
+		volumes = append(volumes, corev1.Volume{
+			Name: name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claim},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      name,
+			MountPath: target,
+			ReadOnly:  len(parts) > 2 && slices.Contains(strings.Split(parts[2], ","), "ro"),
+		})
+	}
+	return volumes, mounts, names, warnings, nil
+}
+
+// ignoredAliases warns about network aliases d2k cannot honour: a container
+// is resolvable by its own name and by its compose service name only.
+func ignoredAliases(aliases []string, dockerName, service string) []string {
+	var warnings []string
+	var seen []string
+	for _, alias := range aliases {
+		if alias == dockerName || alias == service || slices.Contains(seen, alias) {
+			continue
+		}
+		seen = append(seen, alias)
+		warnings = append(warnings, fmt.Sprintf("network alias %q ignored: d2k resolves containers by name and compose service name only", alias))
+	}
+	return warnings
+}
+
+// projectDNSName returns the name of a compose project's headless DNS Service,
+// which is also the pod subdomain of the project's containers.
+func projectDNSName(project string) string {
+	return strings.TrimRight(truncate("compose-"+sanitiseResourceName(project), 63), "-")
+}
+
+// scopeDNSToProject makes the container resolvable as <service> by the other
+// containers of its compose project, and only by them. Docker scopes names to
+// the project's networks; a namespace is a single DNS scope, so each project
+// gets its own subdomain, searched before the namespace.
+func (a *KubernetesDockerAdapter) scopeDNSToProject(d *appsv1.Deployment, project, service string) []string {
+	hostname := sanitiseResourceName(service)
+	if len(validation.IsDNS1123Label(hostname)) > 0 {
+		return []string{fmt.Sprintf("compose service %q is not a valid DNS name and will not be resolvable by name", service)}
+	}
+
+	pod := &d.Spec.Template
+	d.Labels[types.LabelComposeProject] = sanitiseResourceName(project)
+	pod.Labels[types.LabelComposeProject] = sanitiseResourceName(project)
+	pod.Spec.Hostname = hostname
+	pod.Spec.Subdomain = projectDNSName(project)
+	if a.clusterDNS == "" || a.clusterDomain == "" {
+		return nil
+	}
+
+	svcDomain := "svc." + a.clusterDomain
+	ndots := "5"
+	own := pod.Spec.DNSConfig
+	if own == nil {
+		own = &corev1.PodDNSConfig{}
+	}
+	pod.Spec.DNSPolicy = corev1.DNSNone
+	pod.Spec.DNSConfig = &corev1.PodDNSConfig{
+		Nameservers: []string{a.clusterDNS},
+		Searches: append([]string{
+			pod.Spec.Subdomain + "." + a.namespace + "." + svcDomain,
+			a.namespace + "." + svcDomain,
+			svcDomain,
+			a.clusterDomain,
+		}, own.Searches...),
+		// The container's own options come last, so they win.
+		Options: append([]corev1.PodDNSConfigOption{{Name: "ndots", Value: &ndots}}, own.Options...),
+	}
+	return nil
+}
+
+// ensureProjectDNSService creates the headless Service that publishes the
+// hostnames of a compose project's pods under the project's subdomain, and
+// adds the container's Deployment to its owners: Kubernetes deletes the
+// Service once the project's last container is removed.
+func (a *KubernetesDockerAdapter) ensureProjectDNSService(ctx context.Context, project string, owner *appsv1.Deployment) error {
+	label := sanitiseResourceName(project)
+	name := projectDNSName(project)
+	ownerRef := metav1.OwnerReference{APIVersion: "apps/v1", Kind: "Deployment", Name: owner.Name, UID: owner.UID}
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: a.namespace,
+			Labels: map[string]string{
+				types.LabelManagedBy:      types.LabelManagedByValue,
+				types.LabelComposeProject: label,
+			},
+			OwnerReferences: []metav1.OwnerReference{ownerRef},
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP:                corev1.ClusterIPNone,
+			Selector:                 map[string]string{types.LabelComposeProject: label},
+			PublishNotReadyAddresses: true,
+		},
+	}
+	_, err := a.client.CoreV1().Services(a.namespace).Create(ctx, svc, metav1.CreateOptions{})
+	if !errors.IsAlreadyExists(err) {
+		return err
+	}
+
+	// Containers of one project are created concurrently.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		existing, err := a.client.CoreV1().Services(a.namespace).Get(ctx, name, metav1GetOptions())
+		if err != nil {
+			return fmt.Errorf("unable to get Service %q: %w", name, err)
+		}
+		if existing.Labels[types.LabelManagedBy] != types.LabelManagedByValue || existing.Labels[types.LabelComposeProject] != label {
+			return errdefs.Conflict(fmt.Errorf("service %q, needed for the DNS of compose project %q, is already in use", name, project))
+		}
+		existing.OwnerReferences = append(existing.OwnerReferences, ownerRef)
+		_, err = a.client.CoreV1().Services(a.namespace).Update(ctx, existing, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+// containerNetworks returns the names of the networks a container is attached to.
+func containerNetworks(d appsv1.Deployment) []string {
+	var networks []string
+	if raw := d.Annotations[types.AnnotationNetworks]; raw != "" && json.Unmarshal([]byte(raw), &networks) == nil {
+		return networks
+	}
+	return []string{"bridge"}
+}
+
+// volumeClaims maps the pod volumes of a container's named volumes to the
+// volumes' Docker names.
+func volumeClaims(d appsv1.Deployment) map[string]string {
+	var names map[string]string
+	if raw := d.Annotations[types.AnnotationVolumeNames]; raw != "" {
+		_ = json.Unmarshal([]byte(raw), &names)
+	}
+	claims := map[string]string{}
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			claims[v.Name] = cmp.Or(names[v.PersistentVolumeClaim.ClaimName], v.PersistentVolumeClaim.ClaimName)
+		}
+	}
+	return claims
+}
+
+// volumeConfig returns the container's named-volume mounts as the
+// HostConfig that creates them: binds, or mounts for those with a subpath,
+// which a bind cannot express.
+func volumeConfig(d appsv1.Deployment) ([]string, []mount.Mount) {
+	if len(d.Spec.Template.Spec.Containers) == 0 {
+		return nil, nil
+	}
+	claims := volumeClaims(d)
+	var binds []string
+	var mounts []mount.Mount
+	for _, m := range d.Spec.Template.Spec.Containers[0].VolumeMounts {
+		claim, ok := claims[m.Name]
+		switch {
+		case !ok:
+		case m.SubPath != "":
+			mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: claim, Target: m.MountPath, ReadOnly: m.ReadOnly,
+				VolumeOptions: &mount.VolumeOptions{Subpath: m.SubPath}})
+		case m.ReadOnly:
+			binds = append(binds, claim+":"+m.MountPath+":ro")
+		default:
+			binds = append(binds, claim+":"+m.MountPath)
+		}
+	}
+	return binds, mounts
+}
+
+// dockerTmpfs returns the container's memory-backed mounts as the
+// HostConfig that creates them: ShmSize for /dev/shm, Tmpfs for the rest.
+func dockerTmpfs(d appsv1.Deployment) (shmSize int64, tmpfs map[string]string) {
+	if len(d.Spec.Template.Spec.Containers) == 0 {
+		return 0, nil
+	}
+	volumes := map[string]*corev1.EmptyDirVolumeSource{}
+	for _, v := range d.Spec.Template.Spec.Volumes {
+		if v.EmptyDir != nil && v.EmptyDir.Medium == corev1.StorageMediumMemory {
+			volumes[v.Name] = v.EmptyDir
+		}
+	}
+	for _, m := range d.Spec.Template.Spec.Containers[0].VolumeMounts {
+		v, ok := volumes[m.Name]
+		if !ok {
+			continue
+		}
+		var size string
+		if v.SizeLimit != nil {
+			size = "size=" + strconv.FormatInt(v.SizeLimit.Value(), 10)
+		}
+		if m.MountPath == "/dev/shm" && v.SizeLimit != nil {
+			shmSize = v.SizeLimit.Value()
+			continue
+		}
+		if tmpfs == nil {
+			tmpfs = map[string]string{}
+		}
+		tmpfs[m.MountPath] = size
+	}
+	return shmSize, tmpfs
+}
+
+// containerMounts returns the container's named-volume mounts.
+func containerMounts(d appsv1.Deployment) []container.MountPoint {
+	claims := volumeClaims(d)
+	mounts := []container.MountPoint{}
+	if len(d.Spec.Template.Spec.Containers) == 0 {
+		return mounts
+	}
+	for _, m := range d.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if claim, ok := claims[m.Name]; ok {
+			mounts = append(mounts, container.MountPoint{
+				Type:        mount.TypeVolume,
+				Name:        claim,
+				Driver:      "d2k",
+				Destination: m.MountPath,
+				RW:          !m.ReadOnly,
+			})
+		}
+	}
+	return mounts
+}
+
+// ConnectNetwork records that a container joined (or left) a network. The
+// namespace network is flat, so only the reported attachment changes.
+func (a *KubernetesDockerAdapter) ConnectNetwork(ctx context.Context, networkNameOrID, containerNameOrID string, connect bool) error {
+	resolved, err := a.resolveDeploymentName(ctx, containerNameOrID)
+	if err != nil {
+		return err
+	}
+
+	name := strings.TrimPrefix(networkNameOrID, networkIDForName("", a.namespace))
+
+	// Portainer reconnects a container's networks with one request per
+	// network, concurrently; retry so a losing request's own read isn't
+	// stale by the time it writes back the full network list.
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		d, err := a.client.AppsV1().Deployments(a.namespace).Get(ctx, resolved, metav1GetOptions())
+		if err != nil {
+			return fmt.Errorf("unable to get deployment %q: %w", resolved, err)
+		}
+
+		networks := slices.DeleteFunc(containerNetworks(*d), func(n string) bool { return n == name })
+		if connect {
+			networks = append(networks, name)
+		}
+		encoded, err := json.Marshal(networks)
+		if err != nil {
+			return err
+		}
+		if d.Annotations == nil {
+			d.Annotations = map[string]string{}
+		}
+		d.Annotations[types.AnnotationNetworks] = string(encoded)
+		_, err = a.client.AppsV1().Deployments(a.namespace).Update(ctx, d, metav1.UpdateOptions{})
+		return err
+	})
 }

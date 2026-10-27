@@ -1,0 +1,26 @@
+# Dedicated fixture (not from a public source): a compose project that gets its secrets
+# from the client environment and its configs from inline content, the pattern
+# docs/compose-support.md documents under `secrets` and `configs`.
+services:
+  app:
+    image: nginx:1.27-alpine
+    labels:
+      corpus.mark: "v1"
+    secrets:
+      - api_token
+    configs:
+      - source: nginx_conf
+        target: /etc/nginx/conf.d/default.conf
+    ports:
+      - "18193:80"
+secrets:
+  api_token:
+    environment: API_TOKEN
+configs:
+  nginx_conf:
+    content: |
+      server {
+        listen 80;
+        location /health { return 200 'ok'; }
+        location /token { alias /run/secrets/api_token; }
+      }

@@ -1,55 +1,157 @@
+// Package events implements GET /events: the namespace's Docker events,
+// recorded by the adapter as the daemon records its own.
 package events
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 
-	"go.uber.org/zap"
+	"github.com/moby/moby/api/types/events"
 
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/errdefs"
+	"github.com/portainer/d2k/internal/filters"
+	"github.com/portainer/d2k/pkg/httputils"
 )
 
-// Handler holds dependencies for the events API endpoint.
+// eventFilters are the `filters` keys d2k supports on GET /events.
+var eventFilters = map[string]bool{
+	"type": true, "event": true, "container": true, "image": true, "label": true, "volume": true,
+	"scope": true, "daemon": true, "network": true, "service": true, "plugin": true, "node": true, "secret": true, "config": true,
+}
+
+// namedObjectFilters are the filters that, as in the daemon, keep only
+// events of their object type whose ID (or a prefix of it) or name matches.
+var namedObjectFilters = []events.Type{
+	events.DaemonEventType, events.NetworkEventType, events.ServiceEventType, events.PluginEventType,
+	events.NodeEventType, events.SecretEventType, events.ConfigEventType,
+}
+
+// Handler serves the events endpoint.
 type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
-	logger  *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *Handler {
-	return &Handler{adapter: a, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
+	return &Handler{adapter: a}
 }
 
-// Stream handles GET /events.
+// Stream handles GET /events. As in Docker: without since or until only new
+// events are sent; either replays recorded ones first; until ends the stream.
 func (h *Handler) Stream(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	ch, err := h.adapter.WatchEvents(r.Context())
+	q := r.URL.Query()
+	args, err := httputils.ParseFilters(r, eventFilters)
 	if err != nil {
-		h.logger.Errorw("WatchEvents failed", "error", err)
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	since, errSince := httputils.ParseUnixTime(q.Get("since"))
+	until, errUntil := httputils.ParseUnixTime(q.Get("until"))
+	if errSince != nil || errUntil != nil {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(firstErr(errSince, errUntil)))
+		return
+	}
+	if !until.IsZero() && until.Before(since) {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(fmt.Errorf("`since` time (%s) cannot be after `until` time (%s)", q.Get("since"), q.Get("until"))))
 		return
 	}
 
+	history, live, cancel := h.adapter.SubscribeEvents()
+	defer cancel()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	enc := json.NewEncoder(w)
+	send := func(m events.Message) {
+		if !matches(args, m) {
+			return
+		}
+		_ = enc.Encode(m)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	inRange := func(m events.Message) bool {
+		t := time.Unix(0, m.TimeNano)
+		return !t.Before(since) && (until.IsZero() || !t.After(until))
+	}
+	if q.Get("since") != "" || q.Get("until") != "" {
+		for _, m := range history {
+			if inRange(m) {
+				send(m)
+			}
+		}
+	}
+
+	var deadline <-chan time.Time
+	if !until.IsZero() {
+		wait := time.Until(until)
+		if wait <= 0 {
+			return
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		deadline = timer.C
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case ev, ok := <-ch:
-			if !ok {
-				return
-			}
-			b, err := json.Marshal(ev)
-			if err != nil {
-				continue
-			}
-			w.Write(b)
-			w.Write([]byte("\n"))
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
+		case <-deadline:
+			return
+		case m := <-live:
+			if inRange(m) {
+				send(m)
 			}
 		}
 	}
+}
+
+// matches applies the event filters as the daemon does.
+func matches(args filters.Args, m events.Message) bool {
+	if !args.ExactMatch("type", string(m.Type)) || !args.ExactMatch("event", string(m.Action)) {
+		return false
+	}
+	if !args.MatchKVList("label", m.Actor.Attributes) || !args.ExactMatch("image", m.Actor.Attributes["image"]) {
+		return false
+	}
+	if args.Contains("container") {
+		byIDOrName := args.ExactMatch("container", m.Actor.ID) || args.ExactMatch("container", m.Actor.Attributes["name"])
+		if m.Type != events.ContainerEventType || !byIDOrName {
+			return false
+		}
+	}
+	if args.Contains("volume") && (m.Type != events.VolumeEventType || !args.ExactMatch("volume", m.Actor.ID)) {
+		return false
+	}
+	if args.Contains("scope") && !args.ExactMatch("scope", m.Scope) {
+		return false
+	}
+	for _, t := range namedObjectFilters {
+		key := string(t)
+		if !args.Contains(key) {
+			continue
+		}
+		if m.Type != t || (!args.FuzzyMatch(key, m.Actor.ID) && !args.FuzzyMatch(key, m.Actor.Attributes["name"])) {
+			return false
+		}
+	}
+	return true
+}
+
+func firstErr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

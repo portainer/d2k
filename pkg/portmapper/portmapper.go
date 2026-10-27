@@ -125,25 +125,25 @@ func parseExplicitBinding(raw string) (pm PortMapping, warning string, err error
 	switch len(parts) {
 	case 2:
 		// <hostPort>:<containerPort>
-		pm.HostPort, err = strconv.Atoi(parts[0])
-		if err != nil {
-			return pm, "", fmt.Errorf("invalid host port %q: %w", parts[0], err)
-		}
 		pm.ContainerPort, err = strconv.Atoi(parts[1])
 		if err != nil {
 			return pm, "", fmt.Errorf("invalid container port %q: %w", parts[1], err)
+		}
+		pm.HostPort, err = hostPort(parts[0], pm.ContainerPort)
+		if err != nil {
+			return pm, "", err
 		}
 
 	case 3:
 		// <hostIP>:<hostPort>:<containerPort> — host IP is ignored.
 		warning = fmt.Sprintf("host IP %q in port binding %q has no Kubernetes equivalent and will be ignored; a LoadBalancer Service will be created without host IP restriction", parts[0], raw)
-		pm.HostPort, err = strconv.Atoi(parts[1])
-		if err != nil {
-			return pm, warning, fmt.Errorf("invalid host port %q: %w", parts[1], err)
-		}
 		pm.ContainerPort, err = strconv.Atoi(parts[2])
 		if err != nil {
 			return pm, warning, fmt.Errorf("invalid container port %q: %w", parts[2], err)
+		}
+		pm.HostPort, err = hostPort(parts[1], pm.ContainerPort)
+		if err != nil {
+			return pm, warning, err
 		}
 
 	default:
@@ -151,4 +151,17 @@ func parseExplicitBinding(raw string) (pm PortMapping, warning string, err error
 	}
 
 	return pm, warning, nil
+}
+
+// hostPort parses the host port of a binding. Without one, Docker picks a
+// free port; d2k publishes the container port.
+func hostPort(s string, containerPort int) (int, error) {
+	if s == "" {
+		return containerPort, nil
+	}
+	port, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid host port %q: %w", s, err)
+	}
+	return port, nil
 }

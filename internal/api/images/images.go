@@ -1,39 +1,48 @@
-// Package images implements a minimal Docker Engine API surface for image operations.
+// Package images implements the Docker Engine API image endpoints d2k needs.
 //
-// In a Kubernetes environment, image management is handled by the container runtime
-// on each node. Pull operations are accepted and acknowledged (Kubernetes will pull
-// on schedule), and the image list is synthesised from images referenced by
-// d2k-managed Deployments.
+// d2k stores no images: the kubelet pulls a container's image when the
+// container starts, and a failed pull shows in the container's state. These
+// endpoints answer what compose and Portainer ask without inventing image
+// contents.
 //
 // Endpoints:
 //
-//	GET    /images/json        → docker images
-//	POST   /images/create      → docker pull (acknowledged, no-op)
-//	GET    /images/{name}/json → docker image inspect (synthesised)
+//	GET    /images/json        → docker images (the images d2k's containers use)
+//	POST   /images/create      → docker pull (acknowledged)
+//	GET    /images/{name}/json → docker image inspect (the reference only)
 //	DELETE /images/{name}      → docker rmi (not supported)
 package images
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
+	"github.com/distribution/reference"
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/jsonstream"
+	"github.com/opencontainers/go-digest"
 
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/apispec"
+	"github.com/portainer/d2k/internal/errdefs"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
-// Handler holds dependencies for image API endpoints.
+// Handler serves the image endpoints.
 type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
-	logger  *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *Handler {
-	return &Handler{adapter: a, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
+	return &Handler{adapter: a}
 }
 
 // DispatchGet routes GET /images/{name}/json to Inspect.
@@ -42,95 +51,104 @@ func (h *Handler) DispatchGet(w http.ResponseWriter, r *http.Request) {
 		h.Inspect(w, r)
 		return
 	}
-	http.NotFound(w, r)
+	apispec.NotRouted(w, r)
 }
 
-// List handles GET /images/json (docker images).
+// List handles GET /images/json: the images the containers of d2k's
+// namespace use, as the cluster's nodes report them.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	ctrs, err := h.adapter.ListContainers(r.Context(), true)
+	images, err := h.adapter.ListUsedImages(r.Context())
 	if err != nil {
-		h.logger.Errorw("ListContainers for image list failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	httputils.WriteJSON(w, http.StatusOK, images)
+}
+
+// Pull handles POST /images/create (docker pull). Pulling happens on the
+// node when a container starts, so the pull is only acknowledged.
+func (h *Handler) Pull(w http.ResponseWriter, r *http.Request) {
+	ref, err := pullReference(r.URL.Query().Get("fromImage"), r.URL.Query().Get("tag"))
+	if err != nil {
+		httputils.WriteErrorFrom(w, errdefs.InvalidParameter(err))
 		return
 	}
 
-	type imageSummary struct {
-		ID          string   `json:"Id"`
-		RepoTags    []string `json:"RepoTags"`
-		Created     int64    `json:"Created"`
-		Size        int64    `json:"Size"`
-		VirtualSize int64    `json:"VirtualSize"`
-	}
-
-	seen := map[string]bool{}
-	items := []imageSummary{}
-	for _, c := range ctrs {
-		if seen[c.Image] {
-			continue
-		}
-		seen[c.Image] = true
-		items = append(items, imageSummary{
-			ID:       fmt.Sprintf("sha256:d2k%x", []byte(c.Image)),
-			RepoTags: []string{c.Image},
-			Created:  time.Now().Unix(),
-		})
-	}
-
-	httputils.WriteJSON(w, http.StatusOK, items)
-}
-
-// Pull handles POST /images/create (docker pull).
-// Returns a synthetic progress stream — Kubernetes will pull at schedule time.
-func (h *Handler) Pull(w http.ResponseWriter, r *http.Request) {
-	fromImage := r.URL.Query().Get("fromImage")
-	tag := r.URL.Query().Get("tag")
-	if tag == "" {
-		tag = "latest"
-	}
-	ref := fromImage
-	if !strings.Contains(fromImage, ":") {
-		ref = fmt.Sprintf("%s:%s", fromImage, tag)
-	}
-
-	h.logger.Infow("docker pull acknowledged — Kubernetes pulls at schedule time", "image", ref)
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-
-	events := []string{
-		fmt.Sprintf(`{"status":"Pulling from %s","id":"%s"}`, fromImage, tag),
-		`{"status":"Pull complete","progressDetail":{}}`,
-		`{"status":"Digest: sha256:d2k-noop"}`,
-		fmt.Sprintf(`{"status":"Status: Image will be pulled by Kubernetes when scheduled: %s"}`, ref),
-	}
-	for _, e := range events {
-		fmt.Fprintln(w, e)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-	}
-}
-
-// Inspect handles GET /images/{name}/json (docker image inspect).
-func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/images/"), "/json")
-	httputils.WriteJSON(w, http.StatusOK, map[string]any{
-		"Id":       fmt.Sprintf("sha256:d2k%x", []byte(name)),
-		"RepoTags": []string{name},
-		"Created":  time.Now().Format(time.RFC3339),
-		"Comment":  "synthesized by d2k — actual image metadata lives on cluster nodes",
-		"Os":       "linux",
-		"Config": map[string]any{
-    		"Image": name,
-    		"Cmd":   []string{"/bin/sh"},
-		},
+	_ = json.NewEncoder(w).Encode(jsonstream.Message{
+		Status: fmt.Sprintf("%s: not pulled by d2k; the kubelet pulls it when a container starts", reference.FamiliarString(ref)),
 	})
 }
 
-// Remove handles DELETE /images/{name} (docker rmi). Not supported.
+// pullReference combines fromImage and tag as the Docker daemon does
+// (moby postImagesCreate): tag replaces a tag in fromImage, and a digest
+// in tag replaces any tag or digest.
+func pullReference(fromImage, tag string) (reference.Named, error) {
+	if fromImage == "" {
+		return nil, errors.New("fromImage is required")
+	}
+	// "docker pull -a" may send the name with a trailing ":".
+	ref, err := reference.ParseNormalizedNamed(strings.TrimSuffix(fromImage, ":"))
+	if err != nil || tag == "" {
+		return ref, err
+	}
+	if dgst, err := digest.Parse(tag); err == nil {
+		return reference.WithDigest(reference.TrimNamed(ref), dgst)
+	}
+	return reference.WithTag(ref, tag)
+}
+
+// Inspect handles GET /images/{name}/json. An image d2k's containers use,
+// named by the ID docker images lists, is described as the list does.
+// Compose inspects each service's image by name before creating containers
+// and pulls on 404, so a name is reported too, with an ID derived from it and
+// no image config: the ID stays the same whether a container runs the image
+// or not, so compose doesn't take it for a new image and recreate the
+// containers.
+func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
+	ref := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/images/"), "/json")
+	if !imageIDPattern.MatchString(ref) {
+		h.inspectReference(w, ref)
+		return
+	}
+	if used, err := h.adapter.FindUsedImage(r.Context(), ref); err == nil && used != nil {
+		httputils.WriteJSON(w, http.StatusOK, image.InspectResponse{
+			ID:          used.ID,
+			RepoTags:    used.RepoTags,
+			RepoDigests: used.RepoDigests,
+			Size:        used.Size,
+			Os:          "linux",
+			RootFS:      image.RootFS{Type: "layers"},
+			Created:     time.Time{}.Format(time.RFC3339Nano),
+		})
+		return
+	}
+	h.inspectReference(w, ref)
+}
+
+// imageIDPattern matches an image ID, with or without its sha256: prefix.
+var imageIDPattern = regexp.MustCompile(`^(sha256:)?[0-9a-f]{64}$`)
+
+// inspectReference reports a reference as an image of its own, with an ID
+// derived from it.
+func (h *Handler) inspectReference(w http.ResponseWriter, ref string) {
+	sum := sha256.Sum256([]byte(ref))
+	httputils.WriteJSON(w, http.StatusOK, image.InspectResponse{
+		ID:          "sha256:" + hex.EncodeToString(sum[:]),
+		RepoTags:    []string{ref},
+		RepoDigests: []string{},
+		Os:          "linux",
+		RootFS:      image.RootFS{Type: "layers"}, // the only type Docker reports
+		// d2k does not know when the image was built. Real Docker always sets this
+		// to a valid timestamp, which some clients (docker compose v2.40.3's
+		// "images" command) parse unconditionally; the zero time is honest (not a
+		// made-up build date) and still parses.
+		Created: time.Time{}.Format(time.RFC3339Nano),
+	})
+}
+
+// Remove handles DELETE /images/{name} (docker rmi).
 func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/images/")
-	httputils.WriteError(w, http.StatusMethodNotAllowed,
-		fmt.Sprintf("image removal is not supported by d2k: %q lives on cluster nodes", name),
-	)
+	httputils.WriteErrorFrom(w, errdefs.NotImplemented(errors.New("image removal is not supported by d2k: images are stored on the cluster nodes")))
 }

@@ -1,15 +1,15 @@
 package middleware
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/hex"
-	"net/http"
-	"time"
-	"bufio"
 	"fmt"
 	"net"
+	"net/http"
+	"time"
 
-	"go.uber.org/zap"
+	"github.com/rs/zerolog/log"
 )
 
 const requestIDHeader = "X-D2k-Request-Id"
@@ -27,20 +27,19 @@ func RequestID(next http.Handler) http.Handler {
 }
 
 // Logging logs method, path, status code, and duration for every request.
-func Logging(logger *zap.SugaredLogger) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-			rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
-			next.ServeHTTP(rw, r)
-			logger.Infow("request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", rw.status,
-				"duration", time.Since(start).String(),
-			)
-		})
-	}
+func Logging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rw, r)
+		log.Info().
+			Str("context", "HTTP").
+			Str("method", r.Method).
+			Str("path", r.URL.Path).
+			Int("status", rw.status).
+			Dur("duration", time.Since(start)).
+			Msg("Request")
+	})
 }
 
 type responseWriter struct {

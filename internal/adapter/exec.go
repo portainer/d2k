@@ -2,12 +2,17 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
+	utilexec "k8s.io/client-go/util/exec"
+
+	"github.com/portainer/d2k/internal/errdefs"
 )
 
 // ExecOptions mirrors the subset of docker exec flags d2k supports.
@@ -20,21 +25,26 @@ type ExecOptions struct {
 	Tty          bool
 }
 
-// ExecContainer executes a command in the container's pod.
-func (a *KubernetesDockerAdapter) ExecContainer(ctx context.Context, opts ExecOptions, stdin io.Reader, stdout, stderr io.Writer) error {
-	resolved, err := a.resolveDeploymentName(ctx, opts.Name)
+// ExecStreams connects an exec to its client. Unset streams are not attached.
+type ExecStreams struct {
+	Stdin  io.Reader
+	Stdout io.Writer
+	Stderr io.Writer
+	Resize remotecommand.TerminalSizeQueue
+}
+
+// ExecContainer runs a command in the container's pod and returns its exit
+// code. An error means the command could not be run or streamed.
+func (a *KubernetesDockerAdapter) ExecContainer(ctx context.Context, opts ExecOptions, streams ExecStreams) (int, error) {
+	pod, err := a.runningPod(ctx, opts.Name)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	pod, err := a.currentPodForDeployment(ctx, resolved)
-	if err != nil {
-		return err
-	}
-
-	containerName := resolved
-	if len(pod.Spec.Containers) > 0 {
-		containerName = pod.Spec.Containers[0].Name
+	// Kubernetes needs at least one stream; Docker runs execs with none, as
+	// compose does for its hooks.
+	if streams.Stdin == nil && streams.Stdout == nil && streams.Stderr == nil {
+		streams.Stdout = io.Discard
 	}
 
 	req := a.client.CoreV1().RESTClient().Post().
@@ -43,23 +53,86 @@ func (a *KubernetesDockerAdapter) ExecContainer(ctx context.Context, opts ExecOp
 		Namespace(a.namespace).
 		SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
-			Container: containerName,
+			Container: pod.Spec.Containers[0].Name,
 			Command:   opts.Cmd,
-			Stdin:     opts.AttachStdin,
-			Stdout:    opts.AttachStdout,
-			Stderr:    opts.AttachStderr,
+			Stdin:     streams.Stdin != nil,
+			Stdout:    streams.Stdout != nil,
+			Stderr:    streams.Stderr != nil && !opts.Tty,
 			TTY:       opts.Tty,
+		}, scheme.ParameterCodec)
+
+	executor, err := remotecommand.NewSPDYExecutor(a.restConfig, "POST", req.URL())
+	if err != nil {
+		return 0, fmt.Errorf("unable to create SPDY executor: %w", err)
+	}
+
+	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdin:             streams.Stdin,
+		Stdout:            streams.Stdout,
+		Stderr:            streams.Stderr,
+		Tty:               opts.Tty,
+		TerminalSizeQueue: streams.Resize,
+	})
+	var exitErr utilexec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitStatus(), nil
+	}
+	return 0, err
+}
+
+// AttachContainer connects streams to the running process of the
+// container, as `kubectl attach` does. It returns when the process ends or
+// the streams close.
+func (a *KubernetesDockerAdapter) AttachContainer(ctx context.Context, name string, tty bool, streams ExecStreams) error {
+	pod, err := a.runningPod(ctx, name)
+	if err != nil {
+		return err
+	}
+
+	req := a.client.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(pod.Name).
+		Namespace(a.namespace).
+		SubResource("attach").
+		VersionedParams(&corev1.PodAttachOptions{
+			Container: pod.Spec.Containers[0].Name,
+			Stdin:     streams.Stdin != nil,
+			Stdout:    streams.Stdout != nil,
+			Stderr:    streams.Stderr != nil && !tty,
+			TTY:       tty,
 		}, scheme.ParameterCodec)
 
 	executor, err := remotecommand.NewSPDYExecutor(a.restConfig, "POST", req.URL())
 	if err != nil {
 		return fmt.Errorf("unable to create SPDY executor: %w", err)
 	}
-
 	return executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin:  stdin,
-		Stdout: stdout,
-		Stderr: stderr,
-		Tty:    opts.Tty,
+		Stdin:             streams.Stdin,
+		Stdout:            streams.Stdout,
+		Stderr:            streams.Stderr,
+		Tty:               tty,
+		TerminalSizeQueue: streams.Resize,
 	})
+}
+
+// runningPod returns the pod that runs the named container. A pod
+// Kubernetes replaced is the container's run until the new pod's container
+// starts (containerState): wait for that, rather than refuse a container
+// inspect reports running.
+func (a *KubernetesDockerAdapter) runningPod(ctx context.Context, name string) (*corev1.Pod, error) {
+	resolved, err := a.resolveDeploymentName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	pod, err := a.currentPodForDeployment(ctx, resolved)
+	if err != nil && !errors.Is(err, errNoPod) {
+		return nil, err
+	}
+	if pod != nil && pod.Status.Phase != corev1.PodRunning {
+		pod = a.waitForContainerStarted(ctx, pod, 30*time.Second)
+	}
+	if pod == nil || pod.Status.Phase != corev1.PodRunning {
+		return nil, errdefs.Conflict(fmt.Errorf("container %s is not running", name))
+	}
+	return pod, nil
 }

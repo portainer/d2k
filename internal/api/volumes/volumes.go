@@ -10,56 +10,98 @@
 package volumes
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 
-	"go.uber.org/zap"
+	"github.com/moby/moby/api/types/volume"
+	"github.com/rs/zerolog/log"
 
 	"github.com/portainer/d2k/internal/adapter"
+	"github.com/portainer/d2k/internal/errdefs"
+	"github.com/portainer/d2k/internal/filters"
 	"github.com/portainer/d2k/pkg/httputils"
 )
 
 // Handler holds dependencies for volume API endpoints.
 type Handler struct {
 	adapter *adapter.KubernetesDockerAdapter
-	logger  *zap.SugaredLogger
 }
 
 // NewHandler creates a Handler.
-func NewHandler(a *adapter.KubernetesDockerAdapter, logger *zap.SugaredLogger) *Handler {
-	return &Handler{adapter: a, logger: logger}
+func NewHandler(a *adapter.KubernetesDockerAdapter) *Handler {
+	return &Handler{adapter: a}
 }
 
 // List handles GET /volumes.
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	vols, err := h.adapter.ListVolumes(r.Context())
+	args, err := httputils.ParseFilters(r, volumeFilters)
 	if err != nil {
-		h.logger.Errorw("ListVolumes failed", "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		httputils.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// Docker wraps the list in a Volumes key.
-	httputils.WriteJSON(w, http.StatusOK, map[string]any{
-		"Volumes":  vols,
-		"Warnings": []string{},
-	})
+	vols, err := h.adapter.ListVolumes(r.Context())
+	if err != nil {
+		log.Error().Str("context", "VolumesAPI").Err(err).Msg("ListVolumes failed")
+		httputils.WriteErrorFrom(w, err)
+		return
+	}
+	vols = filterVolumes(vols, args)
+
+	if args.Contains("dangling") {
+		dangling, err := args.GetBoolOrDefault("dangling", false)
+		if err != nil {
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		referenced, err := h.adapter.ReferencedVolumes(r.Context())
+		if err != nil {
+			log.Error().Str("context", "VolumesAPI").Err(err).Msg("ReferencedVolumes failed")
+			httputils.WriteErrorFrom(w, err)
+			return
+		}
+		vols = slices.DeleteFunc(vols, func(v volume.Volume) bool { return referenced[v.Name] == dangling })
+	}
+
+	httputils.WriteJSON(w, http.StatusOK, volume.ListResponse{Volumes: vols, Warnings: []string{}})
 }
 
-// createBody mirrors the Docker volume create request body.
-type createBody struct {
-	Name       string            `json:"Name"`
-	Driver     string            `json:"Driver"`
-	Labels     map[string]string `json:"Labels"`
-	DriverOpts map[string]string `json:"DriverOpts"`
+// volumeFilters are the `filters` keys d2k supports on GET /volumes.
+var volumeFilters = map[string]bool{"name": true, "label": true, "driver": true, "dangling": true}
+
+// filterVolumes applies list filters with the Docker daemon's matching rules.
+func filterVolumes(vols []volume.Volume, args filters.Args) []volume.Volume {
+	result := []volume.Volume{}
+	for _, v := range vols {
+		if args.Match("name", v.Name) && args.ExactMatch("driver", v.Driver) && args.MatchKVList("label", v.Labels) {
+			result = append(result, v)
+		}
+	}
+	return result
 }
 
 // Create handles POST /volumes/create.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
-	var body createBody
+	var body volume.CreateRequest
 	if err := httputils.ParseJSON(r, &body); err != nil {
 		httputils.WriteError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	// As in Docker, a volume created without a name gets a random one.
+	if body.Name == "" {
+		b := make([]byte, 32)
+		_, _ = rand.Read(b)
+		body.Name = hex.EncodeToString(b)
+		body.Labels = maps.Clone(body.Labels)
+		if body.Labels == nil {
+			body.Labels = map[string]string{}
+		}
+		body.Labels["com.docker.volume.anonymous"] = ""
 	}
 
 	// Allow size to be passed as a driver option: --opt size=5Gi
@@ -76,8 +118,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		DriverOpts: body.DriverOpts,
 	})
 	if err != nil {
-		h.logger.Errorw("CreateVolume failed", "name", body.Name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+		log.Error().Str("context", "VolumesAPI").Any("name", body.Name).Err(err).Msg("CreateVolume failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -90,8 +132,8 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 
 	vol, err := h.adapter.InspectVolume(r.Context(), name)
 	if err != nil {
-		h.logger.Debugw("InspectVolume not found", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusNotFound, err.Error())
+		log.Debug().Str("context", "VolumesAPI").Any("name", name).Err(err).Msg("InspectVolume not found")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 
@@ -102,9 +144,14 @@ func (h *Handler) Inspect(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Remove(w http.ResponseWriter, r *http.Request) {
 	name := volumeNameFromPath(r.URL.Path)
 
-	if err := h.adapter.RemoveVolume(r.Context(), name); err != nil {
-		h.logger.Errorw("RemoveVolume failed", "name", name, "error", err)
-		httputils.WriteError(w, http.StatusInternalServerError, err.Error())
+	err := h.adapter.RemoveVolume(r.Context(), name)
+	// As in Docker, a forced remove of a volume that doesn't exist succeeds.
+	if force := r.URL.Query().Get("force"); errdefs.IsNotFound(err) && (force == "1" || force == "true") {
+		err = nil
+	}
+	if err != nil {
+		log.Error().Str("context", "VolumesAPI").Any("name", name).Err(err).Msg("RemoveVolume failed")
+		httputils.WriteErrorFrom(w, err)
 		return
 	}
 

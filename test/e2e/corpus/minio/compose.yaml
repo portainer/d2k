@@ -1,0 +1,36 @@
+# source: https://github.com/minio/minio/blob/master/docs/orchestration/docker-compose/docker-compose.yaml,
+# trimmed to a single node, plus the mc-based bucket init job from MinIO's own docs
+# (a one-shot migration/init service: restart: "no", depended on by nothing else here).
+services:
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    command: server /data --console-address ":9001"
+    labels:
+      corpus.mark: "v1"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "18190:9000"
+      - "18191:9001"
+    volumes:
+      - minio_data:/data
+  init:
+    image: minio/mc:RELEASE.2024-10-08T09-37-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb -p local/corpus-bucket &&
+      echo init-done
+      "
+volumes:
+  minio_data:
