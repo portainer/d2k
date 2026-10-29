@@ -4,6 +4,14 @@ d2k lets Docker tooling manage a single Kubernetes namespace. It exposes the Doc
 
 Enable `D2K_SWARM_MODE=true` and the same endpoint emulates a Docker Swarm cluster instead, translating Swarm API calls (services, stacks, tasks, secrets, configs) into Kubernetes Deployments and resources.
 
+d2k 1.3.0 serves Docker Engine API **1.44 to 1.52**, as Docker Engine 29 does: its routes are generated from Docker's 1.52 specification, and clients negotiate the version as they do with a Docker daemon. Upgrading from 1.2.x changes the defaults (mutual TLS, Docker host mode): see [Upgrading from d2k 1.2.x](#upgrading-from-d2k-12x).
+
+### Requirements
+
+- Kubernetes 1.30 or later, for the ValidatingAdmissionPolicy in `deploy/admission-policy.yaml` (see Networking).
+- A default StorageClass, for `docker volume create`.
+- Optional: metrics-server, for `docker stats`.
+
 ---
 
 ## Modes
@@ -250,7 +258,13 @@ If your StorageClass has `reclaimPolicy: Delete`, the underlying NFS subdirector
 
 d2k runs inside the target cluster namespace using a ServiceAccount bound to a namespace-scoped Role for workload management and a ClusterRole for node and StorageClass read access.
 
-d2k serves the Docker API over mutual TLS. In `deploy/kubernetes.yaml`, set `D2K_TLS_SANS` to every DNS name and IP address clients use to reach d2k (comma-separated), then:
+### With Portainer
+
+Portainer Business Edition 3.0 installs d2k for you. On a Kubernetes environment connected through an Edge agent (3.0.0 or later), add a D2K environment (**Environments › Add environment › D2K**): Portainer deploys `portainer/d2k:1.3.0` in Docker host or Swarm mode into its own namespace, and reaches it through the Edge agent with the client certificate from the `d2k-client` Secret. The D2K environment then works as a Docker standalone or Swarm environment, and its containers show in the Kubernetes environment's Applications.
+
+### By hand
+
+d2k serves the Docker API over mutual TLS. In `deploy/kubernetes.yaml`, set the image to a released version (`portainer/d2k:1.3.0`) rather than `:latest`, which moves only when a release is promoted, and set `D2K_TLS_SANS` to every DNS name and IP address clients use to reach d2k (comma-separated). Then:
 
 ```bash
 kubectl apply -f deploy/admission-policy.yaml   # once per cluster
@@ -267,10 +281,13 @@ On its first start without a `d2k-tls` Secret, d2k creates its certificates: a C
 To use your own CA instead (to keep the CA key, or to issue several client certificates), create the `d2k-tls` Secret before applying the manifest; d2k then uses it and creates no certificates:
 
 ```bash
-d2k pki init --san d2k.d2k.svc.cluster.local,d2k.example.com --out d2k-pki
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/out" -w /out portainer/d2k:1.3.0 \
+  pki init --san d2k.d2k.svc.cluster.local,d2k.example.com --out d2k-pki
 kubectl create namespace d2k
 kubectl -n d2k create secret generic d2k-tls --from-file=d2k-pki/server
 ```
+
+From a checkout, `go run ./cmd pki init ...` does the same.
 
 `deploy/admission-policy.yaml` holds the cluster-scoped ValidatingAdmissionPolicy and its binding, which every d2k install on the cluster shares (see Networking above). To uninstall one install, `kubectl delete -f deploy/kubernetes.yaml` (with that install's namespace); delete `deploy/admission-policy.yaml` only after the last install is gone.
 
@@ -301,9 +318,15 @@ Portainer can point several environments at the same cluster, each as its own d2
 
 The ClusterRole and ClusterRoleBinding named `d2k-node-reader` are the exception: they are cluster-scoped, so their names must be made unique per install (for example by appending the namespace, as `test/e2e/setup.sh` does). If two installs keep the default name, the second `kubectl apply` silently overwrites the first's ClusterRoleBinding subject, and the first install's ServiceAccount loses its cluster-wide node and StorageClass access, with no error at apply time: `docker info` reports 0 CPUs and 0 memory, `docker stats` prints nothing, NFS volumes cannot be matched, and in Swarm mode `docker node ls`, the node/manager counts and the leader check stop working. Rename both objects (and `roleRef.name`) together, the same way you rename `namespace: d2k`.
 
+### The d2k pod
+
+d2k runs as a non-root user (`65532`) with a read-only root filesystem, every capability dropped and the `RuntimeDefault` seccomp profile, so it fits the `restricted` Pod Security Standard. The manifest sets no `pod-security.kubernetes.io/*` labels on the namespace: the cluster default, or Portainer's Pod Security Standards policy, applies to d2k and to the containers it creates.
+
 Restarting d2k (`kubectl rollout restart`, a pod delete, a reschedule) takes about 5 seconds longer than it used to: a `preStop` hook delays SIGTERM so kube-proxy has time to stop routing to the terminating pod before d2k stops accepting connections. Without it, a client can hit the pod in that window and see its connection reset.
 
-Connect Portainer or the Docker CLI to the d2k Service:
+### Connecting
+
+Connect the Docker CLI, or Portainer's "Docker API" environment with TLS, to the d2k Service:
 
 ```bash
 # Docker CLI
@@ -342,39 +365,49 @@ docker --context d2k service ls
 
 ```
 Docker client
-     |  Docker Engine API (mutual TLS, port 2376)
+     |  Docker Engine API 1.44-1.52 (mutual TLS, port 2376)
      v
-+------------------------------------------+
-|  d2k                                     |
-|                                          |
-|  router         <- HTTP ServeMux         |
-|  |                                       |
-|  +-- /containers/*                       |
-|  +-- /volumes/*                          |
-|  +-- /networks/*  (label filter aware)   |
-|  +-- /images/*                           |
-|  +-- /exec/*                             |
-|  +-- /events                             |
-|  +-- /swarm, /nodes                      |
-|  +-- /services/*, /tasks/*               |
-|  +-- /secrets/*, /configs/*             |
-|  +-- /_ping, /version, /info             |
-|                                          |
-|  adapter        <- translation layer     |
-|  |                                       |
-|  +-- container.go   (Deployments)        |
-|  +-- swarm.go       (Swarm surface)      |
-|  +-- volume.go      (PVCs)               |
-|  +-- network.go     (synthetic)          |
-|  +-- logs.go        (pod log stream)     |
-|  +-- exec.go        (pod exec/SPDY)      |
-|  +-- metrics.go     (metrics-server)     |
-|  +-- events.go      (resource watch)     |
-+------------------------------------------+
++-------------------------------------------------+
+|  d2k                                            |
+|                                                 |
+|  server       <- mTLS listener, health port,    |
+|                  optional unix socket           |
+|  middleware   <- request ID, logging            |
+|  router       <- routes from the 1.52 spec      |
+|  |               (internal/apispec), API        |
+|  |               version check                  |
+|  +-- api/containers, api/exec                   |
+|  +-- api/images, api/volumes, api/networks      |
+|  +-- api/events, api/system                     |
+|  +-- api/swarm   (Swarm mode only)              |
+|                                                 |
+|  adapter      <- translation layer              |
+|  |                                              |
+|  +-- translate.go  (create request -> pod spec) |
+|  +-- container.go  (Deployments, run-once pods) |
+|  +-- state.go      (container state from pods)  |
+|  +-- swarm.go      (services, tasks, nodes)     |
+|  +-- volume.go     (PVCs)                       |
+|  +-- network.go    (namespace annotations)      |
+|  +-- image.go      (images from node status)    |
+|  +-- logs.go, exec.go, archive.go (docker cp)   |
+|  +-- metrics.go    (metrics-server)             |
+|  +-- events.go     (resource watches)           |
+|  +-- migrate.go    (upgrade from 1.2.x)         |
+|  +-- tls.go        (certificates, d2k-tls)      |
++-------------------------------------------------+
      |  Kubernetes API (in-cluster)
      v
 Kubernetes namespace
 ```
+
+---
+
+## Development and releases
+
+`go test ./...` runs the unit and contract tests; the contract tests check every JSON response against the 1.52 specification. `test/e2e` holds the end-to-end suites, which run d2k on a kind cluster and drive it with the Docker CLI, Docker Compose and Portainer: see [test/e2e/README.md](test/e2e/README.md).
+
+Each release publishes a versioned image (`portainer/d2k:<version>`) and a GitHub pre-release. `portainer/d2k:latest` moves to that image only when the release is promoted to GitHub's latest release, so pin a version in your manifests.
 
 ---
 
@@ -393,7 +426,7 @@ Both modes use a namespace-scoped Role and a ClusterRole (below).
 | secrets | get, list, watch, create, update, patch, delete |
 | persistentvolumeclaims | get, list, watch, create, delete |
 | namespaces | get, patch _(its own namespace only; an admission policy limits patch to `d2k.portainer.io/network-*` annotations)_ |
-| events | get, list _(not used by the code at this commit; d2k's events come from watches)_ |
+| events | get, list _(not used by d2k; `docker events` come from Deployment, Pod and PVC watches)_ |
 | resourcequotas | get, list _(a container created without CPU or memory settings gets the requests and limits a quota requires: 10m CPU, 32Mi memory)_ |
 | limitranges | get, list _(optional: a LimitRange's container defaults are left to apply instead of d2k's)_ |
 | metrics.k8s.io/pods | get, list _(optional)_ |
@@ -451,7 +484,7 @@ Additional networking features with no Kubernetes equivalent:
 
 - Bind mounts: Docker host mode ignores them with a warning; Swarm mode turns them into hostPath volumes, which are unreliable in multi-node clusters.
 - Network isolation is not enforced. All pods share the namespace network.
-- Image metadata is synthesised. Actual image metadata lives on cluster nodes.
+- Image metadata is limited to what the cluster's nodes report (tags, digests, size). d2k never reads an image's configuration, so `docker image inspect` has no config or layers, and a `HEALTHCHECK` set only in the image is not used.
 - `docker stats` requires metrics-server to return real data.
 - Swarm services are scoped to a single namespace. Multi-namespace deployments require separate d2k instances.
 - `docker swarm init` and `docker swarm leave` return `501 Not Implemented`.
