@@ -105,3 +105,44 @@ func recordedNameAndLabels(name string, labels map[string]string) (map[string]*s
 	}
 	return map[string]*string{types.AnnotationDockerName: &name, types.AnnotationDockerLabels: ptr(string(raw))}, nil
 }
+
+// MigrateDefaultCapabilities removes the capabilities Docker grants by
+// default from what the pods of stopped containers add. d2k 1.3.0 added
+// every capability the create request listed, and Portainer's create form
+// lists Docker's defaults, NET_RAW among them, which Pod Security's baseline
+// level refuses: such a container could never start. A running container is
+// left as it is, as changing its pod template would restart it; the next
+// start after it stops picks the change up. Like MigrateLegacyObjects, it
+// runs on every start and returns every failure joined.
+func (a *KubernetesDockerAdapter) MigrateDefaultCapabilities(ctx context.Context) error {
+	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
+	if err != nil {
+		return fmt.Errorf("unable to list deployments: %w", err)
+	}
+	var failures []error
+	for _, d := range deployments.Items {
+		if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue || d.Spec.Replicas == nil || *d.Spec.Replicas != 0 {
+			continue
+		}
+		changed := false
+		for i, c := range d.Spec.Template.Spec.Containers {
+			if c.SecurityContext == nil || c.SecurityContext.Capabilities == nil {
+				continue
+			}
+			caps := d.Spec.Template.Spec.Containers[i].SecurityContext.Capabilities
+			if adds := podCapabilityAdds(caps.Add, caps.Drop); len(adds) != len(caps.Add) {
+				caps.Add = adds
+				changed = true
+			}
+		}
+		if !changed {
+			continue
+		}
+		if _, err := a.client.AppsV1().Deployments(a.namespace).Update(ctx, &d, metav1.UpdateOptions{}); err != nil {
+			failures = append(failures, fmt.Errorf("unable to migrate the capabilities of container %q: %w", dockerName(d), err))
+			continue
+		}
+		log.Info().Str("context", "Migration").Str("container", dockerName(d)).Msg("Removed the capabilities Docker grants by default from what a container's pod adds")
+	}
+	return errors.Join(failures...)
+}

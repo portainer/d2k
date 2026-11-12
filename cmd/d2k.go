@@ -109,6 +109,9 @@ func serve() {
 	if err := a.MigrateLegacyObjects(ctx, cfg.SwarmMode); err != nil {
 		log.Error().Str("context", "Startup").Err(err).Msg("Unable to migrate the containers and volumes of an earlier d2k release")
 	}
+	if err := a.MigrateDefaultCapabilities(ctx); err != nil {
+		log.Error().Str("context", "Startup").Err(err).Msg("Unable to migrate the capabilities of containers an earlier d2k release created")
+	}
 
 	a.LogNFSStorageClasses(ctx)
 	go a.RecordEvents(ctx)
