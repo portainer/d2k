@@ -99,7 +99,9 @@ EOF
 
 echo "== pod security ($STANDALONE, $CONTEXT, namespace $NAMESPACE)"
 
-# Created before the namespace's level was raised: refused at start.
+# Created before the namespace's level was raised: refused at start. The
+# namespace may already enforce a level (Talos' baseline), so allow it first.
+enforce privileged
 docker create --name e2e-psa-old --privileged busybox sleep 300 >/dev/null
 
 enforce baseline
