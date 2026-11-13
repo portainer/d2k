@@ -256,6 +256,31 @@ If your StorageClass has `reclaimPolicy: Delete`, the underlying NFS subdirector
 
 ---
 
+## Pod Security
+
+The containers d2k creates are pods, so the namespace's [Pod Security](https://kubernetes.io/docs/concepts/security/pod-security-admission/) level applies to them: the level its `pod-security.kubernetes.io/enforce` label sets, or the cluster's default (Talos enforces `baseline` by default). d2k never changes the level, and never leaves out a setting to get a container past it: it translates Docker settings into what Pod Security checks, and refuses what still breaks the level.
+
+| Level | Refuses | Docker settings that comply |
+|---|---|---|
+| `privileged` | Nothing | Any |
+| `baseline` | `--privileged`, host paths, host ports, `--security-opt seccomp=unconfined` or `apparmor=unconfined`, and `--cap-add` of capabilities Docker doesn't grant by default (such as `SYS_ADMIN`) | A plain `docker run`. Adding a capability Docker grants by default, such as `NET_RAW`, changes nothing, so d2k leaves it out of the pod |
+| `restricted` | Everything `baseline` refuses, and any container that may run as root, keeps its capabilities or may gain privileges | `--user 1000:1000 --cap-drop ALL --security-opt no-new-privileges` (only `NET_BIND_SERVICE` may be added back), and an image that runs as that user |
+
+`docker info` shows the level under Security Options (`pod-security`, `Profile: restricted`), with a warning under `baseline` or `restricted` of what to set; d2k also logs it at start-up. It works the level out with a server-side dry run of a privileged pod, and checks again at most a minute after the namespace's labels change.
+
+d2k checks each container against the level when it is created, with a server-side dry run: a container the level refuses is refused with 403 before anything exists, naming the Docker flag and compose key to change, then Kubernetes' reason. A container created before the level was raised is refused the same way at start. Under a level that only warns (`pod-security.kubernetes.io/warn`), the container is created, and `docker run` and `docker compose` show the warning. Refusals from other admission policies (Kyverno, Gatekeeper, ValidatingAdmissionPolicy) pass through as Kubernetes words them.
+
+A compose service for `restricted`:
+
+```yaml
+services:
+  app:
+    image: nginxinc/nginx-unprivileged
+    user: "101:101"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+```
+
 ## Deployment
 
 d2k runs inside the target cluster namespace using a ServiceAccount bound to a namespace-scoped Role for workload management and a ClusterRole for node and StorageClass read access.
@@ -266,7 +291,14 @@ Portainer Business Edition 3.0 installs d2k for you. On a Kubernetes environment
 
 ### By hand
 
-d2k serves the Docker API over mutual TLS. In `deploy/kubernetes.yaml`, set the image to a released version (`portainer/d2k:1.3.0`) rather than `:latest`, which moves only when a release is promoted, and set `D2K_TLS_SANS` to every DNS name and IP address clients use to reach d2k (comma-separated). Then:
+d2k serves the Docker API over mutual TLS. In `deploy/kubernetes.yaml`, set the image to a released version (`portainer/d2k:1.3.0`) rather than `:latest`, which moves only when a release is promoted, and set `D2K_TLS_SANS` to every DNS name and IP address clients use to reach d2k (comma-separated). Check first that the cluster accepts d2k's own pod: a d2k that can't start can't report why. Its pod already fits the `restricted` Pod Security level, so only a custom admission rule can refuse it. Create the namespace first, so the cluster's defaults apply to the check (a dry run creates nothing, and the namespaced objects need it), then let the API server name any refusal:
+
+```bash
+kubectl create namespace d2k
+kubectl apply --dry-run=server -f deploy/kubernetes.yaml
+```
+
+Then:
 
 ```bash
 kubectl apply -f deploy/admission-policy.yaml   # once per cluster

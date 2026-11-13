@@ -113,6 +113,7 @@ func serve() {
 		log.Error().Str("context", "Startup").Err(err).Msg("Unable to update the pod security settings of containers an earlier d2k release created")
 	}
 
+	a.LogPodSecurityLevel(ctx)
 	a.LogNFSStorageClasses(ctx)
 	go a.RecordEvents(ctx)
 
