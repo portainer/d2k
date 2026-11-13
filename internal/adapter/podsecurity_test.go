@@ -5,8 +5,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -244,5 +246,58 @@ func TestMigrateSecurityTranslationLeavesNewContainersAlone(t *testing.T) {
 	after, _ := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "app", metav1.GetOptions{})
 	if after.ResourceVersion != before.ResourceVersion {
 		t.Errorf("resource version %q -> %q, want the Deployment untouched", before.ResourceVersion, after.ResourceVersion)
+	}
+}
+
+func TestPodSecurityLevel(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"no policy", nil, PodSecurityPrivileged},
+		{"baseline", forbidden(`violates PodSecurity "baseline:latest": privileged (container "probe" must not set securityContext.privileged=true)`), PodSecurityBaseline},
+		{"restricted", forbidden(`violates PodSecurity "restricted:v1.34": privileged (container "probe" must not set securityContext.privileged=true)`), PodSecurityRestricted},
+		{"another policy", forbidden(`admission webhook "validate.kyverno.svc-fail" denied the request: privileged containers are not allowed`), PodSecurityUnknown},
+		{"no dry runs", apierrors.NewBadRequest(`admission webhook "mutate.example.com" does not support dry run`), PodSecurityUnknown},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			a, _ := newTestAdapter(t)
+			pods := refuseWith(a, tt.err)
+
+			if got := a.PodSecurityLevel(context.Background()); got != tt.want {
+				t.Errorf("level = %q, want %q", got, tt.want)
+			}
+			if len(*pods) != 1 || (*pods)[0].Namespace != testNamespace || !*(*pods)[0].Spec.Containers[0].SecurityContext.Privileged {
+				t.Errorf("dry runs = %v, want one privileged pod in the namespace", *pods)
+			}
+		})
+	}
+}
+
+func TestPodSecurityLevelIsUnknownWithoutDryRuns(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	if got := a.PodSecurityLevel(context.Background()); got != PodSecurityUnknown {
+		t.Errorf("level = %q, want %q", got, PodSecurityUnknown)
+	}
+}
+
+// /info asks for the level on every call: it is kept for a minute, so a
+// change of the namespace's labels shows within one.
+func TestPodSecurityLevelIsCached(t *testing.T) {
+	a, _ := newTestAdapter(t)
+	pods := refuseWith(a, nil)
+	ctx := context.Background()
+
+	a.PodSecurityLevel(ctx)
+	a.PodSecurityLevel(ctx)
+	if len(*pods) != 1 {
+		t.Fatalf("dry runs = %d, want 1 within a minute", len(*pods))
+	}
+
+	a.podSecurity.checkedAt = time.Now().Add(-podSecurityLevelTTL)
+	refuseWith(a, forbidden(`violates PodSecurity "baseline:latest": privileged (...)`))
+	if got := a.PodSecurityLevel(ctx); got != PodSecurityBaseline {
+		t.Errorf("level after a minute = %q, want the new %q", got, PodSecurityBaseline)
 	}
 }
