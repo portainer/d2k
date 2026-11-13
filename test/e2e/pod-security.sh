@@ -22,10 +22,12 @@ pass=0 fail=0
 
 k() { kubectl --context "$CONTEXT" "$@"; }
 
-# The namespace's own level, put back on exit: a namespace may already
+# The namespace's own levels, put back on exit: a namespace may already
 # enforce one (Talos, Portainer's policy) when NAMESPACE names it.
 ENFORCE_LABEL=pod-security.kubernetes.io/enforce
 ORIGINAL_ENFORCE=$(k get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')
+WARN_LABEL=pod-security.kubernetes.io/warn
+ORIGINAL_WARN=$(k get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/warn}')
 
 # restore_label KEY VALUE: set the namespace's label back to VALUE, or
 # remove it when VALUE is empty.
@@ -38,9 +40,11 @@ restore_label() {
 }
 
 cleanup() {
-  docker rm -f e2e-psa-form e2e-psa-plain e2e-psa-priv e2e-psa-sysadmin e2e-psa-netraw e2e-psa-always e2e-psa-nonroot e2e-psa-root >/dev/null 2>&1
+  docker rm -f e2e-psa-form e2e-psa-plain e2e-psa-priv e2e-psa-sysadmin e2e-psa-netraw e2e-psa-always e2e-psa-create e2e-psa-old e2e-psa-nonroot e2e-psa-root e2e-psa-warn >/dev/null 2>&1
   docker compose -p e2e-psa -f "$WORKDIR/compose.yaml" down >/dev/null 2>&1
+  docker compose -p e2e-psa-warn -f "$WORKDIR/compose-warn.yaml" down >/dev/null 2>&1
   restore_label "$ENFORCE_LABEL" "$ORIGINAL_ENFORCE"
+  restore_label "$WARN_LABEL" "$ORIGINAL_WARN"
   rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
@@ -56,6 +60,9 @@ check() {
 }
 
 enforce() { k label namespace "$NAMESPACE" "$ENFORCE_LABEL=$1" --overwrite >/dev/null; }
+
+# deployment_absent NAME: d2k created no Deployment for the container.
+deployment_absent() { ! k -n "$NAMESPACE" get deployment "$1" >/dev/null 2>&1; }
 
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
 
@@ -83,7 +90,17 @@ services:
     security_opt: [no-new-privileges:true]
 EOF
 
+cat >"$WORKDIR/compose-warn.yaml" <<'EOF'
+services:
+  app:
+    image: busybox
+    command: sleep 300
+EOF
+
 echo "== pod security ($STANDALONE, $CONTEXT, namespace $NAMESPACE)"
+
+# Created before the namespace's level was raised: refused at start.
+docker create --name e2e-psa-old --privileged busybox sleep 300 >/dev/null
 
 enforce baseline
 
@@ -107,7 +124,18 @@ check "baseline: --cap-add NET_RAW runs, as adding a default does nothing" bash 
   [ "$(docker inspect -f "{{.State.Running}}" e2e-psa-netraw)" = true ]'
 check "baseline: --privileged --restart always is refused" refused e2e-psa-always 'PodSecurity' --restart always --privileged busybox sleep 300
 
-docker rm -f e2e-psa-form e2e-psa-plain e2e-psa-priv e2e-psa-sysadmin e2e-psa-netraw e2e-psa-always >/dev/null 2>&1
+# A refused container is refused at create, before anything exists, with
+# the Docker flag to change.
+check "baseline: a refused create names the flag" bash -c '
+  ! docker create --name e2e-psa-create --privileged busybox sleep 300 >'"$WORKDIR"'/create 2>&1 &&
+  grep -q "remove --privileged" '"$WORKDIR"'/create || { cat '"$WORKDIR"'/create; exit 1; }'
+check "baseline: a refused create creates nothing" deployment_absent e2e-psa-create
+check "baseline: a container created before the level is refused at start, and stays stopped" bash -c '
+  ! docker start e2e-psa-old >'"$WORKDIR"'/start 2>&1 &&
+  grep -q "remove --privileged" '"$WORKDIR"'/start &&
+  [ "$(docker inspect -f "{{.State.Running}}" e2e-psa-old)" = false ] || { cat '"$WORKDIR"'/start; exit 1; }'
+
+docker rm -f e2e-psa-form e2e-psa-plain e2e-psa-priv e2e-psa-sysadmin e2e-psa-netraw e2e-psa-always e2e-psa-create e2e-psa-old >/dev/null 2>&1
 
 enforce restricted
 
@@ -120,6 +148,23 @@ check "restricted: the compose equivalent runs" bash -c '
   [ "$(docker compose -p e2e-psa -f '"$WORKDIR"'/compose.yaml ps -q app | xargs docker inspect -f "{{.State.Running}}")" = true ]'
 
 check "restricted: a plain docker run is refused with Kubernetes' reason" refused e2e-psa-root 'violates PodSecurity "restricted' busybox sleep 300
+check "restricted: the refusal names the flags" bash -c '
+  grep -q "add --cap-drop ALL" '"$WORKDIR"'/run && grep -q "user 1000:1000" '"$WORKDIR"'/run &&
+  grep -q "no-new-privileges" '"$WORKDIR"'/run || { cat '"$WORKDIR"'/run; exit 1; }'
+
+# Talos' default: baseline enforced, restricted warned about. A plain
+# container runs, and the client shows what restricted would refuse.
+enforce baseline
+k label namespace "$NAMESPACE" "$WARN_LABEL=restricted" --overwrite >/dev/null
+
+check "warn: docker run shows Pod Security's warning, and runs" bash -c '
+  docker run -d --name e2e-psa-warn busybox sleep 300 >/dev/null 2>'"$WORKDIR"'/warn &&
+  grep -q "would refuse this container" '"$WORKDIR"'/warn &&
+  [ "$(docker inspect -f "{{.State.Running}}" e2e-psa-warn)" = true ] || { cat '"$WORKDIR"'/warn; exit 1; }'
+
+check "warn: compose shows Pod Security's warning, and runs" bash -c '
+  docker compose -p e2e-psa-warn -f '"$WORKDIR"'/compose-warn.yaml up -d --wait >'"$WORKDIR"'/warn 2>&1 &&
+  grep -q "would refuse this container" '"$WORKDIR"'/warn || { cat '"$WORKDIR"'/warn; exit 1; }'
 
 echo
 echo "pass=$pass fail=$fail"
