@@ -58,6 +58,17 @@ d2k's behaviour changes, then regenerate the document.
 Re-run `setup.sh` after code changes; it rebuilds the image and restarts both
 instances. Set `CLUSTER` to use a kind cluster with another name.
 
+`pod-security.sh` checks the standalone instance under Pod Security's
+`baseline` and `restricted` levels, as Talos sets by default or Portainer's
+Pod Security Standards policy sets. It labels the namespace with each level,
+as a cluster admin would, and restores the namespace's own level on exit. Containers whose
+Docker settings comply (including the create request Portainer's form sends)
+must run, and the others must be refused with Kubernetes' reason:
+
+```sh
+test/e2e/pod-security.sh
+```
+
 ## Upgrades and installs
 
 These build their own images, install d2k into their own namespaces of the

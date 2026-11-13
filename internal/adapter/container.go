@@ -480,6 +480,11 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 		(runsAsPod(*d) || d.Spec.Replicas != nil && *d.Spec.Replicas > 0) && containerState(*d, pods.Items, time.Now()).Running {
 		return errdefs.NotModified(fmt.Errorf("container %q is already running", name))
 	}
+	// A container an earlier d2k created that was running when d2k started
+	// kept its pod template (MigrateSecurityTranslation): it is stopped now.
+	if err := a.upgradeContainerSecurity(ctx, d); err != nil {
+		return err
+	}
 	if runsAsPod(*d) {
 		err := a.startPod(ctx, d)
 		if err == nil {
@@ -1241,16 +1246,30 @@ func encodePortMappings(bindings []string, publishAll bool) (string, error) {
 	return string(b), err
 }
 
+// dockerDefaultCapabilities are the capabilities Docker grants every
+// container.
+var dockerDefaultCapabilities = []corev1.Capability{
+	"AUDIT_WRITE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD",
+	"NET_BIND_SERVICE", "NET_RAW", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_CHROOT",
+}
+
 // containerSecurityContext translates the user, capabilities, privileged
 // and read-only root settings, or returns nil when none is set. Whether they
 // are allowed is decided by the namespace's Pod Security policy.
 func containerSecurityContext(opts RunOptions) *corev1.SecurityContext {
-	if opts.RunAsUser == nil && opts.RunAsGroup == nil && len(opts.CapAdd) == 0 && len(opts.CapDrop) == 0 && !opts.Privileged && !opts.ReadOnly &&
+	drop := capabilities(opts.CapDrop)
+	add := podCapabilityAdds(capabilities(opts.CapAdd), drop)
+	if opts.RunAsUser == nil && opts.RunAsGroup == nil && len(add) == 0 && len(drop) == 0 && !opts.Privileged && !opts.ReadOnly &&
 		!opts.NoNewPrivileges && opts.Seccomp == nil && opts.AppArmor == nil && opts.SELinux == nil {
 		return nil
 	}
 	sc := &corev1.SecurityContext{RunAsUser: opts.RunAsUser, RunAsGroup: opts.RunAsGroup,
 		SeccompProfile: opts.Seccomp, AppArmorProfile: opts.AppArmor, SELinuxOptions: opts.SELinux}
+	// A numeric user other than root asks for what Pod Security's
+	// restricted level requires the pod to say.
+	if opts.RunAsUser != nil && *opts.RunAsUser != 0 {
+		sc.RunAsNonRoot = new(true)
+	}
 	if opts.NoNewPrivileges {
 		sc.AllowPrivilegeEscalation = new(bool)
 	}
@@ -1260,24 +1279,48 @@ func containerSecurityContext(opts RunOptions) *corev1.SecurityContext {
 	if opts.ReadOnly {
 		sc.ReadOnlyRootFilesystem = &opts.ReadOnly
 	}
-	if len(opts.CapAdd) > 0 || len(opts.CapDrop) > 0 {
-		sc.Capabilities = &corev1.Capabilities{}
-		for _, c := range opts.CapAdd {
-			sc.Capabilities.Add = append(sc.Capabilities.Add, corev1.Capability(strings.TrimPrefix(strings.ToUpper(c), "CAP_")))
-		}
-		for _, c := range opts.CapDrop {
-			sc.Capabilities.Drop = append(sc.Capabilities.Drop, corev1.Capability(strings.TrimPrefix(strings.ToUpper(c), "CAP_")))
-		}
+	if len(add) > 0 || len(drop) > 0 {
+		sc.Capabilities = &corev1.Capabilities{Add: add, Drop: drop}
 	}
 	return sc
 }
 
-// podSecurityContext returns the pod-level security settings, if any.
-func podSecurityContext(opts RunOptions) *corev1.PodSecurityContext {
-	if len(opts.Sysctls) == 0 && len(opts.SupplementalGroups) == 0 {
-		return nil
+// capabilities returns Docker capability names as Kubernetes names them:
+// upper case, without the CAP_ prefix.
+func capabilities(names []string) []corev1.Capability {
+	var caps []corev1.Capability
+	for _, name := range names {
+		caps = append(caps, corev1.Capability(strings.TrimPrefix(strings.ToUpper(name), "CAP_")))
 	}
-	return &corev1.PodSecurityContext{Sysctls: opts.Sysctls, SupplementalGroups: opts.SupplementalGroups}
+	return caps
+}
+
+// podCapabilityAdds returns the capabilities of add that the pod must add.
+// Adding one Docker grants by default changes nothing in Docker, so it is
+// left out, unless it was dropped: Pod Security's baseline level refuses a
+// pod that adds NET_RAW, which Portainer's create form adds to every
+// container.
+func podCapabilityAdds(add, drop []corev1.Capability) []corev1.Capability {
+	var adds []corev1.Capability
+	for _, c := range add {
+		if slices.Contains(dockerDefaultCapabilities, c) && !slices.Contains(drop, "ALL") && !slices.Contains(drop, c) {
+			continue
+		}
+		adds = append(adds, c)
+	}
+	return adds
+}
+
+// podSecurityContext returns the pod-level security settings. Every
+// container gets the runtime's default seccomp profile, as Docker gives
+// each its own default profile; a container's seccomp=unconfined overrides it.
+func podSecurityContext(opts RunOptions) *corev1.PodSecurityContext {
+	return &corev1.PodSecurityContext{Sysctls: opts.Sysctls, SupplementalGroups: opts.SupplementalGroups, SeccompProfile: runtimeDefaultSeccomp()}
+}
+
+// runtimeDefaultSeccomp is the container runtime's default seccomp profile.
+func runtimeDefaultSeccomp() *corev1.SeccompProfile {
+	return &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault}
 }
 
 // dnsConfig returns the DNS search domains and options the container adds
