@@ -114,8 +114,12 @@ EOF
 
 echo "== pod security ($STANDALONE, $CONTEXT, namespace $NAMESPACE)"
 
-check "info: docker info shows the privileged level, with no warning" bash -c '
-  docker info 2>&1 | grep -q "Profile: privileged" && ! docker info 2>&1 | grep -q "WARNING: namespace"'
+# The namespace may already enforce a level (Talos' baseline): allow
+# everything first, so the levels below are raised from privileged.
+enforce privileged
+
+info_privileged() { info_shows privileged && ! grep -q "WARNING: namespace" "$WORKDIR/info"; }
+check "info: docker info shows the privileged level, with no warning" info_privileged
 
 # Created before the namespace's level was raised: refused at start.
 docker create --name e2e-psa-old --privileged busybox sleep 300 >/dev/null
