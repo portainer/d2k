@@ -141,7 +141,7 @@ func TestSwarmServiceUsesTheRuntimeDefaultSeccompProfile(t *testing.T) {
 // default capabilities, so Pod Security's baseline level refuses to start
 // them. A stopped container's are removed on start-up; a running one is left
 // alone, as changing its pod template would restart it.
-func TestMigrateDefaultCapabilities(t *testing.T) {
+func TestMigrateSecurityTranslationRemovesDefaultCapabilities(t *testing.T) {
 	defaults := []corev1.Capability{"CHOWN", "NET_RAW", "SETUID"}
 	withCaps := func(name string, replicas int32, add, drop []corev1.Capability) runtime.Object {
 		d := legacyDeployment(name, replicas, nil)
@@ -156,7 +156,7 @@ func TestMigrateDefaultCapabilities(t *testing.T) {
 	)
 	ctx := context.Background()
 
-	if err := a.MigrateDefaultCapabilities(ctx); err != nil {
+	if err := a.MigrateSecurityTranslation(ctx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -175,15 +175,69 @@ func TestMigrateDefaultCapabilities(t *testing.T) {
 	}
 }
 
-// The migration runs on every start: once nothing is left to change, it
-// changes nothing.
-func TestMigrateDefaultCapabilitiesLeavesMigratedContainersAlone(t *testing.T) {
+// d2k 1.3.0 set no seccomp profile and no runAsNonRoot, which restricted
+// requires: a stopped container created then with a non-root user gets
+// both, as a new one does. A container's own seccomp=unconfined still wins.
+func TestMigrateSecurityTranslationAddsSeccompAndRunAsNonRoot(t *testing.T) {
+	legacy := legacyDeployment("app", 0, nil)
+	legacy.Annotations[types.AnnotationDockerName] = "app"
+	legacy.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{
+		RunAsUser:      new(int64(1000)),
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined},
+	}
+	a, client := newTestAdapter(t, legacy)
+	ctx := context.Background()
+
+	if err := a.MigrateSecurityTranslation(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "app", metav1.GetOptions{})
+	spec := d.Spec.Template.Spec
+	if sc := spec.SecurityContext; sc == nil || sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("pod security context = %+v, want the RuntimeDefault seccomp profile", spec.SecurityContext)
+	}
+	sc := spec.Containers[0].SecurityContext
+	if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+		t.Errorf("runAsNonRoot = %v, want true for user 1000", sc.RunAsNonRoot)
+	}
+	if sc.SeccompProfile.Type != corev1.SeccompProfileTypeUnconfined {
+		t.Errorf("container seccomp = %v, want its seccomp=unconfined kept", sc.SeccompProfile.Type)
+	}
+}
+
+// A container that was running when d2k started keeps its 1.3.0 pod
+// template; it is brought up to date when it is next started.
+func TestStartContainerUpdatesAnEarlierReleasesSecuritySettings(t *testing.T) {
+	legacy := legacyDeployment("app", 0, nil)
+	legacy.Annotations[types.AnnotationDockerName] = "app"
+	legacy.Annotations[types.AnnotationRestartPolicy] = "always"
+	legacy.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_RAW"}}}
+	a, client := newTestAdapter(t, legacy)
+	ctx := context.Background()
+
+	if err := a.StartContainer(ctx, "app"); err != nil {
+		t.Fatal(err)
+	}
+
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "app", metav1.GetOptions{})
+	if added := addedCapabilities(d.Spec.Template.Spec); len(added) != 0 {
+		t.Errorf("capabilities added = %v, want none", added)
+	}
+	if sc := d.Spec.Template.Spec.SecurityContext; sc == nil || sc.SeccompProfile == nil {
+		t.Errorf("pod security context = %+v, want the RuntimeDefault seccomp profile", sc)
+	}
+}
+
+// The migration runs on every start: a container this release created has
+// nothing to change.
+func TestMigrateSecurityTranslationLeavesNewContainersAlone(t *testing.T) {
 	a, client := newTestAdapter(t)
 	opts, _ := RunOptionsFromRequest("app", request(t, portainerFormCreate))
 	mustCreate(t, a, opts)
 	before, _ := client.AppsV1().Deployments(testNamespace).Get(context.Background(), "app", metav1.GetOptions{})
 
-	if err := a.MigrateDefaultCapabilities(context.Background()); err != nil {
+	if err := a.MigrateSecurityTranslation(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 

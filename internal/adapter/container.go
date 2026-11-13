@@ -480,6 +480,11 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 		(runsAsPod(*d) || d.Spec.Replicas != nil && *d.Spec.Replicas > 0) && containerState(*d, pods.Items, time.Now()).Running {
 		return errdefs.NotModified(fmt.Errorf("container %q is already running", name))
 	}
+	// A container an earlier d2k created that was running when d2k started
+	// kept its pod template (MigrateSecurityTranslation): it is stopped now.
+	if err := a.upgradeContainerSecurity(ctx, d); err != nil {
+		return err
+	}
 	if runsAsPod(*d) {
 		err := a.startPod(ctx, d)
 		if err == nil {

@@ -61,7 +61,7 @@ instances. Set `CLUSTER` to use a kind cluster with another name.
 `pod-security.sh` checks the standalone instance under Pod Security's
 `baseline` and `restricted` levels, as Talos sets by default or Portainer's
 Pod Security Standards policy sets. It labels the namespace with each level,
-as a cluster admin would, and removes the label on exit. Containers whose
+as a cluster admin would, and restores the namespace's own level on exit. Containers whose
 Docker settings comply (including the create request Portainer's form sends)
 must run, and the others must be refused with Kubernetes' reason:
 

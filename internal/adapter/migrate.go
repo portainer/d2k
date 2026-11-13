@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/portainer/d2k/internal/types"
@@ -106,15 +108,16 @@ func recordedNameAndLabels(name string, labels map[string]string) (map[string]*s
 	return map[string]*string{types.AnnotationDockerName: &name, types.AnnotationDockerLabels: ptr(string(raw))}, nil
 }
 
-// MigrateDefaultCapabilities removes the capabilities Docker grants by
-// default from what the pods of stopped containers add. d2k 1.3.0 added
-// every capability the create request listed, and Portainer's create form
-// lists Docker's defaults, NET_RAW among them, which Pod Security's baseline
-// level refuses: such a container could never start. A running container is
-// left as it is, as changing its pod template would restart it; the next
-// start after it stops picks the change up. Like MigrateLegacyObjects, it
-// runs on every start and returns every failure joined.
-func (a *KubernetesDockerAdapter) MigrateDefaultCapabilities(ctx context.Context) error {
+// MigrateSecurityTranslation brings the pods of stopped containers an
+// earlier d2k created up to date with how d2k translates Docker's security
+// settings now (upgradeSecurityTranslation), so Pod Security's baseline and
+// restricted levels admit them as they admit a new container. A running
+// container is left as it is, as changing its pod template would restart
+// it; StartContainer brings it up to date when it next starts. Swarm
+// services run, so they are left too: docker stack deploy rebuilds their
+// pod templates. Like MigrateLegacyObjects, it runs on every start and
+// returns every failure joined.
+func (a *KubernetesDockerAdapter) MigrateSecurityTranslation(ctx context.Context) error {
 	deployments, err := a.client.AppsV1().Deployments(a.namespace).List(ctx, metav1ListOptions())
 	if err != nil {
 		return fmt.Errorf("unable to list deployments: %w", err)
@@ -124,25 +127,59 @@ func (a *KubernetesDockerAdapter) MigrateDefaultCapabilities(ctx context.Context
 		if d.Labels[types.LabelSwarmManagedBy] == types.LabelSwarmManagedByValue || d.Spec.Replicas == nil || *d.Spec.Replicas != 0 {
 			continue
 		}
-		changed := false
-		for i, c := range d.Spec.Template.Spec.Containers {
-			if c.SecurityContext == nil || c.SecurityContext.Capabilities == nil {
-				continue
-			}
-			caps := d.Spec.Template.Spec.Containers[i].SecurityContext.Capabilities
+		if err := a.upgradeContainerSecurity(ctx, &d); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// upgradeContainerSecurity updates d's pod template when
+// upgradeSecurityTranslation changes it.
+func (a *KubernetesDockerAdapter) upgradeContainerSecurity(ctx context.Context, d *appsv1.Deployment) error {
+	if !upgradeSecurityTranslation(&d.Spec.Template.Spec) {
+		return nil
+	}
+	updated, err := a.client.AppsV1().Deployments(a.namespace).Update(ctx, d, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("unable to update the security settings of container %q: %w", dockerName(*d), err)
+	}
+	*d = *updated
+	log.Info().Str("context", "Migration").Str("container", dockerName(*d)).Msg("Updated the pod security settings of a container an earlier d2k created")
+	return nil
+}
+
+// upgradeSecurityTranslation changes the pod spec of a container d2k 1.3.0
+// created as d2k translates the same Docker settings now, and reports
+// whether it changed anything. d2k 1.3.0 added every capability the create
+// request listed (Portainer's create form lists Docker's defaults, NET_RAW
+// among them, which baseline refuses), set no seccomp profile, and didn't
+// set runAsNonRoot for a numeric non-root user; restricted requires both.
+// None of this changes what the container may do in Docker terms.
+func upgradeSecurityTranslation(spec *corev1.PodSpec) bool {
+	changed := false
+	if spec.SecurityContext == nil {
+		spec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	if spec.SecurityContext.SeccompProfile == nil {
+		spec.SecurityContext.SeccompProfile = runtimeDefaultSeccomp()
+		changed = true
+	}
+	for _, c := range spec.Containers {
+		sc := c.SecurityContext
+		if sc == nil {
+			continue
+		}
+		if caps := sc.Capabilities; caps != nil {
 			if adds := podCapabilityAdds(caps.Add, caps.Drop); len(adds) != len(caps.Add) {
 				caps.Add = adds
 				changed = true
 			}
 		}
-		if !changed {
-			continue
+		if sc.RunAsUser != nil && *sc.RunAsUser != 0 && sc.RunAsNonRoot == nil {
+			sc.RunAsNonRoot = new(true)
+			changed = true
 		}
-		if _, err := a.client.AppsV1().Deployments(a.namespace).Update(ctx, &d, metav1.UpdateOptions{}); err != nil {
-			failures = append(failures, fmt.Errorf("unable to migrate the capabilities of container %q: %w", dockerName(d), err))
-			continue
-		}
-		log.Info().Str("context", "Migration").Str("container", dockerName(d)).Msg("Removed the capabilities Docker grants by default from what a container's pod adds")
 	}
-	return errors.Join(failures...)
+	return changed
 }

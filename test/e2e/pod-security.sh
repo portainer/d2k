@@ -3,7 +3,7 @@
 # whose Docker settings comply runs, and one whose settings break the level is
 # refused with Kubernetes' reason. d2k never changes the level: this script
 # sets it, as a cluster admin or Portainer's Pod Security Standards policy
-# would, and removes it on exit. Defaults match run.sh (the kind cluster
+# would, and restores the namespace's own level on exit. Defaults match run.sh (the kind cluster
 # setup.sh creates); override CLUSTER/STANDALONE/PKI/NAMESPACE to run against
 # another environment.
 set -uo pipefail
@@ -22,10 +22,25 @@ pass=0 fail=0
 
 k() { kubectl --context "$CONTEXT" "$@"; }
 
+# The namespace's own level, put back on exit: a namespace may already
+# enforce one (Talos, Portainer's policy) when NAMESPACE names it.
+ENFORCE_LABEL=pod-security.kubernetes.io/enforce
+ORIGINAL_ENFORCE=$(k get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}')
+
+# restore_label KEY VALUE: set the namespace's label back to VALUE, or
+# remove it when VALUE is empty.
+restore_label() {
+  if [ -n "$2" ]; then
+    k label namespace "$NAMESPACE" "$1=$2" --overwrite >/dev/null
+  else
+    k label namespace "$NAMESPACE" "$1-" >/dev/null
+  fi
+}
+
 cleanup() {
   docker rm -f e2e-psa-form e2e-psa-plain e2e-psa-priv e2e-psa-sysadmin e2e-psa-netraw e2e-psa-always e2e-psa-nonroot e2e-psa-root >/dev/null 2>&1
   docker compose -p e2e-psa -f "$WORKDIR/compose.yaml" down >/dev/null 2>&1
-  k label namespace "$NAMESPACE" pod-security.kubernetes.io/enforce- >/dev/null
+  restore_label "$ENFORCE_LABEL" "$ORIGINAL_ENFORCE"
   rm -rf "$WORKDIR"
 }
 trap cleanup EXIT
@@ -40,7 +55,7 @@ check() {
   fi
 }
 
-enforce() { k label namespace "$NAMESPACE" "pod-security.kubernetes.io/enforce=$1" --overwrite >/dev/null; }
+enforce() { k label namespace "$NAMESPACE" "$ENFORCE_LABEL=$1" --overwrite >/dev/null; }
 
 running() { [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }
 
