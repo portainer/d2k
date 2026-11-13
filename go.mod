@@ -1,6 +1,6 @@
 module github.com/portainer/d2k
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/distribution/reference v0.6.0
