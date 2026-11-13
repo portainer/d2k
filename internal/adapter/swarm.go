@@ -769,6 +769,12 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 		deployment.Spec.Template.Labels[types.LabelSwarmStack] = stack
 	}
 
+	admissionWarnings, err := a.checkAdmission(ctx, name, deployment.Spec.Template)
+	if err != nil {
+		return nil, err
+	}
+	warnings = append(warnings, admissionWarnings...)
+
 	created, err := a.client.AppsV1().Deployments(a.namespace).Create(ctx, deployment, metav1.CreateOptions{})
 	if err != nil {
 		if errors.IsAlreadyExists(err) {

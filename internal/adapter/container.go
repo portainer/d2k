@@ -193,7 +193,7 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		return "", nil, fmt.Errorf("unable to resolve port mappings: %w", err)
 	}
 
-	volumes, volumeMounts, volumeNames, volumeWarnings, err := a.namedVolumeMounts(ctx, opts.Binds)
+	volumes, volumeMounts, volumeNames, volumeWarnings, err := namedVolumeMounts(opts.Binds)
 	if err != nil {
 		return "", nil, err
 	}
@@ -265,6 +265,19 @@ func (a *KubernetesDockerAdapter) CreateContainer(ctx context.Context, opts RunO
 		warnings = append(warnings, a.scopeDNSToProject(deployment, project, service)...)
 	}
 	warnings = append(warnings, ignoredAliases(opts.Aliases, dockerName, service)...)
+
+	admissionWarnings, err := a.checkAdmission(ctx, opts.Name, deployment.Spec.Template)
+	if err != nil {
+		return "", nil, err
+	}
+	warnings = append(warnings, admissionWarnings...)
+
+	// Creating a volume that exists returns it, as in Docker.
+	for _, source := range volumeNames {
+		if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: source}); err != nil {
+			return "", nil, fmt.Errorf("unable to create volume %q: %w", source, err)
+		}
+	}
 
 	// From here the container is created whole or rolled back, even if the
 	// client goes away: a half-created one would hold its name.
@@ -483,6 +496,9 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 	// A container an earlier d2k created that was running when d2k started
 	// kept its pod template (MigrateSecurityTranslation): it is stopped now.
 	if err := a.upgradeContainerSecurity(ctx, d); err != nil {
+		return err
+	}
+	if _, err := a.checkAdmission(ctx, resolved, d.Spec.Template); err != nil {
 		return err
 	}
 	if runsAsPod(*d) {
@@ -1432,9 +1448,10 @@ func publishedServiceName(name string) string {
 }
 
 // namedVolumeMounts translates Docker binds into PVC mounts, and returns the
-// Docker volume name of each PVC. Missing named volumes are created, as Docker
-// does on run. Host path binds are not supported and produce a warning.
-func (a *KubernetesDockerAdapter) namedVolumeMounts(ctx context.Context, binds []string) ([]corev1.Volume, []corev1.VolumeMount, map[string]string, []string, error) {
+// Docker volume name of each PVC, which CreateContainer creates if missing,
+// as Docker does on run. Host path binds are not supported and produce a
+// warning.
+func namedVolumeMounts(binds []string) ([]corev1.Volume, []corev1.VolumeMount, map[string]string, []string, error) {
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
 	names := map[string]string{}
@@ -1448,11 +1465,6 @@ func (a *KubernetesDockerAdapter) namedVolumeMounts(ctx context.Context, binds [
 		if strings.HasPrefix(source, "/") || strings.HasPrefix(source, ".") {
 			warnings = append(warnings, fmt.Sprintf("bind mount %q ignored: host paths are not supported by d2k", bind))
 			continue
-		}
-
-		// Creating a volume that exists returns it, as in Docker.
-		if _, err := a.CreateVolume(ctx, CreateVolumeOptions{Name: source}); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("unable to create volume %q: %w", source, err)
 		}
 		claim := sanitiseResourceName(source)
 		names[claim] = source

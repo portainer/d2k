@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -76,6 +77,10 @@ type KubernetesDockerAdapter struct {
 	// wait: NewWithClient's adapter, whose fake clientset runs no pods.
 	startWait time.Duration
 
+	// dryRunPod submits a pod as a server-side dry run (checkAdmission). Nil
+	// skips the check: NewWithClient's fake clientset would store the pod.
+	dryRunPod func(context.Context, *corev1.Pod) ([]string, error)
+
 	// statsHost caches HostResources for docker stats (statsHostResources).
 	statsHost   hostResources
 	statsHostMu sync.Mutex
@@ -109,6 +114,11 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 		return nil, fmt.Errorf("unable to reach namespace %q in cluster: %w", opts.Config.Namespace, err)
 	}
 
+	dryRunPod, err := newPodDryRun(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create Kubernetes client: %w", err)
+	}
+
 	mc := initMetricsClient(restCfg)
 
 	clusterDNS, clusterDomain := readClusterDNS("/etc/resolv.conf")
@@ -125,6 +135,7 @@ func NewKubernetesDockerAdapter(opts *Options) (*KubernetesDockerAdapter, error)
 	a.clusterDNS = clusterDNS
 	a.clusterDomain = clusterDomain
 	a.startWait = startWaitTimeout
+	a.dryRunPod = dryRunPod
 	return a, nil
 }
 
