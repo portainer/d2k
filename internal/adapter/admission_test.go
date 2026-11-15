@@ -172,6 +172,28 @@ func TestCreateContainerRefusedByPodSecurityCreatesNothing(t *testing.T) {
 	}
 }
 
+// compose cancels its other requests when one fails. A dry run cut short
+// that way says nothing about the container, so it mustn't be created.
+func TestCreateContainerWhoseDryRunWasCancelledCreatesNothing(t *testing.T) {
+	a, client := newTestAdapter(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	a.dryRunPod = func(context.Context, *corev1.Pod) ([]string, error) {
+		cancel()
+		return nil, errors.New("client rate limiter Wait returned an error: context canceled")
+	}
+	opts, _ := RunOptionsFromRequest("app", request(t, `{"Image":"nginx","HostConfig":{"Privileged":true}}`))
+
+	_, _, err := a.CreateContainer(ctx, opts)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	deployments, _ := client.AppsV1().Deployments(testNamespace).List(context.Background(), metav1.ListOptions{})
+	if len(deployments.Items) != 0 {
+		t.Errorf("created %d Deployments, want none", len(deployments.Items))
+	}
+}
+
 func TestCreateContainerReturnsPodSecurityWarnings(t *testing.T) {
 	a, _ := newTestAdapter(t)
 	refuseWith(a, nil, "would violate "+plainRestricted)

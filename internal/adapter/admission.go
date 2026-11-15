@@ -72,7 +72,13 @@ func (a *KubernetesDockerAdapter) checkAdmission(ctx context.Context, name strin
 		ObjectMeta: metav1.ObjectMeta{GenerateName: name + "-", Namespace: a.namespace, Labels: tmpl.Labels, Annotations: tmpl.Annotations},
 		Spec:       tmpl.Spec,
 	}
-	return admissionResult(a.dryRunPod(ctx, pod))
+	warnings, err := a.dryRunPod(ctx, pod)
+	// A client that went away, as compose's other requests do when one
+	// fails, cut the dry run short: it tells nothing, so nothing goes on.
+	if err != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return admissionResult(warnings, err)
 }
 
 // admissionResult translates a dry run's result. Only a policy's refusal
