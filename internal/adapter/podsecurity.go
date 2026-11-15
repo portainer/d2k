@@ -99,12 +99,12 @@ func PodSecurityWarning(namespace, level string) string {
 func (a *KubernetesDockerAdapter) LogPodSecurityLevel(ctx context.Context) {
 	level := a.PodSecurityLevel(ctx)
 	if warning := PodSecurityWarning(a.namespace, level); warning != "" {
-		log.Warn().Str("context", "Startup").Str("level", level).Msg(warning)
+		log.Warn().Str("context", "Startup").Str("pod_security_level", level).Msg(warning)
 		return
 	}
 	if level == PodSecurityUnknown {
 		log.Warn().Str("context", "Startup").Msgf("Unable to work out the Pod Security level namespace %s enforces", a.namespace)
 		return
 	}
-	log.Info().Str("context", "Startup").Str("level", level).Msgf("Namespace %s enforces Pod Security %q", a.namespace, level)
+	log.Info().Str("context", "Startup").Str("pod_security_level", level).Msgf("Namespace %s enforces Pod Security %q", a.namespace, level)
 }
