@@ -1262,12 +1262,9 @@ func encodePortMappings(bindings []string, publishAll bool) (string, error) {
 	return string(b), err
 }
 
-// dockerDefaultCapabilities are the capabilities Docker grants every
-// container.
-var dockerDefaultCapabilities = []corev1.Capability{
-	"AUDIT_WRITE", "CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "MKNOD",
-	"NET_BIND_SERVICE", "NET_RAW", "SETFCAP", "SETGID", "SETPCAP", "SETUID", "SYS_CHROOT",
-}
+// netRaw is the one capability Docker grants by default that Pod Security's
+// baseline level refuses a pod to add.
+const netRaw corev1.Capability = "NET_RAW"
 
 // containerSecurityContext translates the user, capabilities, privileged
 // and read-only root settings, or returns nil when none is set. Whether they
@@ -1312,14 +1309,15 @@ func capabilities(names []string) []corev1.Capability {
 }
 
 // podCapabilityAdds returns the capabilities of add that the pod must add.
-// Adding one Docker grants by default changes nothing in Docker, so it is
-// left out, unless it was dropped: Pod Security's baseline level refuses a
-// pod that adds NET_RAW, which Portainer's create form adds to every
-// container.
+// Adding NET_RAW changes nothing in Docker, which grants it by default, so
+// it is left out, unless it was dropped: Pod Security's baseline level
+// refuses a pod that adds it, and Portainer's create form added it to every
+// container. Docker's other defaults are kept: baseline allows them, and
+// runtimes such as CRI-O don't grant them all by default.
 func podCapabilityAdds(add, drop []corev1.Capability) []corev1.Capability {
 	var adds []corev1.Capability
 	for _, c := range add {
-		if slices.Contains(dockerDefaultCapabilities, c) && !slices.Contains(drop, "ALL") && !slices.Contains(drop, c) {
+		if c == netRaw && !slices.Contains(drop, "ALL") && !slices.Contains(drop, c) {
 			continue
 		}
 		adds = append(adds, c)
