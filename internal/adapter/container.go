@@ -499,6 +499,12 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 		return err
 	}
 	if _, err := a.checkAdmission(ctx, resolved, d.Spec.Template); err != nil {
+		// A container left at 1 replica with no pod, as when its ReplicaSet
+		// was refused or its pod evicted, would start by itself once the
+		// level is lowered.
+		if errdefs.IsForbidden(err) && !runsAsPod(*d) && d.Spec.Replicas != nil && *d.Spec.Replicas > 0 {
+			a.leaveStopped(ctx, resolved)
+		}
 		return err
 	}
 	if runsAsPod(*d) {
@@ -527,12 +533,18 @@ func (a *KubernetesDockerAdapter) StartContainer(ctx context.Context, name strin
 		}
 		// As Docker's failed start does, leave the container stopped: at 1
 		// replica it would start by itself once the quota frees.
-		if scaleErr := a.scaleDeployment(context.WithoutCancel(ctx), resolved, 0); scaleErr != nil {
-			log.Warn().Str("context", "KubernetesAdapter").Str("container", resolved).Err(scaleErr).Msg("Unable to stop a container whose start failed")
-		}
+		a.leaveStopped(ctx, resolved)
 		return err
 	}
 	return nil
+}
+
+// leaveStopped scales a container whose start failed back to 0 replicas,
+// as Docker leaves a container whose start failed.
+func (a *KubernetesDockerAdapter) leaveStopped(ctx context.Context, name string) {
+	if err := a.scaleDeployment(context.WithoutCancel(ctx), name, 0); err != nil {
+		log.Warn().Str("context", "KubernetesAdapter").Str("container", name).Err(err).Msg("Unable to stop a container whose start failed")
+	}
 }
 
 // stopFailedRun leaves a run-once container whose start failed as Docker

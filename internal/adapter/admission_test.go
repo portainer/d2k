@@ -20,6 +20,7 @@ const (
 	baselineRefusal = `violates PodSecurity "baseline:latest": forbidden AppArmor profile (container "app" must not set AppArmor profile type to "Unconfined"), non-default capabilities (container "app" must not include "NET_RAW", "SYS_ADMIN" in securityContext.capabilities.add), host namespaces (hostNetwork=true, hostPID=true, hostIPC=true), hostPath volumes (volume "h"), hostPort (container "app" uses hostPort 80), privileged (container "app" must not set securityContext.privileged=true), seLinuxOptions (container "app" set forbidden securityContext.seLinuxOptions: type "spc_t"), seccompProfile (container "app" must not set securityContext.seccompProfile.type to "Unconfined")`
 	sysctlRefusal   = `violates PodSecurity "baseline:latest": procMount (container "app" must not set securityContext.procMount to "Unmasked"), forbidden sysctls (kernel.msgmax)`
 	plainRestricted = `PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "app" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "app" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "app" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")`
+	dropAndAdd      = `violates PodSecurity "restricted:latest": unrestricted capabilities (container "app" must set securityContext.capabilities.drop=["ALL"]; container "app" must not include "SYS_ADMIN" in securityContext.capabilities.add)`
 	rootRefusal     = `violates PodSecurity "restricted:latest": unrestricted capabilities (container "app" must not include "CHOWN" in securityContext.capabilities.add), restricted volume types (volume "n" uses restricted volume type "nfs"), runAsUser=0 (container "app" must not set runAsUser=0)`
 )
 
@@ -57,6 +58,10 @@ func TestPodSecurityRefusalNamesTheDockerSettings(t *testing.T) {
 			"add --cap-drop ALL (compose: cap_drop: [ALL])",
 			`run as a numeric non-root user, such as --user 1000:1000 (compose: user: "1000:1000")`,
 			"re-create the container, so it gets Docker's default seccomp profile",
+		}},
+		{"drop and add", dropAndAdd, []string{
+			"add --cap-drop ALL (compose: cap_drop: [ALL])",
+			"remove SYS_ADMIN from --cap-add (compose: cap_add); only NET_BIND_SERVICE may be added",
 		}},
 		{"root", rootRefusal, []string{
 			"remove CHOWN from --cap-add (compose: cap_add); only NET_BIND_SERVICE may be added",
@@ -210,15 +215,33 @@ func TestCreateContainerReturnsPodSecurityWarnings(t *testing.T) {
 }
 
 // A container created before its namespace's level was raised, or by
-// d2k 1.3.0, is refused at start with the same advice, and stays stopped.
+// d2k 1.3.0, is refused at start with the same advice, and stays stopped. A
+// restart-always container left at 1 replica with no pod, as when its
+// ReplicaSet was refused or its pod evicted, is scaled back to 0, so it
+// doesn't start by itself once the level is lowered.
 func TestStartContainerRefusedByPodSecurity(t *testing.T) {
-	for _, restart := range []string{"no", "always"} {
-		t.Run(restart, func(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		restart  string
+		replicas int32
+	}{
+		{"no", "no", 0},
+		{"always", "always", 0},
+		{"always at 1 replica with no pod", "always", 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			a, client := newTestAdapter(t)
-			opts, _ := RunOptionsFromRequest("app", request(t, `{"Image":"nginx","HostConfig":{"Privileged":true,"RestartPolicy":{"Name":"`+restart+`"}}}`))
+			opts, _ := RunOptionsFromRequest("app", request(t, `{"Image":"nginx","HostConfig":{"Privileged":true,"RestartPolicy":{"Name":"`+tt.restart+`"}}}`))
 			mustCreate(t, a, opts)
-			refuseWith(a, forbidden(baselineRefusal))
 			ctx := context.Background()
+			if tt.replicas > 0 {
+				d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "app", metav1.GetOptions{})
+				d.Spec.Replicas = &tt.replicas
+				if _, err := client.AppsV1().Deployments(testNamespace).Update(ctx, d, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			refuseWith(a, forbidden(baselineRefusal))
 
 			err := a.StartContainer(ctx, "app")
 
