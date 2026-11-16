@@ -263,7 +263,7 @@ The containers d2k creates are pods, so the namespace's [Pod Security](https://k
 | Level | Refuses | Docker settings that comply |
 |---|---|---|
 | `privileged` | Nothing | Any |
-| `baseline` | `--privileged`, host paths, host ports, `--security-opt seccomp=unconfined` or `apparmor=unconfined`, and `--cap-add` of capabilities Docker doesn't grant by default (such as `SYS_ADMIN`) | A plain `docker run`. Adding a capability Docker grants by default, such as `NET_RAW`, changes nothing, so d2k leaves it out of the pod |
+| `baseline` | `--privileged`, host paths, host ports, `--security-opt seccomp=unconfined` or `apparmor=unconfined`, and `--cap-add` of capabilities Docker doesn't grant by default (such as `SYS_ADMIN`) | A plain `docker run`. Adding `NET_RAW`, which Docker grants by default, changes nothing, so d2k leaves it out of the pod |
 | `restricted` | Everything `baseline` refuses, and any container that may run as root, keeps its capabilities or may gain privileges | `--user 1000:1000 --cap-drop ALL --security-opt no-new-privileges` (only `NET_BIND_SERVICE` may be added back), and an image that runs as that user |
 
 `docker info` shows the level under Security Options (`pod-security`, `Profile: restricted`), with a warning under `baseline` or `restricted` of what to set; d2k also logs it at start-up. It works the level out with a server-side dry run of a privileged pod, and checks again at most a minute after the namespace's labels change.
