@@ -152,7 +152,7 @@ func (a *KubernetesDockerAdapter) upgradeContainerSecurity(ctx context.Context, 
 // upgradeSecurityTranslation changes the pod spec of a container d2k 1.3.0
 // created as d2k translates the same Docker settings now, and reports
 // whether it changed anything. d2k 1.3.0 added every capability the create
-// request listed (Portainer's create form lists Docker's defaults, NET_RAW
+// request listed (Portainer's create form listed Docker's defaults, NET_RAW
 // among them, which baseline refuses), set no seccomp profile, and didn't
 // set runAsNonRoot for a numeric non-root user; restricted requires both.
 // None of this changes what the container may do in Docker terms.
