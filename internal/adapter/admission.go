@@ -152,10 +152,15 @@ func podSecurityAdvice(check, detail string) string {
 	case "non-default capabilities":
 		return "remove " + addedCapabilityNames(detail) + " from --cap-add (compose: cap_add)"
 	case "unrestricted capabilities":
+		// The detail can name both a missing drop and an add.
+		var advice []string
 		if strings.Contains(detail, "capabilities.drop") {
-			return "add --cap-drop ALL (compose: cap_drop: [ALL])"
+			advice = append(advice, "add --cap-drop ALL (compose: cap_drop: [ALL])")
 		}
-		return "remove " + addedCapabilityNames(detail) + " from --cap-add (compose: cap_add); only NET_BIND_SERVICE may be added"
+		if strings.Contains(detail, "must not include") {
+			advice = append(advice, "remove "+addedCapabilityNames(detail)+" from --cap-add (compose: cap_add); only NET_BIND_SERVICE may be added")
+		}
+		return strings.Join(advice, "; ")
 	case "allowPrivilegeEscalation != false":
 		return "add --security-opt no-new-privileges (compose: security_opt: [no-new-privileges:true])"
 	case "runAsNonRoot != true", "runAsUser=0":

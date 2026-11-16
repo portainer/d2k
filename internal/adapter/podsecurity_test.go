@@ -41,14 +41,16 @@ func addedCapabilities(spec corev1.PodSpec) []corev1.Capability {
 	return nil
 }
 
-// Adding a capability Docker grants by default changes nothing in Docker,
-// but Pod Security's baseline level refuses a pod that adds NET_RAW: every
-// container from Portainer's create form was refused on Talos.
-func TestCreateContainerLeavesDockerDefaultCapabilitiesOut(t *testing.T) {
+// Adding NET_RAW changes nothing in Docker, which grants it by default, but
+// Pod Security's baseline level refuses a pod that adds it: every container
+// from Portainer's create form was refused on Talos. Baseline allows adding
+// Docker's other defaults, and CRI-O doesn't grant them all by default, so
+// they are kept.
+func TestCreateContainerLeavesNetRawOut(t *testing.T) {
 	spec := createdPodSpec(t, portainerFormCreate)
 
-	if added := addedCapabilities(spec); len(added) != 0 {
-		t.Errorf("capabilities added = %v, want none", added)
+	if added := addedCapabilities(spec); len(added) != 13 || slices.Contains(added, "NET_RAW") {
+		t.Errorf("capabilities added = %v, want Docker's 13 other defaults", added)
 	}
 	if dropped := spec.Containers[0].SecurityContext.Capabilities.Drop; !slices.Contains(dropped, "SYS_ADMIN") {
 		t.Errorf("capabilities dropped = %v, want the form's drops kept", dropped)
@@ -62,8 +64,9 @@ func TestCreateContainerKeepsTheCapabilitiesDockerAdds(t *testing.T) {
 		want       []corev1.Capability
 	}{
 		{"a capability Docker doesn't grant", `{"CapAdd":["SYS_ADMIN","cap_net_raw"]}`, []corev1.Capability{"SYS_ADMIN"}},
-		{"a default after dropping them all", `{"CapAdd":["CHOWN","NET_BIND_SERVICE"],"CapDrop":["ALL"]}`, []corev1.Capability{"CHOWN", "NET_BIND_SERVICE"}},
-		{"a default also dropped", `{"CapAdd":["CAP_CHOWN"],"CapDrop":["chown"]}`, []corev1.Capability{"CHOWN"}},
+		{"a default other than NET_RAW", `{"CapAdd":["MKNOD"]}`, []corev1.Capability{"MKNOD"}},
+		{"NET_RAW after dropping them all", `{"CapAdd":["NET_RAW","NET_BIND_SERVICE"],"CapDrop":["ALL"]}`, []corev1.Capability{"NET_RAW", "NET_BIND_SERVICE"}},
+		{"NET_RAW also dropped", `{"CapAdd":["CAP_NET_RAW"],"CapDrop":["net_raw"]}`, []corev1.Capability{"NET_RAW"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			spec := createdPodSpec(t, `{"Image":"nginx","HostConfig":`+tt.hostConfig+`}`)
@@ -139,11 +142,11 @@ func TestSwarmServiceUsesTheRuntimeDefaultSeccompProfile(t *testing.T) {
 	}
 }
 
-// Containers created from Portainer's form by d2k 1.3.0 add Docker's
-// default capabilities, so Pod Security's baseline level refuses to start
-// them. A stopped container's are removed on start-up; a running one is left
-// alone, as changing its pod template would restart it.
-func TestMigrateSecurityTranslationRemovesDefaultCapabilities(t *testing.T) {
+// Containers created from Portainer's form by d2k 1.3.0 add NET_RAW, so Pod
+// Security's baseline level refuses to start them. A stopped container's is
+// removed on start-up; a running one is left alone, as changing its pod
+// template would restart it.
+func TestMigrateSecurityTranslationRemovesNetRaw(t *testing.T) {
 	defaults := []corev1.Capability{"CHOWN", "NET_RAW", "SETUID"}
 	withCaps := func(name string, replicas int32, add, drop []corev1.Capability) runtime.Object {
 		d := legacyDeployment(name, replicas, nil)
@@ -163,7 +166,7 @@ func TestMigrateSecurityTranslationRemovesDefaultCapabilities(t *testing.T) {
 	}
 
 	for name, want := range map[string][]corev1.Capability{
-		"stopped":   {"SYS_ADMIN"},
+		"stopped":   {"CHOWN", "SETUID", "SYS_ADMIN"},
 		"running":   defaults,
 		"drops-all": defaults,
 	} {
