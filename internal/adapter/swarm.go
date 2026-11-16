@@ -736,8 +736,9 @@ func (a *KubernetesDockerAdapter) SwarmCreateService(ctx context.Context, body i
 					},
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy: restartPolicy,
-					NodeSelector:  nodeSelector,
+					RestartPolicy:   restartPolicy,
+					NodeSelector:    nodeSelector,
+					SecurityContext: &corev1.PodSecurityContext{SeccompProfile: runtimeDefaultSeccomp()},
 					Affinity: func() *corev1.Affinity {
 						if nodeAffinity == nil {
 							return nil
