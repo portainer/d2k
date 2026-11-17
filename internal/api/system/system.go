@@ -167,6 +167,8 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	securityOptions, warnings := podSecurityInfo(h.namespace, h.adapter.PodSecurityLevel(ctx))
+
 	httputils.WriteJSON(w, http.StatusOK, map[string]any{
 		"ID":                id,
 		"Containers":        len(ctrs),
@@ -199,7 +201,8 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 		"NGoroutines":       10,
 		"NCPU":              ncpu,
 		"MemTotal":          memory,
-		"SecurityOptions":   []string{},
+		"SecurityOptions":   securityOptions,
+		"Warnings":          warnings,
 		"Swarm":             h.swarmInfo(ctx),
 		"Labels": []string{
 			"d2k.portainer.io/translator=true",
@@ -213,4 +216,19 @@ func (h *Handler) Info(w http.ResponseWriter, r *http.Request) {
 			"Builder":       nil,
 		},
 	})
+}
+
+// podSecurityInfo returns /info's security options, Docker's default
+// seccomp profile (which every pod d2k creates uses) and the namespace's Pod
+// Security level when known, and its warning of what that level refuses.
+func podSecurityInfo(namespace, level string) (securityOptions, warnings []string) {
+	securityOptions = []string{"name=seccomp,profile=builtin"}
+	if level != adapter.PodSecurityUnknown {
+		securityOptions = append(securityOptions, "name=pod-security,profile="+level)
+	}
+	warnings = []string{}
+	if warning := adapter.PodSecurityWarning(namespace, level); warning != "" {
+		warnings = append(warnings, "WARNING: "+warning)
+	}
+	return securityOptions, warnings
 }

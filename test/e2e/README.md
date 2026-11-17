@@ -63,7 +63,12 @@ instances. Set `CLUSTER` to use a kind cluster with another name.
 Pod Security Standards policy sets. It labels the namespace with each level,
 as a cluster admin would, and restores the namespace's own level on exit. Containers whose
 Docker settings comply (including the create request Portainer's form sends)
-must run, and the others must be refused with Kubernetes' reason:
+must run. The others must be refused at create, before anything exists, with
+the Docker flags to change and Kubernetes' reason; a container created before
+the level was raised is refused at start. Under Talos' default (`baseline`
+enforced, `restricted` warned about), `docker run` and compose must show the
+warning. `docker info` must show each level, with what it refuses (d2k keeps
+the level for a minute, so these checks wait for it):
 
 ```sh
 test/e2e/pod-security.sh
