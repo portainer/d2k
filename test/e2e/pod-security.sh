@@ -61,6 +61,21 @@ check() {
 
 enforce() { k label namespace "$NAMESPACE" "$ENFORCE_LABEL=$1" --overwrite >/dev/null; }
 
+# info_shows LEVEL [WARNING]: docker info reports the level, and the
+# warning when given. d2k keeps the level for a minute, so wait for it.
+info_shows() {
+  local i
+  for i in $(seq 1 15); do
+    docker info >"$WORKDIR/info" 2>&1
+    if grep -q "Profile: $1" "$WORKDIR/info" && { [ -z "${2:-}" ] || grep -q "WARNING: .*$2" "$WORKDIR/info"; }; then
+      return 0
+    fi
+    sleep 5
+  done
+  grep -A1 -i "pod-security\|WARNING" "$WORKDIR/info"
+  return 1
+}
+
 # deployment_absent NAME: d2k created no Deployment for the container.
 deployment_absent() { ! k -n "$NAMESPACE" get deployment "$1" >/dev/null 2>&1; }
 
@@ -99,12 +114,19 @@ EOF
 
 echo "== pod security ($STANDALONE, $CONTEXT, namespace $NAMESPACE)"
 
-# Created before the namespace's level was raised: refused at start. The
-# namespace may already enforce a level (Talos' baseline), so allow it first.
+# The namespace may already enforce a level (Talos' baseline): allow
+# everything first, so the levels below are raised from privileged.
 enforce privileged
+
+info_privileged() { info_shows privileged && ! grep -q "WARNING: namespace" "$WORKDIR/info"; }
+check "info: docker info shows the privileged level, with no warning" info_privileged
+
+# Created before the namespace's level was raised: refused at start.
 docker create --name e2e-psa-old --privileged busybox sleep 300 >/dev/null
 
 enforce baseline
+
+check "info: docker info shows baseline, and what it refuses" info_shows baseline "enforces Pod Security \"baseline\""
 
 check "baseline: a container from Portainer's form runs" bash -c '
   curl -sf -X POST -H "Content-Type: application/json" --data @'"$WORKDIR"'/form.json \
@@ -140,6 +162,8 @@ check "baseline: a container created before the level is refused at start, and s
 docker rm -f e2e-psa-form e2e-psa-plain e2e-psa-priv e2e-psa-sysadmin e2e-psa-netraw e2e-psa-always e2e-psa-create e2e-psa-old >/dev/null 2>&1
 
 enforce restricted
+
+check "info: docker info shows restricted, and what to set" info_shows restricted "cap-drop ALL"
 
 check "restricted: a non-root container with every capability dropped runs" bash -c '
   docker run -d --name e2e-psa-nonroot --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges busybox sleep 300 >/dev/null &&

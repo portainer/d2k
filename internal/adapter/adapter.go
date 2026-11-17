@@ -81,6 +81,11 @@ type KubernetesDockerAdapter struct {
 	// skips the check: NewWithClient's fake clientset would store the pod.
 	dryRunPod func(context.Context, *corev1.Pod) ([]string, error)
 
+	// podSecurity caches the namespace's Pod Security level
+	// (PodSecurityLevel).
+	podSecurity   podSecurityLevel
+	podSecurityMu sync.Mutex
+
 	// statsHost caches HostResources for docker stats (statsHostResources).
 	statsHost   hostResources
 	statsHostMu sync.Mutex
