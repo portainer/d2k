@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -135,16 +136,37 @@ func (a *KubernetesDockerAdapter) MigrateSecurityTranslation(ctx context.Context
 }
 
 // upgradeContainerSecurity updates d's pod template when
-// upgradeSecurityTranslation changes it.
+// upgradeSecurityTranslation changes it. On a conflict it reads d again: on
+// a restart, the Deployment controller writes the status of the Deployment
+// the stop just scaled down.
 func (a *KubernetesDockerAdapter) upgradeContainerSecurity(ctx context.Context, d *appsv1.Deployment) error {
-	if !upgradeSecurityTranslation(&d.Spec.Template.Spec) {
+	deployments := a.client.AppsV1().Deployments(a.namespace)
+	changed, stale := false, false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if stale {
+			latest, err := deployments.Get(ctx, d.Name, metav1GetOptions())
+			if err != nil {
+				return err
+			}
+			*d = *latest
+		}
+		stale = true
+		if changed = upgradeSecurityTranslation(&d.Spec.Template.Spec); !changed {
+			return nil
+		}
+		updated, err := deployments.Update(ctx, d, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+		*d = *updated
 		return nil
-	}
-	updated, err := a.client.AppsV1().Deployments(a.namespace).Update(ctx, d, metav1.UpdateOptions{})
+	})
 	if err != nil {
 		return fmt.Errorf("unable to update the security settings of container %q: %w", dockerName(*d), err)
 	}
-	*d = *updated
+	if !changed {
+		return nil
+	}
 	log.Info().Str("context", "Migration").Str("container", dockerName(*d)).Msg("Updated the pod security settings of a container an earlier d2k created")
 	return nil
 }
