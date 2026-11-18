@@ -2,15 +2,19 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/portainer/d2k/internal/types"
 )
@@ -231,6 +235,42 @@ func TestStartContainerUpdatesAnEarlierReleasesSecuritySettings(t *testing.T) {
 	}
 	if sc := d.Spec.Template.Spec.SecurityContext; sc == nil || sc.SeccompProfile == nil {
 		t.Errorf("pod security context = %+v, want the RuntimeDefault seccomp profile", sc)
+	}
+}
+
+// A restart's stop scales the Deployment down, and the Deployment controller
+// then writes its status: the update of a container an earlier d2k created
+// can conflict, and is retried rather than leaving the container stopped.
+func TestRestartContainerUpdatesAnEarlierReleasesSecuritySettingsDespiteAConflict(t *testing.T) {
+	legacy := legacyDeployment("app", 1, nil)
+	legacy.Annotations[types.AnnotationDockerName] = "app"
+	legacy.Annotations[types.AnnotationRestartPolicy] = "always"
+	legacy.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"NET_RAW"}}}
+	a, client := newTestAdapter(t, legacy)
+	ctx := context.Background()
+	conflicted := false
+	client.PrependReactor("update", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		d := action.(k8stesting.UpdateAction).GetObject().(*appsv1.Deployment)
+		if conflicted || len(addedCapabilities(d.Spec.Template.Spec)) != 0 {
+			return false, nil, nil
+		}
+		conflicted = true
+		return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, d.Name, errors.New("status written"))
+	})
+
+	if err := a.RestartContainer(ctx, "app", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if !conflicted {
+		t.Fatal("the security settings were never updated")
+	}
+	d, _ := client.AppsV1().Deployments(testNamespace).Get(ctx, "app", metav1.GetOptions{})
+	if added := addedCapabilities(d.Spec.Template.Spec); len(added) != 0 {
+		t.Errorf("capabilities added = %v, want none", added)
+	}
+	if *d.Spec.Replicas != 1 {
+		t.Errorf("replicas = %d after the restart, want 1", *d.Spec.Replicas)
 	}
 }
 
